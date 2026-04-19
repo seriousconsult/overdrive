@@ -42,7 +42,7 @@ def check_port(ip, port, protocol='tcp'):
 def run_audit():
     # Get Public IP to see what the 'World' sees
     try:
-        public_ip = requests.get('https://api4.ipify.org', timeout=5).text
+        public_ip = requests.get('https://api4.ipify.org', timeout=15).text
     except:
         public_ip = "127.0.0.1"
 

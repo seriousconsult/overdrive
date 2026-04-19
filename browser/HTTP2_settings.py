@@ -2,17 +2,19 @@
 
 
 '''
-When you connect via HTTP/2, your client sends a SETTINGS frame and a WINDOW_UPDATE frame. 
+This is layer 7. Note that TCP fingerprinting may also occur and that is layer 2.
+
+When you connect via HTTP2, your client sends a SETTINGS frame and a WINDOW_UPDATE frame. 
 The specific values and the order in which they are sent are unique to different browsers.
 These are a fingerprint. So if the site is intended for browsers and your fingerprint is
 H2 Fingerprint: 1:4096;2:0;4:65535;5:16384;3:100;6:65536|16777216|0|m,a,s,p that matches 
-Python h2 / httpx libraries not chrome. So it is obvious you are not an intended user. 
+Python h2 / httpx libraries not chrome (Ex. 1:65536;3:1000;4:6291456;6:262144|15663105|0|m,a,s,p). 
+So it is obvious you are not an intended user. 
 
-While this doesn't strictly detect the VPN "tunnel," it detects the software being used over the VPN.
+While this doesn't detect the VPN "tunnel," it detects the software being used over the VPN.
 Most people using a VPN for privacy use a standard browser. However, people using VPNs for automated
- tasks (botting, scraping, account creation) often use Python or specialized headless browsers. 
- These tools have very different HTTP/2 signatures than a real human's browser.
-
+tasks (botting, scraping, account creation) often use Python or headless browsers. 
+These tools have very different HTTP2 signatures than a typical human's browser.
 
 1. Settings (The "Signature")
     HEADER_TABLE_SIZE: How much memory the server should use to compress headers.
@@ -20,7 +22,7 @@ Most people using a VPN for privacy use a standard browser. However, people usin
     INITIAL_WINDOW_SIZE: How much data the client can receive before sending an acknowledgment.
     MAX_FRAME_SIZE: The largest frame the client is willing to receive.
 2. Window Update
-    The value 12517377 is a massive tell. In HTTP/2, the flow control window size is often set to a
+    The value 12517377 is a massive tell. In HTTP2, the flow control window size is often set to a
        specific number by different network libraries. If your "Browser" sends a window update that
          matches a known Python-httpx or Go-http2 value, you get flagged.
 3. Pseudo-Header Order

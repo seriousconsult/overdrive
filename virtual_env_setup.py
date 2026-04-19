@@ -21,7 +21,7 @@ else:
 # 3. Install packages using the venv's python
 print("Installing packages...")
 # Fix: Removed the extra ] in the httpx string
-subprocess.check_call([python_exe, "-m", "pip", "install", "requests", "selenium", "httpx[http2]"])
+subprocess.check_call([python_exe, "-m", "pip", "install", "requests", "selenium", "httpx[http2]", "scapy"])
 
 print("\nSuccess! Virtual environment is ready.")
 print(f"Activate it with: source {venv_dir}/bin/activate")
