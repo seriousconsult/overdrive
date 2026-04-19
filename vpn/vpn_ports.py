@@ -9,59 +9,64 @@ Some aggressive anti-VPN systems will perform a "scan" on your public IP to see 
     UDP 1194 (OpenVPN)
     UDP 51820 (WireGuard)
     TCP 443 (Used by obfuscated VPNs)
+
+TODO: since WSL is a VM, a VPN running on the host and which ports it is using won't show easily. 
+However there are ways around this.   
 '''
 
-
-#!/usr/bin/env python3
 import socket
+import requests
 
 def check_port(ip, port, protocol='tcp'):
-    """Attempts to connect to a specific port to see if it's open."""
     if protocol == 'tcp':
-        # TCP check is straightforward: try to connect
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
         result = sock.connect_ex((ip, port))
         sock.close()
         return result == 0
     else:
-        # UDP is "connectionless," making it harder to check. 
-        # We send an empty packet and see if it's rejected.
+        # UDP is tricky. Realistically, we can only detect if it's CLOSED
+        # via an ICMP 'Unreachable' message. If it's silent, it's 'Open|Filtered'.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(2)
+        sock.settimeout(1)
         try:
-            sock.sendto(b'', (ip, port))
-            # If we don't get an 'ICMP Port Unreachable' error, 
-            # the port *might* be open or filtered.
+            sock.sendto(b'\x00', (ip, port))
             data, addr = sock.recvfrom(1024)
-            return True
+            return True # Got a response! Definitely open.
         except socket.timeout:
-            # UDP ports often just 'timeout' when open/filtered
-            return True 
+            # This is the 'ambiguous' state for UDP
+            return "UNKNOWN (Silent)" 
         except Exception:
             return False
 
-def run_vpn_port_audit():
-    # '127.0.0.1' checks your internal listener
-    # You can also use your Public IP here to see what the world sees
-    target = "127.0.0.1" 
-    
+def run_audit():
+    # Get Public IP to see what the 'World' sees
+    try:
+        public_ip = requests.get('https://api4.ipify.org', timeout=5).text
+    except:
+        public_ip = "127.0.0.1"
+
     vpn_ports = [
         (1194, 'udp', 'OpenVPN'),
         (51820, 'udp', 'WireGuard'),
-        (443, 'tcp', 'SSL/Obfuscated VPN'),
-        (500, 'udp', 'IPsec/IKEv2'),
+        (443, 'tcp', 'HTTPS/VPN'),
+        (500, 'udp', 'IPsec'),
         (4500, 'udp', 'IPsec NAT-T')
     ]
 
-    print(f"🔍 Auditing {target} for VPN signatures...\n")
-    print(f"{'PORT':<10} {'PROT':<10} {'SERVICE':<20} {'STATUS'}")
-    print("-" * 55)
+    print(f"Target: {public_ip}")
+    print(f"{'PORT':<8} {'PROTO':<8} {'SERVICE':<15} {'STATUS'}")
+    print("-" * 50)
 
     for port, proto, name in vpn_ports:
-        is_open = check_port(target, port, proto)
-        status = "🔴 OPEN (Detected)" if is_open else "🟢 CLOSED"
-        print(f"{port:<10} {proto:<10} {name:<20} {status}")
+        res = check_port(public_ip, port, proto)
+        if res is True:
+            status = "🔴 OPEN"
+        elif res == "UNKNOWN (Silent)":
+            status = "🟡 SILENT/FILTERED"
+        else:
+            status = "🟢 CLOSED"
+        print(f"{port:<8} {proto:<8} {name:<15} {status}")
 
 if __name__ == "__main__":
-    run_vpn_port_audit()
+    run_audit()

@@ -3,27 +3,26 @@
 
 '''
 VPN servers often use specific versions of OpenSSL or other libraries. 
-A server can look at the JA3 hash of your SSL handshake.
+A server can look at the  hash of your SSL handshake (JA3).
 If that hash matches a known "NordVPN Exit Node" or "OpenVPN Client" signature,
-they know you aren't just a regular person on Chrome.
+they know you aren't just a typial person on Chrome and are using a VPN.
 
 
 Since JA3 hashes change slightly when libraries (like openssl) update, one way to do this is to keep 
-an eye on JA3 Fingerprint Databases. Xheck these resources:
-    https://www.google.com/search?q=JA3er.com: A massive community-driven database of hashes.
-    Abuse.ch: Often lists JA3 hashes associated with malware or known botnets/VPN nodes.
+an eye on JA3 Fingerprint Databases, such as:
+https://www.google.com/search?q=JA3er.com: A massive community-driven database of hashes.
+Abuse.ch: Often lists JA3 hashes associated with malware or known botnets/VPN nodes.
 
-
-Many high-end VPNs now use TLS Grease. This adds random data to the handshake so that your JA3 hash 
+Many high-end VPNs use TLS Grease. This adds random data to the handshake so that your JA3 hash 
 changes every single time you connect. If you run your script twice and get two different hashes,
- your VPN is using "Grease" to try to defeat fingerprinting.   
+ your VPN is using "Grease" to try to defeat fingerprinting matches to a specific fingerprint.   
 
 
  TODO:JA4 fingerprint
  TODO:PeetPrint fingerprint
  TODO:Akamai fingerprint
  TODO:TLS info
-TLS version used
+ TLS version used
 Protocols
 Supported versions
 Curves
@@ -58,7 +57,7 @@ def detect_grease(ja3_raw):
     return list(set(found_grease))
 
 def run_deep_analysis():
-    # Database of known JA3 hashes
+    # Database of known JA3 hashes is available, these are a few popular ones.
     JA3_DB = {
         "771,4866-4865-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53": 
             "Python (Requests / Urllib3) - Standard Linux/WSL",
@@ -78,7 +77,7 @@ def run_deep_analysis():
 
     url = "https://tls.peet.ws/api/all"
     
-    print("🚀 Starting Deep TLS Fingerprint Analysis...")
+    print("Starting Deep TLS Fingerprint Analysis...")
     
     try:
         response = requests.get(url, timeout=10)
@@ -101,7 +100,7 @@ def run_deep_analysis():
 
         # 3. GREASE Analysis
         if grease_values:
-            print(f"GREASE STATUS:  🌈 DETECTED ({len(grease_values)} values)")
+            print(f"GREASE STATUS:  DETECTED ({len(grease_values)} values)")
             print(f"                Handshake looks like a modern Browser.")
         else:
             print(f"GREASE STATUS:  ❌ NOT DETECTED")

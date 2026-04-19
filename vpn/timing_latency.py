@@ -7,18 +7,13 @@ but your latency to a New York server should be high (~70-100ms).
 If you are "in London" but your ping to a New York server is 5ms, the website knows your geographical
  location is faked.
 
-Starting Geo-Latency Analysis against google.co.uk...
-Trying to fetch your IP data from ipapi.co...
+------
 Your Reported Location: Buenos Aires, Argentina (IP: 84.252.114.2)
-Could not locate google.co.uk via API. Using London defaults for testing.
-
---- Analysis ---
 Map Distance (based on IP):   11128 km
 Physics Distance (based on RTT): 2866 km
 
 🚨 LEAK DETECTED!
 Your ping is 28.667ms. It is physically impossible to be 11128km away.
-
 '''
 
 import requests
@@ -26,6 +21,8 @@ import subprocess
 import re
 import math
 import sys
+
+
 
 def get_my_coords():
     """Fetches location using multiple providers for redundancy."""
@@ -38,7 +35,7 @@ def get_my_coords():
     
     for url in providers:
         try:
-            print(f"📡 Trying to fetch your IP data from {url.split('/')[2]}...")
+            print(f"Trying to fetch your IP data from {url.split('/')[2]}...")
             response = requests.get(url, timeout=5)
             data = response.json()
             
@@ -58,6 +55,7 @@ def get_my_coords():
             continue
     return None
 
+
 def get_host_coords(hostname):
     """Fetches the location of the target host."""
     try:
@@ -70,6 +68,7 @@ def get_host_coords(hostname):
         print(f"❌ Target lookup failed: {e}")
         return None
 
+
 def haversine(lat1, lon1, lat2, lon2):
     """Haversine formula to calculate distance in km."""
     R = 6371 
@@ -79,20 +78,20 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def run_test(target_host="google.co.uk"):
-    print(f"🚀 Starting Geo-Latency Analysis against {target_host}...")
+    print(f"Starting Geo-Latency Analysis against {target_host}...")
     
     me = get_my_coords()
     if not me:
         print("❌ CRITICAL ERROR: Could not determine your location from any provider.")
-        print("💡 Tip: Check if your VPN 'Kill Switch' is blocking unencrypted HTTP/HTTPS requests.")
+        print("Tip: Check if your VPN 'Kill Switch' is blocking unencrypted HTTP/HTTPS requests.")
         return
 
-    print(f"📍 Your Reported Location: {me['city']}, {me['country']} (IP: {me['ip']})")
+    print(f"Your Reported Location: {me['city']}, {me['country']} (IP: {me['ip']})")
 
     target = get_host_coords(target_host)
     if not target or target['lat'] is None:
         # Fallback for manual coordinate entry if target API fails
-        print(f"⚠️ Could not locate {target_host} via API. Using London defaults for testing.")
+        print(f"⚠️ Could not locate {target_host} via API. Using London defaults.")
         target = {"lat": 51.5074, "lon": -0.1278, "ip": "Unknown"}
 
     geo_dist = haversine(me['lat'], me['lon'], target['lat'], target['lon'])
@@ -111,10 +110,10 @@ def run_test(target_host="google.co.uk"):
         
         # If the physics distance is less than half the map distance, it's a leak
         if network_dist_est < (geo_dist * 0.6) and geo_dist > 500:
-            print("\n🚨 LEAK DETECTED!")
+            print("\n🚨 LEAK DETECTED")
             print(f"Your ping is {avg_rtt}ms. It is physically impossible to be {int(geo_dist)}km away.")
         else:
-            print("\n🟢 VERIFIED: Latency is consistent with reported location.")
+            print("\n🟢 VERIFIED: Latency is generally consistent with reported location.")
 
     except Exception as e:
         print(f"Ping failed: {e}")
