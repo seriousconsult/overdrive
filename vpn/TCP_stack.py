@@ -25,25 +25,65 @@ TCP SYN stack inspection + comparison vs actual OS environment.
 - Detects the actual runtime OS/kernel environment (Windows/Linux/WSL)
 - Compares: captured SYN classification vs actual OS expectation
 
-Run:
-  python3 TCP_parser.py
+"""
+#!/usr/bin/env python3
+"""
+TCP SYN stack inspection + comparison vs actual OS environment (WSL focused).
+
+Run (note: scapy capture needs sudo):
+  sudo /mnt/c/code/overdrive/virtual_env/bin/python /mnt/c/code/overdrive/vpn/TCP_stack.py
+
+This version:
+- Captures outgoing TCP SYN packets using AsyncSniffer
+- Generates IPv4-only TCP SYN traffic using a Python subprocess (NO curl)
+- Tries each Scapy-discovered interface until it captures packets
 """
 
 import os
 import platform
-from scapy.all import rdpcap, TCP, IP
+import subprocess
+from collections import Counter
+import time
 
-PCAP_PATH = "wsl_syn.pcap"
+from scapy.all import (
+    sniff, TCP, IP, conf, L3RawSocket, get_if_list, AsyncSniffer
+)
+
+# --- CONFIGURATION ---
+conf.L3socket = L3RawSocket
+
+TARGET_HOST = "google.com"   # IPv4-only connect will be attempted
+TARGET_PORT = 443            # change to 80/443/etc if desired
+TRAFFIC_SUBPROCESS_TIMEOUT = 10
+CAPTURE_PACKET_COUNT = 3
+CAPTURE_TIMEOUT = 10
+
+
+def get_linux_distro_info():
+    if platform.system() != "Linux":
+        return {"error": "System is not Linux", "os": platform.system()}
+
+    try:
+        result = subprocess.run(
+            ["cat", "/etc/os-release"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                data[key] = value.strip('"')
+        return data
+    except subprocess.CalledProcessError as e:
+        return {"error": f"Failed to retrieve OS info: {e}"}
+    except FileNotFoundError:
+        return {"error": "/etc/os-release not found."}
 
 
 def detect_runtime_os():
-    """
-    Returns a tuple: (runtime_label, expected_tcp_stack_label)
-    Where expected_tcp_stack_label is the heuristic 'what you'd expect' for SYN.
-    """
-    sysname = platform.system().lower()  # 'linux' or 'windows' etc.
-
-    # Detect WSL
+    sysname = platform.system().lower()
     is_wsl = False
     try:
         if os.environ.get("WSL_DISTRO_NAME"):
@@ -59,208 +99,195 @@ def detect_runtime_os():
         return ("Windows", "Windows-like")
     if sysname == "linux" and is_wsl:
         return ("Linux (WSL)", "Linux-like")
-    if sysname == "linux":
-        return ("Linux", "Linux-like")
-    return (platform.system(), "Unknown")
-
-
-def classify_linux_vs_windows(ip_ttl, tcp_win, opts_list):
-    """
-    Heuristic classifier based on:
-    - TTL bands (<=70 Linux-like, >=100 Windows-like)
-    - presence of common TCP options (MSS, WScale, Timestamp, SAckOK/SACK)
-
-    Returns dict with label/confidence/scores/signals.
-    """
-    opt_names = []
-    for item in (opts_list or []):
-        # scapy options look like: ('MSS', 1338), ('Timestamp', (t1,t2)), ('WScale', 7)...
-        if isinstance(item, tuple) and len(item) >= 1:
-            opt_names.append(str(item[0]))
-        else:
-            opt_names.append(str(item))
-
-    has_mss = "MSS" in opt_names
-    has_ts = "Timestamp" in opt_names
-    has_sack = "SAckOK" in opt_names or "SACK" in opt_names
-    has_wscale = "WScale" in opt_names
-
-    linux_ttl = (ip_ttl is not None) and (ip_ttl <= 70)
-    windows_ttl = (ip_ttl is not None) and (ip_ttl >= 100)
-
-    linux_score = 0
-    windows_score = 0
-
-    if linux_ttl:
-        linux_score += 3
-    if windows_ttl:
-        windows_score += 3
-
-    if has_wscale:
-        linux_score += 1
-        windows_score += 1
-    if has_ts:
-        linux_score += 1
-        windows_score += 1
-    if has_sack:
-        linux_score += 1
-        windows_score += 1
-
-    if has_mss:
-        linux_score += 1
-        windows_score += 1
-
-    # Keep WIN weak weight (it varies a lot).
-    if tcp_win is not None and tcp_win <= 70000:
-        linux_score += 1
-
-    if linux_score > windows_score + 1:
-        label = "Linux-like TCP stack (heuristic)"
-        confidence = "medium-high"
-    elif windows_score > linux_score + 1:
-        label = "Windows-like TCP stack (heuristic)"
-        confidence = "medium-high"
-    else:
-        label = "Uncertain TCP stack (heuristic)"
-        confidence = "low"
-
-    signals = []
-    if linux_ttl:
-        signals.append("TTL<=70 suggests Linux-like")
-    if windows_ttl:
-        signals.append("TTL>=100 suggests Windows-like")
-    if has_mss:
-        signals.append("MSS present")
-    if has_wscale:
-        signals.append("Window Scale present")
-    if has_ts:
-        signals.append("Timestamps present")
-    if has_sack:
-        signals.append("SACK/SAckOK present")
-
-    return {
-        "label": label,
-        "confidence": confidence,
-        "linux_score": linux_score,
-        "windows_score": windows_score,
-        "signals": signals,
-    }
+    return ("Linux", "Linux-like")
 
 
 def extract_syn_features(pkt):
-    """
-    Extracts features for an outgoing SYN packet:
-    TTL, window, MSS, and option names list
-    """
     ip = pkt[IP]
     tcp = pkt[TCP]
-
-    ip_ttl = int(ip.ttl) if hasattr(ip, "ttl") else None
-    tcp_win = int(tcp.window) if hasattr(tcp, "window") else None
     opts = tcp.options or []
-
-    mss = None
-    for name, val in opts:
-        if name == "MSS":
-            mss = val
+    mss = next((val for name, val in opts if name == "MSS"), None)
 
     return {
         "ip_src": ip.src,
         "ip_dst": ip.dst,
-        "ip_ttl": ip_ttl,
-        "tcp_win": tcp_win,
+        "ip_ttl": int(ip.ttl),
+        "tcp_win": int(tcp.window),
         "mss": mss,
         "opts": opts,
     }
 
 
+def classify_linux_vs_windows(ip_ttl, tcp_win, opts_list):
+    opt_names = [str(item[0]) if isinstance(item, tuple) else str(item) for item in (opts_list or [])]
+
+    linux_score = 0
+    windows_score = 0
+
+    if ip_ttl <= 70:
+        linux_score += 3
+    if ip_ttl >= 100:
+        windows_score += 3
+
+    for opt in ["WScale", "Timestamp", "SAckOK", "MSS"]:
+        if opt in opt_names:
+            linux_score += 1
+            windows_score += 1
+
+    if tcp_win <= 70000:
+        linux_score += 1
+
+    if linux_score > windows_score + 1:
+        return "Linux-like", "medium-high", linux_score, windows_score
+    if windows_score > linux_score + 1:
+        return "Windows-like", "medium-high", linux_score, windows_score
+    return "Uncertain", "low", linux_score, windows_score
+
+
+def traffic_subprocess_ipv4_connect(host: str, port: int):
+    """
+    Generates outbound IPv4 TCP SYNs by attempting a TCP connect.
+    Implemented as a subprocess to match your requirement.
+    """
+    # Force IPv4 (AF_INET), connect, then close immediately.
+    # We keep it quick so the capture window is focused.
+    traffic_code = r"""
+import socket, sys
+host = sys.argv[1]
+port = int(sys.argv[2])
+addrinfos = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+# try first IPv4 address
+af, socktype, proto, canonname, sa = addrinfos[0]
+s = socket.socket(af, socktype, proto)
+s.settimeout(3.0)
+try:
+    s.connect(sa)
+except Exception:
+    pass
+finally:
+    try:
+        s.close()
+    except Exception:
+        pass
+"""
+    cmd = [
+        "python3",
+        "-c",
+        traffic_code,
+        host,
+        str(port),
+    ]
+    subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=TRAFFIC_SUBPROCESS_TIMEOUT,
+        check=False,
+    )
+
+
+def capture_live_syn_inline_subprocess(packet_count=3, timeout=30):
+    """
+    Captures outgoing TCP SYN packets (IPv4-only) while generating traffic via a subprocess.
+    Tries each interface until packets are captured.
+    """
+    # Required: standard working expression + IPv4 restriction
+    syn_filter = "ip and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0"
+
+    ifaces = get_if_list() or []
+    print(f"[*] Using filter: {syn_filter}")
+    print(f"[*] Interfaces discovered by scapy: {ifaces}")
+
+    if not ifaces:
+        print("[-] Error: no interfaces discovered via scapy.get_if_list().")
+        return []
+
+    # Prefer non-loopback first
+    candidates = [i for i in ifaces if i != "lo"]
+    if "lo" in ifaces:
+        candidates.append("lo")
+
+    print(f"[*] Interface attempt order: {candidates}")
+
+    for iface in candidates:
+        print(f"[*] Starting sniffer on iface='{iface}' ...")
+        sniffer = AsyncSniffer(
+            iface=iface,
+            filter=syn_filter,
+            store=True,
+        )
+        sniffer.start()
+
+        # Give the sniffer a moment to arm before traffic generation
+        time.sleep(0.3)
+
+        print(f"[*] Generating IPv4 TCP traffic to {TARGET_HOST}:{TARGET_PORT} (subprocess) ...")
+        traffic_subprocess_ipv4_connect(TARGET_HOST, TARGET_PORT)
+
+        # Allow a small grace period for packets to arrive
+        time.sleep(0.5)
+
+        # Stop sniffer and collect results
+        sniffer.stop()
+
+        pkts = sniffer.results or []
+        # Optionally trim to expected count
+        if packet_count and len(pkts) > packet_count:
+            pkts = pkts[:packet_count]
+
+        print(f"    -> captured {len(pkts)} packet(s) on iface='{iface}'")
+        if pkts:
+            return pkts
+
+    return []
+
+
 def main():
     runtime_label, expected_stack = detect_runtime_os()
+    print("=== TCP Stack Inspection (Live WSL) ===")
+    print(f"Runtime: {runtime_label} | Expected: {expected_stack}\n")
 
-    print("============================================================")
-    print("TCP SYN TCP-Stack Inspection (single script)")
-    print("============================================================")
-    print(f"Runtime environment: {runtime_label}")
-    print(f"Expected TCP stack:  {expected_stack}")
-    print(f"PCAP file:           {PCAP_PATH}")
-    print("------------------------------------------------------------")
+    pkts = capture_live_syn_inline_subprocess(
+        packet_count=CAPTURE_PACKET_COUNT,
+        timeout=CAPTURE_TIMEOUT,
+    )
 
-    pkts = rdpcap(PCAP_PATH)
-    print(f"Loaded packets: {len(pkts)}")
-    print("------------------------------------------------------------")
+    os_info = get_linux_distro_info()
+    if "error" in os_info:
+        print(f"Alert: {os_info['error']}")
+    else:
+        print(f"Successfully identified OS: {os_info.get('PRETTY_NAME')}")
 
-    syn_results = []
-
-    for i, p in enumerate(pkts, 1):
-        if IP not in p or TCP not in p:
-            continue
-        tcp = p[TCP]
-        flags = str(tcp.flags)
-
-        # Only outgoing SYN (not SYN-ACK)
-        if flags != "S":
-            continue
-
-        feats = extract_syn_features(p)
-        cls = classify_linux_vs_windows(
-            ip_ttl=feats["ip_ttl"],
-            tcp_win=feats["tcp_win"],
-            opts_list=feats["opts"],
-        )
-
-        syn_results.append((feats, cls))
-
-        print(f"\n--- Outgoing SYN #{len(syn_results)} (packet idx {i}) ---")
-        print(f"{feats['ip_src']} -> {feats['ip_dst']}")
-        print(f"TTL:      {feats['ip_ttl']}")
-        print(f"WIN:      {feats['tcp_win']}")
-        print(f"MSS:      {feats['mss']}")
-        print(f"Options:  {feats['opts']}")
-        print("\nHeuristic TCP-stack classification:")
-        print(f"  Label:      {cls['label']}")
-        print(f"  Confidence: {cls['confidence']}")
-        print(f"  Scores:     Linux={cls['linux_score']} Windows={cls['windows_score']}")
-        print("  Signals:")
-        for s in cls["signals"]:
-            print(f"   - {s}")
-
-    if not syn_results:
-        print("\nNo outgoing SYN packets were found in the PCAP.")
+    if not pkts:
+        print("[-] Error: No packets captured.")
+        print("    Suggestions:")
+        print("    - Change TARGET_HOST / TARGET_PORT (e.g., 1.1.1.1:443 or example.com:80).")
+        print("    - If you still see 0 packets on all interfaces, verify with tcpdump ground truth.")
         return
 
-    # Decide overall captured-stack label from majority
-    linux_like = sum(1 for _, cls in syn_results if "Linux-like" in cls["label"])
-    windows_like = sum(1 for _, cls in syn_results if "Windows-like" in cls["label"])
-    uncertain = len(syn_results) - linux_like - windows_like
+    syn_results = []
+    for p in pkts:
+        if IP in p and TCP in p:
+            feats = extract_syn_features(p)
+            label, conf_lvl, l_score, w_score = classify_linux_vs_windows(
+                feats["ip_ttl"], feats["tcp_win"], feats["opts"]
+            )
+            syn_results.append(label)
 
-    if linux_like > windows_like:
-        captured_stack = "Linux-like"
-    elif windows_like > linux_like:
-        captured_stack = "Windows-like"
-    else:
-        captured_stack = "Uncertain"
+            print(f"\n[SYN] {feats['ip_src']} -> {feats['ip_dst']}")
+            print(f"  TTL: {feats['ip_ttl']} | Win: {feats['tcp_win']} | MSS: {feats['mss']}")
+            print(f"  OS Label: {label} | scores Linux={l_score} Windows={w_score} | conf={conf_lvl}")
 
-    print("\n------------------------------------------------------------")
-    print("CONSENSUS RESULT")
-    print("------------------------------------------------------------")
-    print(f"Captured SYN consensus: {captured_stack}")
-    print(f"Expected TCP stack:     {expected_stack}")
+    if syn_results:
+        counts = Counter(syn_results)
+        consensus, _ = counts.most_common(1)[0]
 
-    match = False
-    if captured_stack == "Linux-like" and expected_stack.startswith("Linux"):
-        match = True
-    if captured_stack == "Windows-like" and expected_stack.startswith("Windows"):
-        match = True
-
-    if match:
-        print("Result: ✅ Captured outgoing SYN looks consistent with the runtime OS/kernel.")
-    else:
-        print("Result: 🚨 MISMATCH (heuristic).")
-        print("Hint: This can happen due to heuristic thresholds, different capture points,")
-        print("      or because path/NAT/VPN changes TTL/hop behavior. MSS/options are the more actionable signals.")
-
-    print("\nDone.")
-    print("============================================================")
+        print(f"\n--- CONSENSUS ---")
+        print(f"Captured: {consensus} | Expected: {expected_stack}")
+        if consensus.split("-")[0] == expected_stack.split("-")[0]:
+            print("Result: ✅ MATCH")
+        else:
+            print("Result: 🚨 MISMATCH")
 
 
 if __name__ == "__main__":
