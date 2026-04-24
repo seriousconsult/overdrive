@@ -41,8 +41,7 @@ def run_comprehensive_leak_test():
             print("\n🚨 ALERT: IPv6 is active. Ensure this matches your VPN, not your home ISP.")
     except Exception:
         # If this fails, it's actually GOOD news for your privacy
-        print("🛡️  No IPv6 detected or connection timed out.")
-        print("   (This means you are likely not leaking via IPv6.)")
+        print("No IPv6 detected or connection timed out. (likely not leaking via IPv6.)")
 
 if __name__ == "__main__":
     run_comprehensive_leak_test()
