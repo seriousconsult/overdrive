@@ -17,8 +17,7 @@ PROVIDERS = [
     },
     {
          "name": "ipapi.is",
-         "url": "https://api.ipapi.is",
-         "params": {"q": "{ip}"},
+         "url": "https://api.ipapi.is/json/",
     },
 ]
 
@@ -36,18 +35,43 @@ def normalize_ip_fields(provider: str, raw: Dict[str, Any]) -> Dict[str, Any]:
     Normalize common fields across providers.
     Missing fields are kept as None so we can compare easily.
     """
-    out = {
-        "provider": provider,
-        "ip": raw.get("ip") or raw.get("query"),
-        "city": raw.get("city") or raw.get("cityName"),
-        "country": raw.get("country_name") or raw.get("country"),
-        "region": raw.get("region") or raw.get("regionName"),
-        "timezone": raw.get("timezone"),
-        "lat": raw.get("latitude") or raw.get("lat"),
-        "lon": raw.get("longitude") or raw.get("lon"),
-        "asn": raw.get("asn") or raw.get("as"),
-        "org": raw.get("org") or raw.get("isp") or raw.get("org"),
-    }
+    # ipapi.is returns asn as an object, country as 2-letter code
+    asn_raw = raw.get("asn")
+    asn_val = None
+    org_from_asn = None
+    if isinstance(asn_raw, dict):
+        asn_val = asn_raw.get("asn")
+        org_from_asn = asn_raw.get("org")
+    
+    # ipapi.is specific field mapping - data is nested under location/company
+    if provider == "ipapi.is":
+        loc = raw.get("location", {})
+        comp = raw.get("company", {})
+        out = {
+            "provider": provider,
+            "ip": raw.get("ip"),
+            "city": loc.get("city"),
+            "region": loc.get("state"),
+            "country": loc.get("country"),
+            "timezone": loc.get("timezone"),
+            "lat": loc.get("latitude"),
+            "lon": loc.get("longitude"),
+            "asn": asn_val,
+            "org": comp.get("name") or org_from_asn,
+        }
+    else:
+        out = {
+            "provider": provider,
+            "ip": raw.get("ip") or raw.get("query"),
+            "city": raw.get("city") or raw.get("cityName"),
+            "country": raw.get("country_name") or raw.get("country"),
+            "region": raw.get("region") or raw.get("regionName"),
+            "timezone": raw.get("timezone"),
+            "lat": raw.get("latitude") or raw.get("lat"),
+            "lon": raw.get("longitude") or raw.get("lon"),
+            "asn": asn_val or raw.get("as"),
+            "org": raw.get("org") or raw.get("isp") or org_from_asn,
+        }
     return out
 
 

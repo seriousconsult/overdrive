@@ -4,10 +4,7 @@
 This script is a WebRTC Leak Tester. It uses Selenium (a browser automation tool) 
 to see if your real local or public IP address is "leaking" through your browser's 
 WebRTC protocol, even if you are using a VPN or Proxy.
-'''
 
-
-"""
 WebRTC Leak Tester using Selenium + browserleaks.com/webrtc.
 
 - Forces headless Chrome + WSL-safe flags
@@ -25,10 +22,7 @@ What it does:
     3) If still missing, scan page text for IPv4-like strings
 - Prints diagnostics so you can distinguish:
     - "No leak data present" vs "JS didn’t populate / selectors wrong"
-"""
-#!/usr/bin/env python3
 
-'''
 This script is a WebRTC Leak Tester. It uses Selenium (a browser automation tool)
 to see if your real local or public IP address is "leaking" through your browser's
 WebRTC protocol, even if you are using a VPN or Proxy.
