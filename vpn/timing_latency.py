@@ -1,108 +1,151 @@
 #!/usr/bin/env python3
- 
-'''
-VPNs add a "hop" to your connection. 
-If you are in New York and connected to a London VPN, your latency to a London server should be very low (~2-10ms), 
-but your latency to a New York server should be high (~70-100ms).
-If you are "in London" but your ping to a New York server is 5ms, the website knows your geographical
- location is faked.
-
-------
-Your Reported Location: Buenos Aires, Argentina (IP: 84.252.114.2)
-Map Distance (based on IP):   11128 km
-Physics Distance (based on RTT): 2866 km
-🚨 LEAK DETECTED!
-Your ping is 28.667ms. It is physically impossible to be 11128km away.
-#!/usr/bin/env python3
-
+"""
 Geo-Latency Consistency Check (heuristic)
 
-Goal:
-- Compare geolocation “distance” (from IP) vs observed network timing.
-- If ICMP ping is blocked (0% received), print a clear statement and fall back
-  to TCP connect timing to :443 (weaker heuristic).
+Compare geolocation distance (from IP) vs observed network timing (ping or TCP connect).
+If ICMP is blocked, falls back to TCP connect to :443.
 
-Note:
-- This is NOT definitive VPN leak detection. Routing, congestion, and geolocation
-  inaccuracy can all distort results.
-'''
+SCORE scale: **1** = latency matches geographic distance (consistent). **5** = mismatch
+(impossible RTT vs claimed distance, or very long “scenic” route vs distance).
+This is NOT definitive VPN detection.
 
-#!/usr/bin/env python3
+Exit codes: 0 on success (SCORE printed), 1 on failure so batch runners do not treat errors as OK.
+"""
 
-import subprocess
-import re
-import time
-import socket
-import requests
 import math
+import re
+import socket
+import subprocess
+import sys
+import time
+
+import requests
+
 
 def calculate_latency_score(distance_km, rtt_ms):
+    """
+    1 = good match (RTT plausible for distance). 5 = strong mismatch.
+    """
     if rtt_ms <= 0 or distance_km <= 0:
         return 0
-    
-    # 1. The Physics Limit (Speed of light in fiber is ~200,000 km/s)
-    # Round trip distance is distance * 2. 
-    # Minimum RTT = (Distance * 2) / 200
+
     min_possible_rtt = (distance_km * 2) / 200
-    
-    # 2. Compare Actual vs Physics
     ratio = rtt_ms / min_possible_rtt
-    
-    if rtt_ms < (min_possible_rtt * 0.9): # 10% buffer for slight measurement errors
-        return 1  # Impossible speed: Location is definitely spoofed
-    elif ratio < 1.8:
-        return 5  # Very consistent: Physical location matches IP
-    elif ratio < 3.0:
-        return 4  # Likely match: Standard routing delays
-    elif ratio < 5.0:
-        return 3  # Inconsistent: High lag or indirect routing
-    elif ratio < 8.0:
-        return 2  # Probable mismatch: Data is taking a very long 'scenic route'
-    else:
-        return 1  # Certain mismatch: IP location is faked
+
+    # Too fast for claimed distance → timing contradicts geo (often CDN / wrong geo / “fake” far IP)
+    if rtt_ms < (min_possible_rtt * 0.9):
+        return 5
+    if ratio < 1.8:
+        return 1
+    if ratio < 3.0:
+        return 2
+    if ratio < 5.0:
+        return 3
+    if ratio < 8.0:
+        return 4
+    return 5
 
 
 def get_my_coords():
-    providers = ["https://ipapi.co/json/", "https://ip-api.com/json/"]
-    for url in providers:
+    endpoints = [
+        "https://ipapi.co/json/",
+        "http://ip-api.com/json/",
+    ]
+    for url in endpoints:
         try:
-            resp = requests.get(url, timeout=5)
+            resp = requests.get(url, timeout=8)
             data = resp.json()
+            if data.get("status") == "fail" or data.get("error"):
+                continue
             lat = data.get("latitude") or data.get("lat")
             lon = data.get("longitude") or data.get("lon")
-            if lat and lon:
+            if lat is not None and lon is not None:
                 return {
-                    "lat": float(lat), "lon": float(lon),
+                    "lat": float(lat),
+                    "lon": float(lon),
                     "city": data.get("city") or "",
                     "country": data.get("country_name") or data.get("country") or "",
-                    "ip": data.get("ip") or data.get("query") or ""
+                    "ip": data.get("ip") or data.get("query") or "",
                 }
-        except: continue
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            continue
     return None
 
 
 def get_host_coords(hostname):
     try:
         host_ip = socket.gethostbyname(hostname)
-        resp = requests.get(f"https://ipapi.co/{host_ip}/json/", timeout=5)
-        data = resp.json()
-        return {"lat": float(data["latitude"]), "lon": float(data["longitude"]), "ip": host_ip}
-    except: return None
+    except OSError:
+        return None
+
+    urls = (
+        f"https://ipapi.co/{host_ip}/json/",
+        f"http://ip-api.com/json/{host_ip}",
+    )
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=8)
+            data = resp.json()
+            if data.get("status") == "fail" or data.get("error"):
+                continue
+            lat = data.get("latitude") or data.get("lat")
+            lon = data.get("longitude") or data.get("lon")
+            if lat is not None and lon is not None:
+                return {
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "ip": host_ip,
+                }
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            continue
+    return None
 
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0
+    r = 6371.0
     dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(
+        math.radians(lat2)
+    ) * math.sin(dlon / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 def ping_result(host):
+    if sys.platform == "win32":
+        cmd = ["ping", "-n", "4", "-w", "2000", host]
+    else:
+        cmd = ["ping", "-c", "4", "-W", "2", host]
+
     try:
-        proc = subprocess.run(["ping", "-c", "4", "-W", "2", host], stdout=subprocess.PIPE, text=True, timeout=10)
-        m_avg = re.search(r"rtt min/avg/max/mdev = [\d.]+/([\d.]+)/", proc.stdout)
-        received = int(re.search(r"(\d+) received", proc.stdout).group(1))
-        return {"avg_rtt_ms": float(m_avg.group(1)) if m_avg else None, "received": received}
-    except: return {"avg_rtt_ms": None, "received": 0}
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return {"avg_rtt_ms": None, "received": 0}
+
+    received = 0
+    avg_rtt = None
+
+    if sys.platform == "win32":
+        m_recv = re.search(r"Received\s*=\s*(\d+)", out, re.I)
+        if m_recv:
+            received = int(m_recv.group(1))
+        m_avg = re.search(r"Average\s*=\s*(\d+)\s*ms", out, re.I)
+        if m_avg:
+            avg_rtt = float(m_avg.group(1))
+    else:
+        m_recv = re.search(r"(\d+)\s+received", out)
+        if m_recv:
+            received = int(m_recv.group(1))
+        m_avg = re.search(r"rtt min/avg/max/mdev = [\d.]+/([\d.]+)/", out)
+        if m_avg:
+            avg_rtt = float(m_avg.group(1))
+
+    return {"avg_rtt_ms": avg_rtt if received > 0 else None, "received": received}
 
 
 def tcp_connect_ms(host, port=443):
@@ -114,56 +157,69 @@ def tcp_connect_ms(host, port=443):
         try:
             s.connect((host, port))
             timings.append((time.time() - t0) * 1000.0)
-            s.close()
-        except: pass
+        except OSError:
+            pass
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
     return sum(timings) / len(timings) if timings else None
 
 
-def run_test(target_host="www.canberra.edu.au"):
-    # note most major commercial sites will use a CDN that makes this test less accurate, 
-    # so we pick a well-known university server that is geographically consistent with its IP.
-    print(f"--- Starting Geo-Latency Analysis against {target_host} ---")
-    
+def run_test(target_host="www.canberra.edu.au") -> bool:
+    print(f"--- Geo-Latency Analysis vs {target_host} ---")
+
     me = get_my_coords()
     target = get_host_coords(target_host)
     if not me or not target:
-        print("❌ Error: Could not resolve coordinates.")
-        return
+        print(
+            "❌ Error: Could not resolve coordinates for your IP or target host "
+            "(network, rate limit, or DNS).",
+            file=sys.stderr,
+        )
+        return False
 
     dist = haversine(me["lat"], me["lon"], target["lat"], target["lon"])
     print(f"Location: {me['city']}, {me['country']} -> Target: {target_host}")
     print(f"Map Distance: {int(dist)} km")
 
-    # Try Ping, Fallback to TCP
     ping = ping_result(target_host)
     rtt = ping["avg_rtt_ms"]
     method = "ICMP Ping"
 
     if not rtt:
-        print("Ping blocked. Falling back to TCP port 443...")
+        print("Ping unusable or blocked. Falling back to TCP port 443...")
         rtt = tcp_connect_ms(target_host)
         method = "TCP Connect"
 
     if not rtt:
-        print("❌ All timing attempts failed.")
-        return
+        print("❌ Error: All timing attempts failed (ping + TCP).", file=sys.stderr)
+        return False
 
     score = calculate_latency_score(dist, rtt)
-    
-    print("\n" + "="*45)
+
+    print("\n" + "=" * 45)
     print(f"SCORE: {score}")
     print(f" Measured via: {method}")
     print(f" Latency: {rtt:.2f} ms")
-    
+
     messages = {
-        5: "MATCH: Latency is consistent with your reported IP location.",
-        4: "LIKELY MATCH: Minor routing overhead detected.",
-        3: "INCONSISTENT: High lag detected for this distance.",
-        2: "SUSPICIOUS: Data taking a very long route (Possible VPN).",
-        1: "IMPOSSIBLE: Speed of light proves your IP location is faked."
+        1: "MATCH: Latency is consistent with geographic distance.",
+        2: "LIKELY MATCH: Minor routing overhead vs distance.",
+        3: "INCONSISTENT: Lag high for this distance (routing noise or indirect path).",
+        4: "SUSPICIOUS: Very long route vs distance (possible VPN or bad geo).",
+        5: "MISMATCH: RTT too low for claimed distance, or far too high (timing vs geo disagree).",
     }
-    print(f" RESULT: {messages.get(score)}")
-    print("="*45)
+    print(f" RESULT: {messages.get(score, 'N/A (invalid inputs)')}")
+    print("=" * 45)
+    return True
+
 
 if __name__ == "__main__":
-    run_test()
+    try:
+        ok = run_test()
+    except Exception as exc:
+        print(f"❌ Error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0 if ok else 1)

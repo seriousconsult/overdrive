@@ -347,7 +347,7 @@ def main():
         header_table_size=header_table_size
     )
 
-    print(f"\nScore: {score}")
+    print(f"\nSCORE: {score}")
     print(f"- {score_desc}")
 
     print("\n============================================================")

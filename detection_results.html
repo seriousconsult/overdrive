@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overdrive Detection Results</title>
+<style>
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --border: #2d3a4d;
+  --text: #e7ecf3;
+  --muted: #8b9cb3;
+  --accent: #3d9eff;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  margin: 0;
+  padding: 1.25rem 1.5rem 2rem;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+  font-size: 14px;
+}
+header {
+  max-width: 960px;
+  margin: 0 auto 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+}
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+.timestamp { color: var(--muted); font-size: 0.8rem; }
+main { max-width: 960px; margin: 0 auto; }
+section { margin-bottom: 1.5rem; }
+h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  background: var(--surface);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.65rem;
+  vertical-align: top;
+}
+th:nth-child(1), td:nth-child(1) { width: 32%; }
+th:nth-child(2), td:nth-child(2) { width: 5.5rem; }
+th:nth-child(3), td:nth-child(3) { width: auto; }
+th {
+  background: rgba(0,0,0,0.25);
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+.script { font-family: ui-monospace, monospace; font-size: 0.85rem; color: #b8d4ff; }
+.comment {
+  color: var(--muted);
+  font-size: 0.8rem;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.badge {
+  display: inline-block;
+  min-width: 2rem;
+  text-align: center;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.badge.na { background: #3d4555; color: #c5cdd8; }
+.badge.err { background: #5c2a2a; color: #ffb4b4; }
+.badge.todo { background: #4a3d6b; color: #d4c4ff; }
+.badge.n1 { background: #1e4d2b; color: #9fe3b4; }
+.badge.n2 { background: #2d4a3a; color: #a8e0c0; }
+.badge.n3 { background: #3d4a5c; color: #c5d4e8; }
+.badge.n4 { background: #5c4a2a; color: #ffd89a; }
+.badge.n5 { background: #5c3a2a; color: #ffb89a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Overdrive detection results</h1>
+  <span class="timestamp">2026-04-24 21:58:33</span>
+</header>
+<main>
+<section>
+<h2>Root</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">container_VM_detect.py</td><td><span class="badge badge n4">4</span></td><td class="comment">Solid local evidence of a container and/or hypervisor environment.</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Browser</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">All providers agree on one country name — not multiple countries.</td></tr>
+<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Certainly NOT a browser (script/VPN detected)</td></tr>
+<tr><td class="script">WebRTC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">RFC1918 address visible via WebRTC (local/private leak).</td></tr>
+<tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+<tr><td class="script">cookie_tracking.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+<tr><td class="script">font_enumeration.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+<tr><td class="script">screen_capture.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Network</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">blacklist_check.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Not listed on queried DNSBLs (zen, spamcop, barracuda); no hosting flag from ip-api.</td></tr>
+<tr><td class="script">doh_detection.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No Firefox/Chromium Local State paths found and no platform DoH probe; inconclusive.</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Vpn</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">ASN.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Non-zero exit | requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://ipapi.co/json/</td></tr>
+<tr><td class="script">DNS.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Certain leak of IPv4.</td></tr>
+<tr><td class="script">IPv6_leak.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: No global IPv6 on host and no IPv6 egress to ipify — low IPv6 leak surface.</td></tr>
+<tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">ANALYSIS: Standard packet size. No VPN detected.</td></tr>
+<tr><td class="script">TCP_stack.py</td><td><span class="badge badge err">Error</span></td><td class="comment">sudo needs a password; allow NOPASSWD for this user to run TCP_stack unattended | sudo: a password is required</td></tr>
+<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">• Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
+<tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Non-zero exit | ValueError: ZoneInfo keys must be normalized relative paths, got: Please contact us for a trial account or sign up for a paid plan at https://ipapi.co/pricing</td></tr>
+<tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Measured via: TCP Connect</td></tr>
+<tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No tunnel-pattern interfaces found (tun/tap/wg/…); no VPN-style virtual iface names.</td></tr>
+<tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">Scale: 1 = no OPEN VPN/proxy ports seen · 5 = at least one OPEN (in use / accepting)</td></tr>
+</tbody></table>
+</section>
+</main>
+</body>
+</html>

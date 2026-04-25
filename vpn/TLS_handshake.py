@@ -18,18 +18,14 @@ changes every single time you connect. If you run your script twice and get two 
  your VPN is using "Grease" to try to defeat fingerprinting matches to a specific fingerprint.   
 
 
-TODO:TLS info
- TLS version used
-Protocols
-Supported versions
-Curves
-Signature algorithms
-Extensions
-Ciphers
+Also uses raw TLS ClientHello details from the API when present:
+  negotiated/record version, cipher list size, extension list, supported_groups
+  (curves), and signature_algorithms — as extra consistency checks vs User-Agent.
 
+Deep TLS Fingerprint Analysis (JA3 + JA4 + PeetPrint + Akamai + TLS shape) using tls.peet.ws.
 
-
-Deep TLS Fingerprint Analysis (JA3 + JA4 + PeetPrint + Akamai) using tls.peet.ws
+Composite score is an **automation signal**: **1** ≈ normal user browser, **5** ≈ script, bot, or
+library/VPN-style TLS (including a browser UA that does not match the handshake).
 
 Output is formatted into clear sections with wrapped long fields.
 '''
@@ -97,6 +93,106 @@ def _looks_library_tls(ja3_hash: str, peetprint_hash: str, ja4: str) -> bool:
     return False
 
 
+TLS_VERSION_HEX = {
+    "772": "TLS 1.3",
+    "771": "TLS 1.2",
+    "770": "TLS 1.1",
+    "769": "TLS 1.0",
+    "768": "SSL 3.0",
+}
+
+
+def _tls_version_label(hex_code: str | int | None) -> str | None:
+    if hex_code is None:
+        return None
+    key = str(hex_code).strip()
+    return TLS_VERSION_HEX.get(key, f"0x{key}" if key.isdigit() else key)
+
+
+def extract_tls_clienthello_details(tls: dict | None) -> dict:
+    """
+    Normalize tls.peet.ws `tls` object: versions, cipher/extension counts,
+    curves (supported_groups), signature_algorithms count, advertised versions.
+    """
+    out: dict = {
+        "negotiated_label": None,
+        "record_label": None,
+        "cipher_count": 0,
+        "extension_count": 0,
+        "extension_names": [],
+        "curves": [],
+        "sigalg_count": 0,
+        "supported_versions": [],
+    }
+    if not tls or not isinstance(tls, dict):
+        return out
+
+    out["negotiated_label"] = _tls_version_label(tls.get("tls_version_negotiated"))
+    out["record_label"] = _tls_version_label(tls.get("tls_version_record"))
+    ciphers = tls.get("ciphers") or []
+    out["cipher_count"] = len(ciphers) if isinstance(ciphers, list) else 0
+
+    exts = tls.get("extensions") or []
+    if not isinstance(exts, list):
+        return out
+
+    out["extension_count"] = len(exts)
+    names: list[str] = []
+    curves: list[str] = []
+    sig_max = 0
+    versions: list[str] = []
+
+    for e in exts:
+        if not isinstance(e, dict):
+            continue
+        raw_name = e.get("name")
+        if raw_name:
+            names.append(str(raw_name).split("(")[0].strip())
+        for g in e.get("supported_groups") or []:
+            curves.append(str(g))
+        sa = e.get("signature_algorithms")
+        if isinstance(sa, list):
+            sig_max = max(sig_max, len(sa))
+        for v in e.get("versions") or []:
+            versions.append(str(v))
+
+    out["extension_names"] = names
+    out["curves"] = curves
+    out["sigalg_count"] = sig_max
+    out["supported_versions"] = versions
+    return out
+
+
+def _tls_shape_automation_like(d: dict) -> bool:
+    """Narrow / legacy ClientHello often seen on scripted TLS stacks."""
+    neg = d.get("negotiated_label") or ""
+    if "1.0" in neg or "1.1" in neg or "SSL 3" in neg:
+        return True
+    cc = d.get("cipher_count") or 0
+    ec = d.get("extension_count") or 0
+    if cc and cc < 16:
+        return True
+    if ec and ec < 6:
+        return True
+    sg = d.get("sigalg_count") or 0
+    if sg and sg < 6:
+        return True
+    return False
+
+
+def _tls_shape_modern_browser_like(d: dict) -> bool:
+    """Broad TLS 1.3 ClientHello with rich offers (typical current browsers)."""
+    if d.get("negotiated_label") != "TLS 1.3":
+        return False
+    cc = d.get("cipher_count") or 0
+    ec = d.get("extension_count") or 0
+    if cc and cc < 20:
+        return False
+    if ec and ec < 8:
+        return False
+    return True
+
+
 def calculate_fingerprint_score(
     user_agent: str,
     *,
@@ -106,16 +202,36 @@ def calculate_fingerprint_score(
     ja4_r: str = "",
     peetprint_hash: str = "",
     akamai_fingerprint: str = "",
+    tls: dict | None = None,
 ):
     """
-    Composite 1–5 score using JA3, JA4, PeetPrint, GREASE (via JA3 string), and
-    Akamai HTTP/2 SETTINGS heuristics. Higher = more consistent / less “lying”.
+    Automation / VPN–client signal (1–5). **Higher = more script, bot, or VPN-library-like.**
+
+      1 — Looks like a normal end-user browser (TLS + HTTP/2 line up with typical browsers).
+      5 — Strong script / automation / library TLS (or a browser UA that does not match the TLS stack).
+
+    Uses JA3 / JA4 / PeetPrint, GREASE, Akamai HTTP/2 SETTINGS, and ClientHello shape from tls.peet.ws.
 
     Returns (score, breakdown dict) for printing.
     """
     ua_lower = (user_agent or "").lower()
-    is_python_ua = "python" in ua_lower or "httpx" in ua_lower
-    ua_browser = "chrome" in ua_lower or "mozilla" in ua_lower
+    is_python_ua = any(
+        x in ua_lower
+        for x in (
+            "python",
+            "httpx",
+            "urllib",
+            "requests",
+            "aiohttp",
+            "curl/",
+            "java/",
+            "go-http",
+        )
+    )
+    ua_browser = any(
+        x in ua_lower
+        for x in ("chrome/", "mozilla/", "firefox/", "safari/", "edg/", "webkit/")
+    )
 
     library_tls = _looks_library_tls(ja3_hash, peetprint_hash, ja4)
     grease_values = detect_grease_from_ja3(ja3)
@@ -124,64 +240,129 @@ def calculate_fingerprint_score(
     h2_style = _http2_browser_vs_library(ak.get("header_table_size"))
     akamai_present = bool(akamai_fingerprint and akamai_fingerprint.strip())
 
-    # --- Base score from UA vs library TLS fingerprints (JA3 / PeetPrint / JA4) ---
-    if is_python_ua and library_tls:
-        score = 5
-        base_reason = "UA and TLS fingerprints align with a script/library stack."
+    tls_d = extract_tls_clienthello_details(tls)
+    has_tls_shape = bool(
+        tls and isinstance(tls, dict) and (tls_d.get("cipher_count") or tls_d.get("extension_count"))
+    )
+
+    # risk: 1 = normal browser, 5 = script / bot / VPN-library stack
+    if is_python_ua:
+        if library_tls:
+            risk = 5
+            base_reason = (
+                "Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4)."
+            )
+        else:
+            risk = 4
+            base_reason = (
+                "Declared script UA; TLS is not a catalogued library hash (custom stack or rare build)."
+            )
     elif ua_browser:
         if library_tls:
-            score = 1
-            base_reason = "UA claims a browser but TLS looks like a library/automation stack."
+            risk = 5
+            base_reason = (
+                "Browser User-Agent but TLS matches library/VPN-style fingerprints — likely spoofed UA "
+                "or VPN client pretending to be a browser."
+            )
         else:
-            score = 4
-            base_reason = "Browser UA with no library TLS match (fingerprints still vary)."
-    elif not is_python_ua and library_tls:
-        score = 2
-        base_reason = "TLS looks library-like but UA is not clearly Python/httpx."
+            risk = 2
+            base_reason = (
+                "Browser UA and TLS is not a known library hash — plausibly a real browser."
+            )
     else:
-        score = 3
-        base_reason = "Neutral: no strong library TLS match."
+        if library_tls:
+            risk = 4
+            base_reason = (
+                "TLS matches automation/library fingerprints; UA is not clearly a browser or script."
+            )
+        else:
+            risk = 3
+            base_reason = "Neutral UA; TLS is not a known library fingerprint."
 
     breakdown = {
         "base": base_reason,
         "grease": "",
         "akamai": "",
         "ja4_note": "",
+        "tls_shape": "",
     }
-
-    # --- GREASE: common on real browsers; nudges ambiguous cases toward “browser-like” ---
-    if ua_browser and grease_values and not library_tls:
-        if score == 3:
-            score = 4
-            breakdown["grease"] = "GREASE in ClientHello + browser UA → slight bump (typical browser behavior)."
-        else:
-            breakdown["grease"] = f"GREASE values present ({len(grease_values)}); consistent with many browsers."
-    elif grease_values:
-        breakdown["grease"] = f"GREASE detected ({len(grease_values)} values); not a VPN proof on its own."
-    else:
-        breakdown["grease"] = "No GREASE values parsed from JA3 string."
 
     if ja4_r and not ja4:
         breakdown["ja4_note"] = "JA4 raw present but short JA4 empty — using other signals."
 
-    # --- Akamai HTTP/2 fingerprint: SETTINGS vs claimed UA ---
+    # --- ClientHello shape (before GREASE so “modern browser” can land at 1) ---
+    if has_tls_shape:
+        breakdown["tls_shape"] = (
+            f"Negotiated {tls_d.get('negotiated_label') or '?'}, "
+            f"record {tls_d.get('record_label') or '?'}, "
+            f"{tls_d['cipher_count']} ciphers, {tls_d['extension_count']} extensions, "
+            f"{tls_d['sigalg_count']} sig algs, {len(tls_d['curves'])} curves offered."
+        )
+        if tls_d.get("supported_versions"):
+            breakdown["tls_shape"] += f" Advertised: {', '.join(tls_d['supported_versions'][:6])}."
+
+        if ua_browser and not library_tls:
+            if _tls_shape_automation_like(tls_d):
+                risk = max(risk, 4)
+                breakdown["tls_shape"] += (
+                    " Narrow/legacy ClientHello — unlike typical current browsers; raises automation signal."
+                )
+            elif _tls_shape_modern_browser_like(tls_d):
+                risk = min(risk, 1)
+                breakdown["tls_shape"] += " Broad TLS 1.3 ClientHello — typical of modern browsers."
+        elif ua_browser and library_tls:
+            if _tls_shape_modern_browser_like(tls_d):
+                risk = 5
+                breakdown["tls_shape"] += (
+                    " Handshake looks “browser-fat” but fingerprints are library-class — strong spoof/VPN signal."
+                )
+            elif _tls_shape_automation_like(tls_d):
+                risk = max(risk, 4)
+                breakdown["tls_shape"] += " Thin/legacy hello plus library JA3 — consistent with non-browser stack."
+        elif is_python_ua:
+            if _tls_shape_automation_like(tls_d) and library_tls:
+                risk = 5
+                breakdown["tls_shape"] += " Narrow handshake matches script stack + library fingerprint."
+            elif _tls_shape_modern_browser_like(tls_d) and not library_tls:
+                risk = min(risk, 3)
+                breakdown["tls_shape"] += " Browser-shaped hello with script UA but non-catalogued JA3 — ambiguous."
+    elif tls and isinstance(tls, dict):
+        breakdown["tls_shape"] = "TLS object present but no ciphers/extensions parsed."
+    else:
+        breakdown["tls_shape"] = "No TLS detail blob passed; ClientHello shape not scored."
+
+    # --- Akamai HTTP/2 SETTINGS ---
     if not akamai_present:
         breakdown["akamai"] = "Akamai HTTP/2 fingerprint missing — HTTP/2 layer not scored."
     else:
         breakdown["akamai"] = f"HTTP/2 SETTINGS heuristic: {h2_style}."
-        if ua_browser:
+        if ua_browser and not library_tls:
             if h2_style.startswith("library-like"):
-                score = min(score, 2)
-                breakdown["akamai"] += " Browser UA but library-like HTTP/2 — strong mismatch."
-            elif h2_style.startswith("browser-like") and score == 3 and not library_tls:
-                score = 4
-                breakdown["akamai"] += " Browser-like HTTP/2 aligns with browser UA."
+                risk = max(risk, 4)
+                breakdown["akamai"] += (
+                    " Library-like HTTP/2 SETTINGS despite browser UA — common for httpx/curl-class over H2."
+                )
+            elif h2_style.startswith("browser-like"):
+                risk = min(risk, 2)
+                breakdown["akamai"] += " Browser-like HTTP/2 SETTINGS."
         elif is_python_ua and h2_style.startswith("library-like") and library_tls:
-            score = max(score, 5)
-            breakdown["akamai"] += " Python UA + library TLS + library-like HTTP/2 — consistent."
+            risk = max(risk, 5)
+            breakdown["akamai"] += " Script UA + library TLS + library-like HTTP/2 — aligned automation stack."
 
-    score = max(1, min(5, score))
-    return score, breakdown
+    # --- GREASE: Chromium-class browsers usually send GREASE ---
+    if grease_values:
+        breakdown["grease"] = (
+            f"GREASE in ClientHello ({len(grease_values)} values) — typical of many real browsers."
+        )
+        if ua_browser and not library_tls:
+            risk = min(risk, 2)
+    else:
+        breakdown["grease"] = "No GREASE parsed from JA3 — more common in minimal / library TLS stacks."
+        if ua_browser and not library_tls and not (has_tls_shape and _tls_shape_modern_browser_like(tls_d)):
+            risk = max(risk, 2)
+
+    risk = max(1, min(5, risk))
+    return risk, breakdown
 
 def run_deep_analysis():
     url = "https://tls.peet.ws/api/all"
@@ -202,29 +383,36 @@ def run_deep_analysis():
         ja4_r=tls.get("ja4_r", "") or "",
         peetprint_hash=tls.get("peetprint_hash", "") or "",
         akamai_fingerprint=http2.get("akamai_fingerprint", "") or "",
+        tls=tls,
     )
 
     print("\n" + "="*45)
-    print(f"SCORE: {score} (JA3 + JA4 + PeetPrint + GREASE + Akamai)")
+    print("Scale: 1 = normal browser · 5 = script/bot/VPN-library TLS")
+    print(f"SCORE: {score} (JA3 + JA4 + PeetPrint + GREASE + Akamai + TLS shape)")
     print(f"  • {br['base']}")
     print(f"  • {br['grease']}")
     print(f"  • {br['akamai']}")
+    if br.get("tls_shape"):
+        print(f"  • {br['tls_shape']}")
     if br.get("ja4_note"):
         print(f"  • {br['ja4_note']}")
     
     messages = {
-        5: "CONSISTENT: Fingerprint matches the declared User-Agent.",
-        4: "NORMAL: Standard browser handshake detected.",
-        3: "NEUTRAL: Fingerprint is unrecognized.",
-        2: "SUSPICIOUS: Handshake does not match common browser patterns.",
-        1: "MISMATCH: User-Agent is lying! (Bot/VPN Detection Triggered)."
+        1: "NORMAL: Looks like a typical end-user browser (TLS / HTTP2 / ClientHello).",
+        2: "MOSTLY NORMAL: Small anomalies; still plausibly a real browser.",
+        3: "UNCERTAIN: Mixed or incomplete fingerprint signals.",
+        4: "SUSPICIOUS: Library TLS, HTTP/2 mismatch, or thin ClientHello vs browser UA.",
+        5: "AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints.",
     }
     
     print(f" STATUS: {messages.get(score)}")
     print("="*45)
     
-    if score == 1:
-        print("🚨 Warning: If you were trying to hide, the server just caught you.")
+    if score >= 4:
+        print(
+            "🚨 High score: traffic looks like a script, bot, or VPN/library TLS — "
+            "not a normal home browser fingerprint."
+        )
 
 
 
@@ -340,7 +528,31 @@ def run_deep_analysis2():
     print_kv("PeetPrint", peetprint, wrap_width=88)
     print_kv("PeetPrint Hash", peetprint_hash)
 
-    print("\n[4] Akamai HTTP/2 Fingerprint")
+    tls_details = extract_tls_clienthello_details(tls)
+    print("\n[4] TLS ClientHello (version / ciphers / extensions / curves / sigalgs)")
+    print("-" * 76)
+    print_kv("TLS version (record)", tls_details.get("record_label") or tls.get("tls_version_record"))
+    print_kv("TLS version (negotiated)", tls_details.get("negotiated_label") or tls.get("tls_version_negotiated"))
+    ciphers = tls.get("ciphers") or []
+    print_kv("Cipher suites (count)", str(len(ciphers)) if isinstance(ciphers, list) else "0")
+    print_kv("Extensions (count)", str(tls_details["extension_count"]))
+    print_kv("Signature algorithms (count)", str(tls_details["sigalg_count"]))
+    if tls_details["supported_versions"]:
+        print_kv("Supported versions (ext)", ", ".join(tls_details["supported_versions"]))
+    if tls_details["curves"]:
+        curves_line = ", ".join(tls_details["curves"][:12])
+        if len(tls_details["curves"]) > 12:
+            curves_line += f" … (+{len(tls_details['curves']) - 12} more)"
+        print_kv("Supported groups (curves)", curves_line, wrap_width=88)
+    else:
+        print_kv("Supported groups (curves)", "(none parsed)")
+    if tls_details["extension_names"]:
+        en = ", ".join(tls_details["extension_names"][:10])
+        if len(tls_details["extension_names"]) > 10:
+            en += f" … (+{len(tls_details['extension_names']) - 10} more)"
+        print_kv("Extension names (sample)", en, wrap_width=88)
+
+    print("\n[5] Akamai HTTP/2 Fingerprint")
     print("-" * 76)
     if akamai_fp:
         print_kv("Akamai Fingerprint", akamai_fp, wrap_width=88)
@@ -349,7 +561,7 @@ def run_deep_analysis2():
         print("Akamai Fingerprint: (empty / not provided)")
         print("  This often means the HTTP/2 fingerprint data was not produced reliably for this request.")
 
-    print("\n[5] Heuristics / Detection Signals")
+    print("\n[6] Heuristics / Detection Signals")
     print("-" * 76)
     print_kv("GREASE detected values", ", ".join(map(str, grease_values)) if grease_values else "(none)")
 
@@ -372,18 +584,22 @@ def run_deep_analysis2():
         ja4_r=ja4_r,
         peetprint_hash=peetprint_hash,
         akamai_fingerprint=akamai_fp,
+        tls=tls,
     )
 
-    print("\n[6] Composite score (JA3 + JA4 + PeetPrint + GREASE + Akamai)")
+    print("\n[7] Composite score (JA3 + JA4 + PeetPrint + GREASE + Akamai + TLS shape)")
     print("-" * 76)
+    print("  Scale: 1 = normal browser fingerprint · 5 = script / bot / VPN-library-like")
     print(f"SCORE: {composite}")
     print(f"  • {br['base']}")
     print(f"  • {br['grease']}")
     print(f"  • {br['akamai']}")
+    if br.get("tls_shape"):
+        print(f"  • {br['tls_shape']}")
     if br.get("ja4_note"):
         print(f"  • {br['ja4_note']}")
 
-    print("\n[7] Consistency / VPN Relevance (Heuristic Only)")
+    print("\n[8] Consistency / VPN Relevance (Heuristic Only)")
     print("-" * 76)
     if not ua_present:
         print("⚠️ Low confidence: User-Agent missing/blank; consistency checks are unreliable.")

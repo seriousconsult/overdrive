@@ -325,7 +325,7 @@ def main():
             ", ".join([f"{v}({oui})x{cnt}" for v, oui, cnt in mapped_obs[:3]])
         )
 
-    unified, unified_note = compute_vm_container_score(
+    score, unified_note = compute_vm_container_score(
         cont_evid,
         vm_evid,
         local_vendor,
@@ -334,7 +334,7 @@ def main():
 
     # --------- Output (trimmed/noise removed per your request) ----------
     print("== Results ==")
-    print(f"Score:{unified}")
+    print(f"SCORE: {score}")
     print(f"  ({unified_note})")
     print()
     print(f"L2/MAC OUI evidence: Ether frames observed: {ether_seen}")
@@ -361,7 +361,7 @@ def main():
             print(f"  - {r}")
 
     print("\nDone.")
-    return unified
+    return score
 
 
 if __name__ == "__main__":

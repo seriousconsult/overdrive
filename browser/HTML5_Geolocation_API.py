@@ -238,13 +238,13 @@ def main():
 
     consensus_summary(results)
 
-    geo_score, geo_note = compute_multi_location_score(results)
+    score, geo_note = compute_multi_location_score(results)
     print("\n--- Multi-location score (1–5) ---")
-    print(f"Score: {geo_score}")
+    print(f"SCORE: {score}")
     print(f"  {geo_note}")
     print()
     print("Scale: 1 = single coherent GeoIP location  ·  5 = strong cross-provider disagreement")
-    return geo_score
+    return score
 
 
 if __name__ == "__main__":

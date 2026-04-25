@@ -46,7 +46,7 @@ def is_tunnel_iface(name: str) -> bool:
 def calculate_tunnel_score():
     ifaces = get_interfaces()
     if not ifaces:
-        return 3, "No network interfaces detected."
+        return 3, "No network interfaces enumerated (need `ip link` — e.g. Linux/WSL)."
 
     # Filter out loopback
     active_ifaces = [i for i in ifaces if i != "lo"]
@@ -54,31 +54,35 @@ def calculate_tunnel_score():
     # Identify tunnels
     detected_tunnels = [i for i in active_ifaces if is_tunnel_iface(i)]
     
-    # --- SCORING LOGIC (1 to 5) ---
-    # 5: Only physical/standard interfaces found.
-    # 3: No clear tunnel names, but more than 3 virtual interfaces (suspicious environment).
-    # 2: At least one interface matches a known VPN/Tunnel pattern.
-    # 1: Multiple tunnel interfaces detected (e.g., tun0 and wg0).
+    # --- SCORING (1 to 5): higher = stronger tunnel / VPN virtual-iface signal ---
+    # 5 = Multiple tunnel-pattern interfaces (strong tunnel environment).
+    # 4 = One tunnel-pattern interface (typical single VPN / WireGuard / OpenVPN).
+    # 3 = Ambiguous (e.g. many NICs, no name match — containers / complex routing).
+    # 2 = Mild uncertainty (reserved / few signals).
+    # 1 = No tunnel-pattern interfaces; looks like a normal host (certainly no named tunnel).
 
     if len(detected_tunnels) > 1:
-        score = 1
-        status = f"HIGH RISK: Multiple tunnel interfaces detected: {', '.join(detected_tunnels)}"
-    elif len(detected_tunnels) == 1:
-        score = 2
-        status = f"VPN DETECTED: Found tunnel interface '{detected_tunnels[0]}'"
-    elif len(active_ifaces) > 4:
-        # Many virtual interfaces (common in complex proxy/container setups)
-        score = 3
-        status = f"CAUTION: High number of active interfaces ({len(active_ifaces)}). Possible complex routing."
-    else:
         score = 5
-        status = "CLEAN: No tunnel interfaces detected."
+        status = f"Multiple tunnel interfaces: {', '.join(detected_tunnels)}"
+    elif len(detected_tunnels) == 1:
+        score = 4
+        status = f"Tunnel interface detected: '{detected_tunnels[0]}'"
+    elif len(active_ifaces) > 4:
+        score = 3
+        status = (
+            f"No tunnel name patterns matched, but many interfaces ({len(active_ifaces)}) — "
+            "possible VM/container or complex routing."
+        )
+    else:
+        score = 1
+        status = "No tunnel-pattern interfaces found (tun/tap/wg/…); no VPN-style virtual iface names."
 
     return score, status
 
 if __name__ == "__main__":
     print("="*50)
     print("TUNNEL INTERFACE ANALYSIS (MTU IGNORED)")
+    print("Scale: 1 = no tunnel-pattern NICs · 5 = tunnel(s) detected")
     print("="*50)
     
     score, message = calculate_tunnel_score()

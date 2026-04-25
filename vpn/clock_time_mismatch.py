@@ -87,16 +87,16 @@ def main():
 
     score = calculate_match_score(local_offset, ip_offset)
     
-    print(f"\Score: {score}/5")
+    print(f"\nSCORE: {score}")
     
     if score >= 4:
-        print("✅ Timezone match")
+        print("Timezone match")
     elif score == 3:
-        print("⚠️  Probably match (within 3 hours)")
+        print("Probably match (within 3 hours)")
     elif score == 2:
-        print("⚠️  Possible match (within 6 hours)")
+        print("Possible match (within 6 hours)")
     else:
-        print("🚨 No match (timezone mismatch)")
+        print("No match (timezone mismatch)")
 
 if __name__ == "__main__":
     main()

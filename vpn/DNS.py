@@ -10,7 +10,8 @@ Windows Features: Features like "Teredo" or "Smart Multi-Homed Name Resolution" 
 
 VPN:  we website see a request coming from a server owned by your VPN provider (e.g., a NordVPN 
 or Mullvad server).
-Leak: The website sees a request coming from a server owned by your ISP (e.g., Comcast, AT&T, etc.) or a third-party DNS provider (e.g., Google Public DNS, Cloudflare DNS) instead of your VPN.
+Leak: The website sees a request coming from a server owned by your ISP (e.g., Comcast, AT&T, etc.) 
+or a third-party DNS provider (e.g., Google Public DNS, Cloudflare DNS) instead of your VPN.
 '''
 
 import requests

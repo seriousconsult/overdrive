@@ -142,7 +142,7 @@ def lookup_asn(ip_address: str = ""):
     print(f"Timezone:   {timezone}")
 
     score, status = classify_org(org)
-    print(f"Status:     {status} (Score: {score}/5)")
+    print(f"Status:     {status} (SCORE: {score})")
 
 if __name__ == "__main__":
     # Usage:

@@ -373,7 +373,7 @@ def main():
         print(f"Exception type: {type(e).__name__}")
         print(f"Exception message: {e}")
         traceback.print_exc()
-        print(f"\n[Leak score 1–5] {score}")
+        print(f"\nSCORE: {score}")
         print(f"  {note}")
     finally:
         if driver is not None:

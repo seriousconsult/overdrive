@@ -1,0 +1,45 @@
+Additional checks to add
+
+
+Outbound IP reputation & context
+--Datacenter / hosting / “VPN” ASN vs residential (you touch this in ASN.py-style ideas).
+
+DNS leak patterns
+--Resolver identity (which DNS answers for your probe domain vs what the VPN claims).
+--ECS (EDNS Client Subnet) in responses — can leak coarse client network to authoritative servers (harder to test without 
+custom tooling).
+
+WebRTC / TURN / ICE (beyond IP leak)
+--STUN/TURN candidates can expose extra addresses or NAT behavior; browser tests are richer than a single “RTC IP” line.
+
+HTTP/3 (QUIC) fingerprint
+--Separate from TLS 1.3 + HTTP/2: QUIC transport params, initial packet traits — increasingly used for bot/automation detection.
+
+ECH (Encrypted Client Hello) presence/absence
+--Changes what middleboxes and some fingerprinting services see; useful for consistency checks, not “good/bad” by itself.
+
+TCP/IP behavior beyond one SYN (you have TCP_stack.py)
+--Pacing, retransmission, window growth, DF/PMTU behavior across the path — mostly research-grade; hard to expose from a simple script.
+
+Application-layer consistency
+--TLS User-Agent / ALPN / curves vs HTTP User-Agent vs Client Hints (sec-ch-ua, etc.) — mismatches flag automation or spoofing 
+(related to your TLS work but can be extended with full header sets).
+
+Passive timing & behavior
+--RTT variance, burst patterns — used in research; rarely a single “score” from a quick script.
+
+Email / messaging / game anti-cheat style signals (out of scope for a small folder)
+--Behavioral scoring, device graphs — not something you’d replicate in a few Python files ethically or easily.
+
+
+
+Important caveats
+Nothing is definitive: VPN, corporate proxy, CGNAT, carrier NAT, CDN, and “privacy” browsers all create false positives and negatives.
+“Hacking” is not a network fingerprint: you’re really asking about automation, anonymity infrastructure, misconfiguration, or 
+abuse-adjacent hosting — be precise in naming that in UX and reports.
+Legal/ToS: Many commercial feeds and some port/scan techniques have terms of use; prefer self‑consistency checks 
+(what your egress looks like) over aggressive scanning.
+If you want to extend the repo, the highest‑value additions that are usually missing from small kits are:
+ QUIC/HTTP3 fingerprint, 
+ full header + Client Hints consistency, 
+ and structured DNS-leak / resolver attribution 
