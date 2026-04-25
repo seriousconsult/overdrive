@@ -48,6 +48,32 @@ def install_chrome():
     return True
 
 
+def is_libpcap_installed():
+    """Check if libpcap is installed."""
+    try:
+        result = subprocess.run(
+            ["dpkg", "-s", "libpcap-dev"],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def install_libpcap():
+    """Install libpcap-dev (required for scapy packet capture)."""
+    print("libpcap-dev not found. Installing...")
+    try:
+        subprocess.run(["sudo", "apt", "update"], check=True)
+        subprocess.run(["sudo", "apt", "install", "-y", "libpcap-dev"], check=True)
+        print("libpcap-dev installed successfully.")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install libpcap-dev: {e}")
+        return False
+
+
 # 1. Create the virtual environment
 print(f"Creating venv in {venv_dir}...")
 venv.create(venv_dir, with_pip=True)
@@ -63,8 +89,15 @@ print("Installing packages...")
 subprocess.check_call([python_exe, "-m", "pip", "install", 
                        "requests", "selenium", "httpx[http2]", "scapy"])
 
-# 4. Install Chrome if not present (Linux only)
+# 4. Install system dependencies (Linux only)
 if sys.platform != "win32":
+    # Install libpcap for scapy packet capture
+    if not is_libpcap_installed():
+        install_libpcap()
+    else:
+        print("libpcap-dev is already installed.")
+    
+    # Install Chrome for browser automation
     if not is_chrome_installed():
         install_chrome()
     else:

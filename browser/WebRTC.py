@@ -9,7 +9,7 @@ WebRTC Leak Tester using Selenium + browserleaks.com/webrtc.
 
 - Forces headless Chrome + WSL-safe flags
 - Better error output (exception type + message)
-- Saves screenshot + page source snippet on failure
+- Keeps screenshot + page source snippet in memory only (no files written)
 
 WebRTC leak tester using Selenium (BrowserLeaks page)
 
@@ -39,8 +39,6 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 URL = "https://browserleaks.com/webrtc"
-SHOT = "webrtc_error_or_state.png"
-SRC = "webrtc_page_source_snippet.txt"
 
 
 def build_driver():
@@ -98,18 +96,72 @@ def is_private_ipv4(ip: str) -> bool:
         return False
 
 
-def dump_diagnostics(driver):
-    # Save screenshot + a snippet of page source for offline inspection
+def collect_diagnostics_memory(driver):
+    """
+    In-memory capture only (no disk). Caller may inspect bytes/str before shutdown.
+    """
+    out = {"screenshot_png": None, "page_source_snippet": None}
     try:
-        driver.save_screenshot(SHOT)
+        out["screenshot_png"] = driver.get_screenshot_as_png()
     except Exception:
         pass
+    try:
+        out["page_source_snippet"] = (driver.page_source or "")[:30000]
+    except Exception:
+        pass
+    return out
 
-    try:
-        with open(SRC, "w", encoding="utf-8", errors="ignore") as f:
-            f.write((driver.page_source or "")[:30000])
-    except Exception:
-        pass
+
+def compute_webrtc_leak_score(
+    ip: str | None,
+    evidence: dict,
+    *,
+    had_exception: bool = False,
+) -> tuple[int, str]:
+    """
+    1 — No leak signal from this run (no IPv4 extracted / WebRTC looks quiet).
+    5 — Strong leak signal (RFC1918 “local” IP visible via WebRTC).
+    2–4 — Increasing confidence that some address path is exposed, or run is ambiguous.
+
+    Note: A visible *public* candidate in rtc-* fields is scored 4 (WebRTC is surfacing
+    an address); only RFC1918 in the collected evidence yields 5.
+    """
+    if had_exception:
+        return 3, "Run failed before a clean result; leak status unknown."
+
+    private = evidence.get("private_ips") or []
+    if private:
+        return (
+            5,
+            "RFC1918 address visible via WebRTC (local/private leak).",
+        )
+
+    if not ip:
+        rtc_ids = evidence.get("rtc_ids_found") or []
+        if rtc_ids:
+            return (
+                3,
+                "rtc-* elements exist but no IPv4 was parsed — page or timing ambiguous.",
+            )
+        return (
+            1,
+            "No client IPv4 extracted; no private leak and no structured candidate.",
+        )
+
+    src = evidence.get("ip_source_id")
+    if src in ("rtc-local", "rtc-public", "rtc-ipv4"):
+        return (
+            4,
+            "Structured WebRTC fields expose an IPv4 candidate (public or path-visible).",
+        )
+
+    if src == "body_text":
+        return (
+            2,
+            "IPv4 matched only from loose page text — low confidence (may be noise).",
+        )
+
+    return 3, "Extraction source unclear; treat as uncertain."
 
 
 def dom_rtc_ids(driver):
@@ -246,6 +298,11 @@ def try_extract_webrtc_evidence(driver, wait_seconds=30):
 
 def main():
     driver = None
+    mem_diag = None
+    score, note = 3, "No run completed."
+    ip = None
+    evidence: dict = {}
+
     try:
         driver = build_driver()
 
@@ -258,6 +315,7 @@ def main():
         # ---- ticket rule ----
         # Expected outcome: "No private/local IP exposed"
         ticket_fail = len(evidence.get("private_ips", [])) > 0
+        score, note = compute_webrtc_leak_score(ip, evidence, had_exception=False)
 
         if not ip:
             print("WebRTC IP not detected in the DOM/text.")
@@ -277,6 +335,10 @@ def main():
             print(f"  First private IP: {first_private['ip']} (source: {first_private['source']})")
         else:
             print("PASS: No private/local IP detected (RFC1918).")
+
+        print(f"\nScore:{score}")
+        print(f"  {note}")
+        print("  Scale: 1 = no leak signal  ·  5 = strong local (RFC1918) WebRTC leak")
 
         # Print concise evidence to make it debuggable
         print("\n[Diagnostics]")
@@ -306,21 +368,25 @@ def main():
         print(f"IP came from:       {evidence.get('ip_source_id')}")
         print(f"IP source text:    {evidence.get('ip_source_text')}")
     except Exception as e:
+        score, note = compute_webrtc_leak_score(None, {}, had_exception=True)
         print("\nAn error occurred in Selenium:")
         print(f"Exception type: {type(e).__name__}")
         print(f"Exception message: {e}")
         traceback.print_exc()
+        print(f"\n[Leak score 1–5] {score}")
+        print(f"  {note}")
     finally:
         if driver is not None:
             try:
-                dump_diagnostics(driver)
-                print(f"Saved screenshot/page snippet: {SHOT} / {SRC}")
+                mem_diag = collect_diagnostics_memory(driver)
             except Exception:
-                pass
+                mem_diag = None
             try:
                 driver.quit()
             except Exception:
                 pass
+
+    return score
 
 
 if __name__ == "__main__":

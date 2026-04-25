@@ -10,80 +10,72 @@ If a website sees you sending full 1500-byte packets, it knows you are not using
 or your VPN is misconfigured.
 '''
 
+#!/usr/bin/env python3
+
 import subprocess
 import re
 
-TUNNEL_PATTERNS = [
-    r"^tun", r"^tap", r"^wg", r"^ppp", r"^ipsec", r"^vti", r"^gre"
-]
-
 def run(cmd):
-    return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+    try:
+        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+    except:
+        return ""
 
-def parse_link_mtu():
-    # Parse: "2: eth0: <...> mtu 1378 ..."
+def get_min_mtu():
+    # Get all link info
     out = run(["ip", "-o", "link", "show"])
-    records = []
+    mtus = []
+    
     for line in out.splitlines():
-        m_iface = re.match(r"^\d+:\s+([^:]+):", line)
+        # Skip loopback (lo) because it usually has a massive MTU (65536)
+        if " lo " in line:
+            continue
+            
         m_mtu = re.search(r"\bmtu\s+(\d+)\b", line)
-        if m_iface and m_mtu:
-            iface = m_iface.group(1)
-            mtu = int(m_mtu.group(1))
-            records.append((iface, mtu))
-    return records
+        if m_mtu:
+            mtus.append(int(m_mtu.group(1)))
+    
+    return min(mtus) if mtus else 1500
 
-def is_tunnel_iface(name: str) -> bool:
-    return any(re.match(p, name) for p in TUNNEL_PATTERNS)
+def calculate_mtu_score(mtu):
+    """
+    Score Map:
+    1: 1500 (Standard Ethernet/No VPN)
+    2: 1451 - 1499 (Possible slight overhead/Virtualization)
+    3: 1421 - 1450 (Probable overhead/Some Tunnels)
+    4: 1351 - 1420 (Strong VPN signature - Wireguard/OpenVPN)
+    5: <= 1350 (Heavy encapsulation - Double VPN or high overhead)
+    """
+    if mtu >= 1500:
+        return 1
+    elif mtu > 1450:
+        return 2
+    elif mtu > 1420:
+        return 3
+    elif mtu > 1350:
+        return 4
+    else:
+        return 5
 
 def main():
-    print("--- MTU + Tunnel Evidence (heuristic) ---")
-
-    records = parse_link_mtu()
-    if not records:
-        print("Could not parse MTU from `ip link` output.")
-        return
-
-    # Heuristic “reduced MTU”
-    REDUCED_MIN = 1300
-    REDUCED_MAX = 1450
-
-    # Summaries
-    tunnel_ifaces = [(i, m) for (i, m) in records if i != "lo" and is_tunnel_iface(i)]
-    eth_like = [(i, m) for (i, m) in records if i != "lo" and (i == "eth0" or i.startswith("en"))]
-
-    # Print MTUs
-    for iface, mtu in sorted(records, key=lambda x: x[0]):
-        if iface == "lo":
-            continue
-
-        if is_tunnel_iface(iface):
-            status = "🚨 Tunnel interface MTU (strong VPN/tunnel evidence)"
-        elif 0 < mtu <= 1500:
-            status = f"⚠️ Reduced MTU (not proof; verify with tunnel evidence)"
-        else:
-            status = "✅ MTU"
-
-        print(f"{iface:10} MTU={mtu:5}  {status}")
-
-    print("\n--- Confidence Summary ---")
-    if tunnel_ifaces:
-        print(f"High confidence of VPN/tunnel presence: tunnel-like interface(s) detected: {', '.join([i for i,_ in tunnel_ifaces])}")
-        if eth_like:
-            for i, m in eth_like:
-                print(f"Main interface {i} has MTU={m}.")
-    else:
-        print("Low confidence: No tunnel-like interface names detected.")
-        print("Your reduced MTU (e.g., eth0=1378) may be due to WSL/Windows networking virtualization, not necessarily the VPN.")
-
-    # Extra debug: show routes (quick)
-    print("\n--- Route Snippet (top lines) ---")
-    try:
-        routes = run(["ip", "route", "show"]).splitlines()
-        for r in routes[:15]:
-            print(r)
-    except Exception as e:
-        print(f"Could not fetch routes: {e}")
+    mtu = get_min_mtu()
+    score = calculate_mtu_score(mtu)
+    
+    print(f"Detected Minimum MTU: {mtu}")
+    print("-" * 30)
+    print(f"SCORE: {score}")
+    
+    # Interpretation
+    if score == 1:
+        status = "Standard packet size. No VPN detected."
+    elif score == 2:
+        status = "Slightly reduced packet size. Likely local virtualization (WSL/VM)."
+    elif score == 3:
+        status = "Moderate packet reduction. Likely a tunnel or VPN."
+    elif score >= 4:
+        status = "Small packet size detected. High certainty of VPN encapsulation."
+        
+    print(f"ANALYSIS: {status}")
 
 if __name__ == "__main__":
     main()

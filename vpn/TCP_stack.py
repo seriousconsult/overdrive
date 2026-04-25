@@ -13,9 +13,6 @@ Because this is below packet level Python is not the ideal tool.
 NOTE:scapy needs sudo however sudo does not use the Python virtual env. So you need to run like this: 
 sudo /mnt/c/code/overdrive/virtual_env/bin/python /mnt/c/code/overdrive/vpn/TCP_stack.py
 
-'''
-#!/usr/bin/env python3
-"""
 TCP SYN stack inspection + comparison vs actual OS environment.
 
 - Reads wsl_syn.pcap
@@ -25,19 +22,11 @@ TCP SYN stack inspection + comparison vs actual OS environment.
 - Detects the actual runtime OS/kernel environment (Windows/Linux/WSL)
 - Compares: captured SYN classification vs actual OS expectation
 
-"""
-#!/usr/bin/env python3
-"""
-TCP SYN stack inspection + comparison vs actual OS environment (WSL focused).
-
-Run (note: scapy capture needs sudo):
-  sudo /mnt/c/code/overdrive/virtual_env/bin/python /mnt/c/code/overdrive/vpn/TCP_stack.py
-
 This version:
 - Captures outgoing TCP SYN packets using AsyncSniffer
 - Generates IPv4-only TCP SYN traffic using a Python subprocess (NO curl)
 - Tries each Scapy-discovered interface until it captures packets
-"""
+'''
 
 import os
 import platform
@@ -241,28 +230,39 @@ def capture_live_syn_inline_subprocess(packet_count=3, timeout=30):
 
     return []
 
+def calculate_stack_score(consensus, expected):
+    """
+    Scoring Logic:
+    5: Perfect match (e.g., Linux-like captured on Linux OS)
+    4: Uncertain/Neutral (Captures were inconclusive)
+    3: Slight Deviation (Matches basic family but weird scores)
+    1: Hard Mismatch (e.g., Windows-like captured on Linux OS)
+    """
+    if consensus == "Uncertain":
+        return 3 # Neutral/Probable match but inconclusive
+    
+    # Extract the base family (e.g., "Linux" from "Linux-like")
+    consensus_family = consensus.split("-")[0]
+    expected_family = expected.split("-")[0]
+    
+    if consensus_family == expected_family:
+        return 5 # Complete Match
+    else:
+        return 1 # Hard Mismatch (Likely VPN/Proxy modification)
 
 def main():
     runtime_label, expected_stack = detect_runtime_os()
-    print("=== TCP Stack Inspection (Live WSL) ===")
-    print(f"Runtime: {runtime_label} | Expected: {expected_stack}\n")
+    print("=== TCP Stack Fingerprint Analysis ===")
+    print(f"Runtime Environment: {runtime_label}")
+    print(f"Expected Network Signature: {expected_stack}\n")
 
     pkts = capture_live_syn_inline_subprocess(
         packet_count=CAPTURE_PACKET_COUNT,
         timeout=CAPTURE_TIMEOUT,
     )
 
-    os_info = get_linux_distro_info()
-    if "error" in os_info:
-        print(f"Alert: {os_info['error']}")
-    else:
-        print(f"Successfully identified OS: {os_info.get('PRETTY_NAME')}")
-
     if not pkts:
-        print("[-] Error: No packets captured.")
-        print("    Suggestions:")
-        print("    - Change TARGET_HOST / TARGET_PORT (e.g., 1.1.1.1:443 or example.com:80).")
-        print("    - If you still see 0 packets on all interfaces, verify with tcpdump ground truth.")
+        print("[-] Error: No packets captured for analysis.")
         return
 
     syn_results = []
@@ -274,21 +274,27 @@ def main():
             )
             syn_results.append(label)
 
-            print(f"\n[SYN] {feats['ip_src']} -> {feats['ip_dst']}")
-            print(f"  TTL: {feats['ip_ttl']} | Win: {feats['tcp_win']} | MSS: {feats['mss']}")
-            print(f"  OS Label: {label} | scores Linux={l_score} Windows={w_score} | conf={conf_lvl}")
+    # Determine Consensus and Score
+    counts = Counter(syn_results)
+    consensus, _ = counts.most_common(1)[0]
+    score = calculate_stack_score(consensus, expected_stack)
 
-    if syn_results:
-        counts = Counter(syn_results)
-        consensus, _ = counts.most_common(1)[0]
-
-        print(f"\n--- CONSENSUS ---")
-        print(f"Captured: {consensus} | Expected: {expected_stack}")
-        if consensus.split("-")[0] == expected_stack.split("-")[0]:
-            print("Result: ✅ MATCH")
-        else:
-            print("Result: 🚨 MISMATCH")
-
+    print("\n" + "="*40)
+    print(f" SCORE: {score}")
+    
+    descriptions = {
+        5: "MATCH: Your TCP stack matches your OS perfectly.",
+        4: "LIKELY MATCH: Minor variations detected.",
+        3: "UNCERTAIN: Could not definitively verify stack signature.",
+        2: "PROBABLE MISMATCH: Your packets look suspicious.",
+        1: "HARD MISMATCH: Your OS is different from your packet signature (VPN/Proxy Detected)."
+    }
+    
+    print(f" STATUS: {descriptions.get(score)}")
+    print("="*40)
+    
+    if score == 1:
+        print("💡 ALERT: A web server seeing these packets will know you are masking your OS.")
 
 if __name__ == "__main__":
     main()

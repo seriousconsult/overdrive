@@ -2,6 +2,11 @@
 """
 Best-effort VM/Container Likelihood Detector (traffic + local evidence)
 
+Unified output: an integer score 1–5 (see compute_vm_container_score).
+  1 — Very unlikely VM or container
+  5 — Very likely VM or container
+  2–4 — increasing uncertainty / strength of evidence
+
 Network traffic:
   - Sniffs Ethernet frames (if visible) to observe source MAC OUIs
   - Generates outbound HTTPS requests while sniffing
@@ -164,6 +169,69 @@ def generate_traffic(target="https://example.com", count=10, delay=0.12):
         time.sleep(delay)
 
 
+def compute_vm_container_score(
+    cont_evid: list,
+    vm_evid: list,
+    local_vendor: str | None,
+    mapped_obs: list,
+) -> tuple[int, str]:
+    """
+    Single likelihood score 1–5 for "is this environment a VM or container?"
+
+    1 — Very unlikely (no local virtualization/container signals detected).
+    2 — Unlikely / weak hints only.
+    3 — Uncertain (mixed, weak, or sniff-only hints).
+    4 — Likely VM or container (solid local evidence).
+    5 — Very likely (strong combined local evidence).
+
+    Observed Ethernet OUIs alone are treated as weak (often remote peers); they
+    cannot push the score above 3 without local VM/container/NIC evidence.
+    """
+    has_c = bool(cont_evid)
+    has_v = bool(vm_evid)
+    has_lv = bool(local_vendor)
+    has_tr = bool(mapped_obs)
+
+    local_stack = has_c or has_v or has_lv
+
+    raw = 0
+    if has_c:
+        raw += 5
+    if has_v:
+        raw += 4
+    if has_lv:
+        raw += 2
+    if has_tr:
+        raw += 1
+
+    if not local_stack:
+        if has_tr:
+            return (
+                3,
+                "Uncertain: only virtualization-tagged OUIs seen on the wire (may be remote); "
+                "no local VM/container checks fired.",
+            )
+        raw = 0
+
+    if raw <= 0:
+        score = 1
+        note = "No VM/container local signals; no mapped virt OUIs in capture."
+    elif raw <= 2:
+        score = 2
+        note = "Weak local hints only (e.g. virt NIC OUI without other VM/container markers)."
+    elif raw == 3:
+        score = 3
+        note = "Some evidence but ambiguous; review reasons below."
+    elif raw <= 7:
+        score = 4
+        note = "Solid local evidence of a container and/or hypervisor environment."
+    else:
+        score = 5
+        note = "Very strong combined indicators (container + VM/network markers align)."
+
+    return score, note
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iface", default=None, help="Interface to sniff on (e.g., eth0).")
@@ -232,24 +300,18 @@ def main():
 
     top_ouis = seen_ouis.most_common(8)
 
-    # Evidence scoring
-    vm_score = 0
-    container_score = 0
     reasons_vm = []
     reasons_container = []
 
     cont_evid = container_evidence()
     if cont_evid:
-        container_score += 5
         reasons_container.extend(cont_evid)
 
     vm_evid = vm_evidence()
     if vm_evid:
-        vm_score += 4
         reasons_vm.extend(vm_evid)
 
     if local_vendor:
-        vm_score += 2
         reasons_vm.append(f"Local NIC OUI maps to {local_vendor} (heuristic)")
 
     mapped_obs = []
@@ -258,24 +320,23 @@ def main():
         if v:
             mapped_obs.append((v, oui, cnt))
     if mapped_obs:
-        vm_score += 1
         reasons_vm.append(
             "Observed traffic OUIs include mapped vendors: " +
             ", ".join([f"{v}({oui})x{cnt}" for v, oui, cnt in mapped_obs[:3]])
         )
 
-    def label_from_score(score, high_threshold, med_threshold):
-        if score >= high_threshold:
-            return "HIGH"
-        if score >= med_threshold:
-            return "MEDIUM"
-        return "LOW"
-
-    vm_level = label_from_score(vm_score, high_threshold=6, med_threshold=3)
-    cont_level = label_from_score(container_score, high_threshold=4, med_threshold=2)
+    unified, unified_note = compute_vm_container_score(
+        cont_evid,
+        vm_evid,
+        local_vendor,
+        mapped_obs,
+    )
 
     # --------- Output (trimmed/noise removed per your request) ----------
     print("== Results ==")
+    print(f"Score:{unified}")
+    print(f"  ({unified_note})")
+    print()
     print(f"L2/MAC OUI evidence: Ether frames observed: {ether_seen}")
 
     if top_ouis:
@@ -289,19 +350,18 @@ def main():
     else:
         print("Top observed OUIs: none")
 
-    print(f"\nVM Likelihood (best-effort): {vm_level}")
     if reasons_vm:
-        print("Reasons (VM):")
+        print("\nSupporting detail (VM / network hints):")
         for r in reasons_vm[:10]:
             print(f"  - {r}")
 
-    print(f"\nContainer Likelihood (best-effort): {cont_level}")
     if reasons_container:
-        print("Reasons (Container):")
+        print("\nSupporting detail (container hints):")
         for r in reasons_container[:10]:
             print(f"  - {r}")
 
     print("\nDone.")
+    return unified
 
 
 if __name__ == "__main__":

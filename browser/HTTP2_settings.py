@@ -146,10 +146,86 @@ def likely_browser_vs_library(header_table_size: int | None):
     if header_table_size is None:
         return "unknown"
     if header_table_size >= 32768:
-        return "browser-like (heuristic)"
+        return "browser-like"
     if header_table_size <= 8192:
-        return "library-like (heuristic)"
-    return "mixed (heuristic)"
+        return "library-like"
+    return "mixed"
+
+
+# Known Python/httpx JA3 hashes
+PYTHON_JA3_HASHES = {
+    "3adacb99ecb51ed59c4f6c4ed9a7dcaa",  # httpx
+    "764949511634563a62f4007f9c89420a",  # requests
+    "ee99e69123896791e84610996841edaa",  # urllib3
+}
+
+# Known browser JA3 hashes (common Chrome patterns)
+CHROME_JA3_HASHES = {
+    "4d22de3e6cc2e253afb74964d2a0a8e6",  # Chrome stable
+    "a2e132e1cf0c8e02c8c1a3c1c3a4e8c9",  # Chrome other
+}
+
+
+def calculate_browser_score(ua_looks_like_httpx: bool, http2_style: str, 
+                            ja3_hash: str, header_table_size: int | None) -> tuple[int, str]:
+    """
+    Calculate a score 1-5 for browser vs script detection:
+    1 = certainly not a browser (definitely script/VPN)
+    2 = probably not a browser
+    3 = uncertain
+    4 = probably a browser
+    5 = certainly a browser
+    """
+    score = 3  # Start neutral
+    reasons = []
+    
+    # Check User-Agent
+    if ua_looks_like_httpx:
+        score -= 2
+        reasons.append("User-Agent contains python-httpx")
+    else:
+        score += 1
+        reasons.append("User-Agent does not look like httpx")
+    
+    # Check HTTP/2 settings style
+    if http2_style == "library-like":
+        score -= 1
+        reasons.append("HTTP/2 settings are library-like")
+    elif http2_style == "browser-like":
+        score += 1
+        reasons.append("HTTP/2 settings are browser-like")
+    
+    # Check JA3 hash
+    if ja3_hash:
+        if ja3_hash in PYTHON_JA3_HASHES:
+            score -= 1
+            reasons.append("JA3 hash matches Python libraries")
+        elif ja3_hash in CHROME_JA3_HASHES:
+            score += 1
+            reasons.append("JA3 hash matches Chrome")
+    
+    # Check header table size
+    if header_table_size is not None:
+        if header_table_size <= 4096:
+            score -= 1
+            reasons.append(f"Header table size {header_table_size} is small (library-like)")
+        elif header_table_size >= 65536:
+            score += 1
+            reasons.append(f"Header table size {header_table_size} is large (browser-like)")
+    
+    # Clamp score to 1-5
+    score = max(1, min(5, score))
+    
+    # Generate description
+    descriptions = {
+        1: "Certainly NOT a browser (script/VPN detected)",
+        2: "Probably NOT a browser (script likely)",
+        3: "Uncertain (cannot determine browser vs script)",
+        4: "Probably a browser",
+        5: "Certainly a browser"
+    }
+    
+    return score, descriptions[score]
 
 
 def main():
@@ -263,7 +339,19 @@ def main():
     print("- Verdict:", verdict)
     print("- Confidence:", confidence)
 
+    # Calculate 1-5 score
+    score, score_desc = calculate_browser_score(
+        ua_looks_like_httpx=ua_looks_like_httpx,
+        http2_style=http2_style,
+        ja3_hash=ja3_hash,
+        header_table_size=header_table_size
+    )
+
+    print(f"\nScore: {score}")
+    print(f"- {score_desc}")
+
     print("\n============================================================")
+    return score
 
 
 if __name__ == "__main__":

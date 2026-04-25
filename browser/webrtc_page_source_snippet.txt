@@ -1,0 +1,400 @@
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="format-detection" content="telephone=no">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebRTC Leak Test - BrowserLeaks</title>
+<meta name="description" content="The WebRTC Leak Test is a critical tool for anyone using a VPN, as it leverages the WebRTC API to communicate with a STUN server and potentially reveal the user's real local and public IP addresses, even when using a VPN, proxy server, or behind a NAT. This tool can help verify whether a real public IP is being leaked.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://browserleaks.com/webrtc">
+<meta property="og:site_name" content="BrowserLeaks">
+<meta property="og:title" content="WebRTC Leak Test">
+<meta property="og:description" content="The WebRTC Leak Test is a critical tool for anyone using a VPN, as it leverages the WebRTC API to communicate with a STUN server and potentially reveal the user's real local and public IP addresses, even when using a VPN, proxy server, or behind a NAT. This tool can help verify whether a real public IP is being leaked.">
+<link type="text/css" rel="stylesheet" media="all" href="/css/style.css?v=57520745">
+<noscript><style type="text/css">.script{opacity:.5}.js-hide-block{display:block}</style></noscript>
+<script>(function(){var a='.doscript{display:block}.noscript{display:none!important}.script{opacity:1}',b=document.head||document.getElementsByTagName('head')[0],c=document.createElement('style');c.type='text/css';c.styleSheet?c.styleSheet.cssText=a:c.appendChild(document.createTextNode(a));b.appendChild(c)})()</script><style type="text/css">.doscript{display:block}.noscript{display:none!important}.script{opacity:1}</style>
+<script src="/js/default.js?v=57520745"></script>
+<link rel="icon" sizes="32x32" href="https://browserleaks.com/favicon.ico">
+<link rel="icon" sizes="196x196" href="https://browserleaks.com/img/favicons/icon-196x196.png?v=39295881">
+<link rel="apple-touch-icon" sizes="180x180" href="https://browserleaks.com/img/favicons/apple-touch-icon.png?v=39295881">
+<link rel="manifest" href="https://browserleaks.com/manifest.json?v=39295881">
+<meta name="msapplication-config" content="https://browserleaks.com/browserconfig.xml?v=39295881">
+</head>
+<body spellcheck="false"><div id="logo" class="n-640"><a href="/" title="Home" tabindex="-1"><strong>BrowserLeaks</strong></a></div>
+
+<nav aria-haspopup="true">
+<div id="nav">
+  <div id="nav-pin" class="n-640">
+    <form name="nav-pin-form" id="nav-pin-form" method="POST" action="/webrtc" onsubmit="return false">
+    <input type="submit" id="nav-pin-submit" name="nav-pin-submit" value="1" title="Toggle Menu">
+    </form>
+  </div>
+  <div id="nav-hover">
+    <div id="nav-menu">
+      <input id="nav-checkbox" type="checkbox" autocomplete="off" aria-label="Menu" title="Menu">
+      <span class="nav-hb"></span><span class="nav-hb"></span><span class="nav-hb"></span>
+      <ul>
+      <li><div class="nav-close"></div></li>
+        <li class="margin"><a class="ico-index" href="/" title="Home Page" rel="nofollow">Home Page</a></li>
+        <li><a class="ico-ip" href="/ip" title="What Is My IP Address">IP Address</a></li>
+        <li><a class="ico-javascript" href="/javascript" title="JavaScript Browser Information">JavaScript</a></li>
+        <li><a class="this ico-webrtc" href="/webrtc" title="WebRTC Leak Test" rel="nofollow">WebRTC Leak Test</a></li>
+        <li><a class="ico-canvas" href="/canvas" title="HTML5 Canvas Fingerprinting">Canvas Fingerprint</a></li>
+        <li><a class="ico-webgl" href="/webgl" title="WebGL Browser Report">WebGL Report</a></li>
+        <li><a class="ico-fonts" href="/fonts" title="Font Fingerprinting">Font Fingerprinting</a></li>
+        <li><a class="ico-geo" href="/geo" title="HTML5 Geolocation API and Reverse Geocoding">Geolocation API</a></li>
+        <li><a class="ico-features" href="/features" title="HTML5 Features Detection">Features Detection</a></li>
+        <li><a class="ico-tls" href="/tls" title="TLS Client Security Test">TLS Client Test</a></li>
+        <li class="margin-less"><a class="ico-proxy" href="/proxy" title="Content Filtering Proxy Software Detection">Content Filters</a></li>
+        <li class="margin-less"><a class="ico-more" href="https://browserleaks.com/#more" title="More Tools" rel="nofollow">More Tools</a></li>
+        <li><a class="ico-settings" href="/settings" title="Site Settings" rel="nofollow">Settings</a></li>
+      </ul>
+      <div class="nav-dark"></div>
+    </div>
+  </div>
+</div>
+</nav>
+
+<div class="responsive-header responsive-show">
+  <div class="responsive-home"><a href="/" title="Home"><div class="svg-icon svg-fingerprint"></div></a></div>
+  <div class="responsive-search"><div class="responsive-search-icon svg-icon svg-search"></div></div>
+  <div class="responsive-search-form n"><input type="search" id="responsive-search-input" maxlength="512" aria-label="Enter IP Address or Domain Name" placeholder="Enter IP Address or Domain Name"><input type="button" class="responsive-search-submit n" value=""></div>
+</div>
+
+<div id="content">
+  <div id="lookup-form" class="n-640">
+    <form action="/search" method="POST">
+    <ul>
+      <li><input tabindex="2" aria-label="IP Address Lookup" placeholder="IP Address Lookup" type="text" id="lookup-input" class="placeholder" name="data" title="Enter IP Address or Domain Name" maxlength="512"></li>
+      <li><input tabindex="3" type="submit" id="lookup-submit" class="svg-search" name="lookup-submit" value="" title="Submit"></li>
+    </ul>
+    </form>
+  </div>
+
+<header><h1><a href="/webrtc">WebRTC Leak Test</a></h1><div data-html2canvas-ignore="" id="screenshot" class="svg-photo" title="Take a screenshot of the entire page"></div></header>
+
+<div class="noscript warn">JavaScript Disabled</div>
+
+<table class="wb responsive-table">
+<tbody>
+  <tr class="thead"><td colspan="2"><h3>Your Remote IP</h3></td></tr>
+</tbody>
+<tbody class="responsive-tbody">
+  <tr><td>IPv4 Address</td><td id="client-ipv4" data-ip="108.31.106.147" data-iso_code="US"><span class="flag-container"><img class="flag-icon" src="/img/flags/US.png" alt="US" title="United States (US)"><span class="flag-text wball"><a href="/ip/108.31.106.147" title="Get IP Address Details">108.31.106.147</a></span></span></td></tr>
+  <tr><td>IPv6 Address</td><td id="client-ipv6" class="wball relative">-</td></tr>
+</tbody>
+<tbody class="script">
+  <tr class="thead"><td colspan="2"><h3>WebRTC Support Detection</h3></td></tr>
+  <tr><td>RTCPeerConnection</td><td id="rtc-peerconnection" style="width:95%"><span class="true">✔</span> True</td></tr>
+  <tr><td>RTCDataChannel</td><td id="rtc-datachannel"><span class="true">✔</span> True</td></tr>
+  <tr class="thead"><td colspan="2"><h3>Your WebRTC IP</h3></td></tr>
+  <tr><td rowspan="2">WebRTC Leak Test</td><td id="rtc-leak" class=""><span class="exclaim">!</span> WebRTC exposes your Local IP</td></tr><tr class="rtc-leak-tr"><td><span class="true">✔</span> No Public IP Leak</td></tr>
+</tbody>
+<tbody class="script responsive-tbody tbody-follow">
+  <tr><td>Local IP Address</td><td><span id="rtc-local"><span class="flag-container"><img class="flag-icon" title="Local" src="/img/flags/local.png"><span class="flag-text wball"><a href="/ip/172.18.27.1" title="Get IP Address Details">172.18.27.1</a></span></span> </span></td></tr>
+  <tr><td>Public IP Address</td><td><span id="rtc-public"><span class="flag-container"><img class="flag-icon" id="ip-108-31-106-147" title="United States (US)" alt="US" src="/img/flags/US.png"><span class="flag-text wball"><a href="/ip/108.31.106.147" title="Get IP Address Details">108.31.106.147</a></span></span> </span></td></tr>
+</tbody>
+<tbody class="script">
+  <tr class="thead"><td colspan="2"><h3>Session Description</h3></td></tr>
+  <tr><td class="n-640">SDP Log</td><td colspan="2" class="json-output"><div class=""><textarea id="rtc-sdp" resizable="yes" autocomplete="off" wrap="on">v=0
+o=- 1366982944840472458 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0 1 2
+a=extmap-allow-mixed
+a=msid-semantic: WMS
+m=audio 58668 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126
+c=IN IP4 108.31.106.147
+a=rtcp:9 IN IP4 0.0.0.0
+a=candidate:3980889411 1 udp 2122260223 172.18.27.1 39070 typ host generation 0 network-id 1
+a=candidate:3359523497 1 udp 1686052607 108.31.106.147 58668 typ srflx raddr 172.18.27.1 rport 39070 generation 0 network-id 1
+a=candidate:2475192283 1 tcp 1518280447 172.18.27.1 9 typ host tcptype active generation 0 network-id 1
+a=ice-ufrag:Gdao
+a=ice-pwd:DoNJVXWIMzFZsTZXK+x75CeU
+a=ice-options:trickle
+a=fingerprint:sha-256 B2:18:2E:6B:5F:4A:7B:78:38:22:C0:33:1F:B9:4F:F1:8F:F3:F0:18:55:1C:9D:7B:D0:88:B2:18:A5:4D:9B:D8
+a=setup:actpass
+a=mid:0
+a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid
+a=recvonly
+a=rtcp-mux
+a=rtcp-rsize
+a=rtpmap:111 opus/48000/2
+a=rtcp-fb:111 transport-cc
+a=fmtp:111 minptime=10;useinbandfec=1
+a=rtpmap:63 red/48000/2
+a=fmtp:63 111/111
+a=rtpmap:9 G722/8000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:13 CN/8000
+a=rtpmap:110 telephone-event/48000
+a=rtpmap:126 telephone-event/8000
+m=video 58625 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 35 36 37 38 103 104 107 108 109 114 115 116 117 118 39 40 41 42 43 44 45 46 47 48 119 120 121 49
+c=IN IP4 108.31.106.147
+a=rtcp:9 IN IP4 0.0.0.0
+a=candidate:3980889411 1 udp 2122260223 172.18.27.1 43231 typ host generation 0 network-id 1
+a=candidate:3359523497 1 udp 1686052607 108.31.106.147 58625 typ srflx raddr 172.18.27.1 rport 43231 generation 0 network-id 1
+a=candidate:2475192283 1 tcp 1518280447 172.18.27.1 9 typ host tcptype active generation 0 network-id 1
+a=ice-ufrag:Gdao
+a=ice-pwd:DoNJVXWIMzFZsTZXK+x75CeU
+a=ice-options:trickle
+a=fingerprint:sha-256 B2:18:2E:6B:5F:4A:7B:78:38:22:C0:33:1F:B9:4F:F1:8F:F3:F0:18:55:1C:9D:7B:D0:88:B2:18:A5:4D:9B:D8
+a=setup:actpass
+a=mid:1
+a=extmap:14 urn:ietf:params:rtp-hdrext:toffset
+a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+a=extmap:13 urn:3gpp:video-orientation
+a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=extmap:5 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay
+a=extmap:6 http://www.webrtc.org/experiments/rtp-hdrext/video-content-type
+a=extmap:7 http://www.webrtc.org/experiments/rtp-hdrext/video-timing
+a=extmap:8 http://www.webrtc.org/experiments/rtp-hdrext/color-space
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:10 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+a=extmap:11 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id
+a=recvonly
+a=rtcp-mux
+a=rtcp-rsize
+a=rtpmap:96 VP8/90000
+a=rtcp-fb:96 goog-remb
+a=rtcp-fb:96 transport-cc
+a=rtcp-fb:96 ccm fir
+a=rtcp-fb:96 nack
+a=rtcp-fb:96 nack pli
+a=rtpmap:97 rtx/90000
+a=fmtp:97 apt=96
+a=rtpmap:98 VP9/90000
+a=rtcp-fb:98 goog-remb
+a=rtcp-fb:98 transport-cc
+a=rtcp-fb:98 ccm fir
+a=rtcp-fb:98 nack
+a=rtcp-fb:98 nack pli
+a=fmtp:98 profile-id=0
+a=rtpmap:99 rtx/90000
+a=fmtp:99 apt=98
+a=rtpmap:100 VP9/90000
+a=rtcp-fb:100 goog-remb
+a=rtcp-fb:100 transport-cc
+a=rtcp-fb:100 ccm fir
+a=rtcp-fb:100 nack
+a=rtcp-fb:100 nack pli
+a=fmtp:100 profile-id=2
+a=rtpmap:101 rtx/90000
+a=fmtp:101 apt=100
+a=rtpmap:35 VP9/90000
+a=rtcp-fb:35 goog-remb
+a=rtcp-fb:35 transport-cc
+a=rtcp-fb:35 ccm fir
+a=rtcp-fb:35 nack
+a=rtcp-fb:35 nack pli
+a=fmtp:35 profile-id=1
+a=rtpmap:36 rtx/90000
+a=fmtp:36 apt=35
+a=rtpmap:37 VP9/90000
+a=rtcp-fb:37 goog-remb
+a=rtcp-fb:37 transport-cc
+a=rtcp-fb:37 ccm fir
+a=rtcp-fb:37 nack
+a=rtcp-fb:37 nack pli
+a=fmtp:37 profile-id=3
+a=rtpmap:38 rtx/90000
+a=fmtp:38 apt=37
+a=rtpmap:103 H264/90000
+a=rtcp-fb:103 goog-remb
+a=rtcp-fb:103 transport-cc
+a=rtcp-fb:103 ccm fir
+a=rtcp-fb:103 nack
+a=rtcp-fb:103 nack pli
+a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f
+a=rtpmap:104 rtx/90000
+a=fmtp:104 apt=103
+a=rtpmap:107 H264/90000
+a=rtcp-fb:107 goog-remb
+a=rtcp-fb:107 transport-cc
+a=rtcp-fb:107 ccm fir
+a=rtcp-fb:107 nack
+a=rtcp-fb:107 nack pli
+a=fmtp:107 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f
+a=rtpmap:108 rtx/90000
+a=fmtp:108 apt=107
+a=rtpmap:109 H264/90000
+a=rtcp-fb:109 goog-remb
+a=rtcp-fb:109 transport-cc
+a=rtcp-fb:109 ccm fir
+a=rtcp-fb:109 nack
+a=rtcp-fb:109 nack pli
+a=fmtp:109 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
+a=rtpmap:114 rtx/90000
+a=fmtp:114 apt=109
+a=rtpmap:115 H264/90000
+a=rtcp-fb:115 goog-remb
+a=rtcp-fb:115 transport-cc
+a=rtcp-fb:115 ccm fir
+a=rtcp-fb:115 nack
+a=rtcp-fb:115 nack pli
+a=fmtp:115 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f
+a=rtpmap:116 rtx/90000
+a=fmtp:116 apt=115
+a=rtpmap:117 H264/90000
+a=rtcp-fb:117 goog-remb
+a=rtcp-fb:117 transport-cc
+a=rtcp-fb:117 ccm fir
+a=rtcp-fb:117 nack
+a=rtcp-fb:117 nack pli
+a=fmtp:117 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f
+a=rtpmap:118 rtx/90000
+a=fmtp:118 apt=117
+a=rtpmap:39 H264/90000
+a=rtcp-fb:39 goog-remb
+a=rtcp-fb:39 transport-cc
+a=rtcp-fb:39 ccm fir
+a=rtcp-fb:39 nack
+a=rtcp-fb:39 nack pli
+a=fmtp:39 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f
+a=rtpmap:40 rtx/90000
+a=fmtp:40 apt=39
+a=rtpmap:41 H264/90000
+a=rtcp-fb:41 goog-remb
+a=rtcp-fb:41 transport-cc
+a=rtcp-fb:41 ccm fir
+a=rtcp-fb:41 nack
+a=rtcp-fb:41 nack pli
+a=fmtp:41 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=f4001f
+a=rtpmap:42 rtx/90000
+a=fmtp:42 apt=41
+a=rtpmap:43 H264/90000
+a=rtcp-fb:43 goog-remb
+a=rtcp-fb:43 transport-cc
+a=rtcp-fb:43 ccm fir
+a=rtcp-fb:43 nack
+a=rtcp-fb:43 nack pli
+a=fmtp:43 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=f4001f
+a=rtpmap:44 rtx/90000
+a=fmtp:44 apt=43
+a=rtpmap:45 AV1/90000
+a=rtcp-fb:45 goog-remb
+a=rtcp-fb:45 transport-cc
+a=rtcp-fb:45 ccm fir
+a=rtcp-fb:45 nack
+a=rtcp-fb:45 nack pli
+a=fmtp:45 level-idx=5;profile=0;tier=0
+a=rtpmap:46 rtx/90000
+a=fmtp:46 apt=45
+a=rtpmap:47 AV1/90000
+a=rtcp-fb:47 goog-remb
+a=rtcp-fb:47 transport-cc
+a=rtcp-fb:47 ccm fir
+a=rtcp-fb:47 nack
+a=rtcp-fb:47 nack pli
+a=fmtp:47 level-idx=5;profile=1;tier=0
+a=rtpmap:48 rtx/90000
+a=fmtp:48 apt=47
+a=rtpmap:119 red/90000
+a=rtpmap:120 rtx/90000
+a=fmtp:120 apt=119
+a=rtpmap:121 ulpfec/90000
+a=rtpmap:49 flexfec-03/90000
+a=rtcp-fb:49 goog-remb
+a=rtcp-fb:49 transport-cc
+a=fmtp:49 repair-window=10000000
+m=application 58590 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 108.31.106.147
+a=candidate:3980889411 1 udp 2122260223 172.18.27.1 48276 typ host generation 0 network-id 1
+a=candidate:3359523497 1 udp 1686052607 108.31.106.147 58590 typ srflx raddr 172.18.27.1 rport 48276 generation 0 network-id 1
+a=candidate:2475192283 1 tcp 1518280447 172.18.27.1 9 typ host tcptype active generation 0 network-id 1
+a=ice-ufrag:Gdao
+a=ice-pwd:DoNJVXWIMzFZsTZXK+x75CeU
+a=ice-options:trickle
+a=fingerprint:sha-256 B2:18:2E:6B:5F:4A:7B:78:38:22:C0:33:1F:B9:4F:F1:8F:F3:F0:18:55:1C:9D:7B:D0:88:B2:18:A5:4D:9B:D8
+a=setup:actpass
+a=mid:2
+a=sctp-port:5000
+a=max-message-size:262144
+</textarea></div></td></tr>
+  <tr class="thead"><td colspan="2"><h3>Media Devices</h3></td></tr>
+  <tr><td>API Support</td><td id="rtc-enumeratedevices"><span class="true">✔</span> True</td></tr>
+  <tr><td class="rtc-form"><button id="rtc-audio-button" title="Request Audio-Capture Permissions">Audio <span class="n-640 n">Capture</span> Permissions</button></td><td id="rtc-audio-permission"><span class="exclaim">!</span> Granted Permanently</td></tr>
+  <tr><td class="rtc-form"><button id="rtc-video-button" title="Request Video-Capture Permissions">Video <span class="n-640 n">Capture</span> Permissions</button></td><td id="rtc-video-permission"><span class="exclaim">!</span> Granted Permanently</td></tr>
+  <tr><td class="n-640">Media Devices</td><td colspan="2" id="rtc-device-ids" class="pre mono">    kind: <b>audioinput</b>
+   label: Fake Default Audio Input
+deviceId: default
+ groupId: 3083e16b400967641b7577c76d319d9361ee0a75d8481d4ab36bf8caf5acc280
+
+    kind: <b>audioinput</b>
+   label: Fake Audio Input 1
+deviceId: 45e388bc2f1bb69b911bdabd25b52b7f46ad252408cb6fbd271888bd3e85f07f
+ groupId: d210f25d843eb14b693f502655eacca6f3f1d64abe1ca4d782ff4a822eb5abbb
+
+    kind: <b>audioinput</b>
+   label: Fake Audio Input 2
+deviceId: 9f593937e28380777e0176ab77e616ac652983c14fc2062a89aff6ff6c2d8f32
+ groupId: 172bf702d53b81b448fe217b820806dae0b9beadafbfa645c0150de72075f991
+
+    kind: <b>videoinput</b>
+   label: fake_device_0
+deviceId: bcc80429e44ddc0ef8aa47fb01e31f03fe2cfb9c40f5c54760851ae1e32a6487
+ groupId: ed3ce1c29a97a3936f8e01788404b52e29ec77c6552d242449dc88a88b03c47c
+
+    kind: <b>audiooutput</b>
+   label: Fake Default Audio Output
+deviceId: default
+ groupId: d2da3c905856199c397cb23073f7d4f8e00930a01dc3c701fea852a37c2baa83
+
+    kind: <b>audiooutput</b>
+   label: Fake Audio Output 1
+deviceId: 57094059276ea72b483b582dd8582a14ec3cc1976e690ab85581e756d45f487a
+ groupId: 6baf9b999aa010c55a3a4b196530e8cb4fb2710840d713c77ae4aee58045c1c6
+
+    kind: <b>audiooutput</b>
+   label: Fake Audio Output 2
+deviceId: 68261a50cef440dc0ba93b6aafe249d0d74804971fe45d46b255792c04211f58
+ groupId: 1b18430075604496ce6f606312c11fe9e9d1b435947847d94a4ecf68cdc8dcfa
+</td></tr>
+</tbody>
+</table>
+
+<h3 class="section" id="howto-disable-webrtc" name="howto-disable-webrtc"><a href="#howto-disable-webrtc" title="Click to expand">How to Disable WebRTC</a></h3>
+<div class="none">
+<dl>
+  <dt><h4>WebRTC in Firefox</h4></dt>
+  <dd>
+    <p>To disable WebRTC in Firefox:</p>
+    <li>Type <code>about:config</code> in the address bar and press Enter.</li>
+    <li>In the search bar, type <code>media.peerconnection.enabled</code> and double-click the preference to set its value to <code>false</code>.</li>
+  </dd>
+</dl>
+<dl>
+  <dt><h4>WebRTC in Chrome</h4></dt>
+  <dd>
+    <p>The recommended solution to limit the risk of IP leakage via WebRTC is to use the official Google extension called <a href="https://chrome.google.com/webstore/detail/webrtc-network-limiter/npeicpdbkakmehahjeeohfdhnlpdklia" rel="noopener" target="_blank">WebRTC Network Limiter</a>, which provides a range of options with varying levels of protection.</p>
+  </dd>
+</dl>
+</div>
+
+<h3 class="section nohistory" id="further-reading" name="further-reading"><a href="#further-reading" title="Click to expand">Further Reading</a></h3>
+<div class="none">
+<ul class="list">
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection" rel="noopener" target="_blank">RTC Peer Connection – MDN</a></li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices" rel="noopener" target="_blank">Media Devices API – MDN</a></li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack" rel="noopener" target="_blank">Media Stream Track API – MDN</a></li>
+</ul>
+<ul class="list">
+  <li><a href="https://webrtchacks.com/an-intro-to-webrtcs-natfirewall-problem/" rel="noopener" target="_blank">An Intro to WebRTC's NAT/Firewall Problem – webrtcHacks</a></li>
+  <li><a href="https://webrtchacks.github.io/sdp-anatomy/" rel="noopener" target="_blank">Anatomy of a WebRTC SDP – webrtcHacks</a></li>
+</ul>
+</div>
+
+<iframe id="rtc-iframe" sandbox="allow-same-origin"></iframe>
+<script src="/js/webrtc.js?v=57520745"></script>
+<h3 data-html2canvas-ignore="" id="comments"><span id="comments-title">Leave a Comment</span> (221)<span id="comments-nojs" class="noscript"></span></h3>
+<div data-html2canvas-ignore="" id="remark42"></div>
+
+<footer><div id="footer"><div>BrowserLeaks © 2011-2026 <span class="n-300">All Rights Reserved</span><br><span id="bdo"><bdo dir="rtl">m<!-- ` -->oc<span>.sk<!-- ` -->ae</span>lr<!-- ` -->es<span>wor<!-- ` -->b@t</span>ca<!-- ` -->tn<span>oc<!-- ` -->:ot</span>lia<!-- ` -->m</bdo></span></div></div></footer>
+
+</div>
+
+
+</body></html>
