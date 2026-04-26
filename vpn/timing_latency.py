@@ -201,8 +201,6 @@ def run_test(target_host="www.canberra.edu.au") -> bool:
 
     print("\n" + "=" * 45)
     print(f"SCORE: {score}")
-    print(f" Measured via: {method}")
-    print(f" Latency: {rtt:.2f} ms")
 
     messages = {
         1: "MATCH: Latency is consistent with geographic distance.",
@@ -211,7 +209,11 @@ def run_test(target_host="www.canberra.edu.au") -> bool:
         4: "SUSPICIOUS: Very long route vs distance (possible VPN or bad geo).",
         5: "MISMATCH: RTT too low for claimed distance, or far too high (timing vs geo disagree).",
     }
-    print(f" RESULT: {messages.get(score, 'N/A (invalid inputs)')}")
+    verdict = messages.get(score, "N/A (invalid inputs)")
+    # Keep STATUS under ~180 chars so batch HTML extraction always picks it up.
+    print(f"STATUS: Measured via: {method}")
+    print(f" Latency: {rtt:.2f} ms")
+    print(f" RESULT: {verdict}")
     print("=" * 45)
     return True
 

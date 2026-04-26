@@ -166,66 +166,83 @@ CHROME_JA3_HASHES = {
 }
 
 
-def calculate_browser_score(ua_looks_like_httpx: bool, http2_style: str, 
-                            ja3_hash: str, header_table_size: int | None) -> tuple[int, str]:
+def calculate_browser_score(
+    ua_looks_like_httpx: bool,
+    http2_style: str,
+    ja3_hash: str,
+    header_table_size: int | None,
+    *,
+    observed_user_agent: str,
+) -> tuple[int, str]:
     """
-    Calculate a score 1-5 for browser vs script detection:
-    1 = certainly not a browser (definitely script/VPN)
-    2 = probably not a browser
-    3 = uncertain
-    4 = probably a browser
-    5 = certainly a browser
+    Suspicion score (1–5), aligned with the rest of Overdrive:
+      1 — Looks like a typical end-user browser stack (TLS + HTTP/2 fingerprints line up).
+      3 — Mixed / incomplete signals.
+      5 — Strong automation / library client (httpx/curl-class), or browser UA with library fingerprints.
+
+    This script runs httpx, so a honest “normal home Chrome user” outcome is not expected; low scores
+    should only appear if the *observed* network fingerprints look browser-coherent anyway.
     """
-    score = 3  # Start neutral
-    reasons = []
-    
-    # Check User-Agent
+    risk = 2
+    reasons: list[str] = []
+
+    # Baseline: this check is executed by a Python httpx client in `main()`.
     if ua_looks_like_httpx:
-        score -= 2
-        reasons.append("User-Agent contains python-httpx")
+        risk = 4
+        reasons.append("Observed UA names python-httpx/httpx (library client)")
     else:
-        score += 1
-        reasons.append("User-Agent does not look like httpx")
-    
-    # Check HTTP/2 settings style
-    if http2_style == "library-like":
-        score -= 1
-        reasons.append("HTTP/2 settings are library-like")
-    elif http2_style == "browser-like":
-        score += 1
-        reasons.append("HTTP/2 settings are browser-like")
-    
-    # Check JA3 hash
+        reasons.append("Observed UA does not name httpx (unexpected for this script; possible rewriting)")
+
+    if http2_style.startswith("library-like"):
+        risk += 1
+        reasons.append("HTTP/2 SETTINGS look library-like (Akamai heuristic)")
+    elif http2_style.startswith("browser-like"):
+        risk = max(1, risk - 1)
+        reasons.append("HTTP/2 SETTINGS look browser-like (unexpected for raw httpx; lower suspicion)")
+    else:
+        reasons.append("HTTP/2 SETTINGS inconclusive")
+
     if ja3_hash:
         if ja3_hash in PYTHON_JA3_HASHES:
-            score -= 1
-            reasons.append("JA3 hash matches Python libraries")
+            risk += 1
+            reasons.append("JA3 matches catalogued Python HTTP stacks")
         elif ja3_hash in CHROME_JA3_HASHES:
-            score += 1
-            reasons.append("JA3 hash matches Chrome")
-    
-    # Check header table size
+            risk = max(1, risk - 1)
+            reasons.append("JA3 matches a common Chrome pattern")
+
     if header_table_size is not None:
         if header_table_size <= 4096:
-            score -= 1
-            reasons.append(f"Header table size {header_table_size} is small (library-like)")
+            risk += 1
+            reasons.append(f"SETTINGS header table size {header_table_size} is small (library-like)")
         elif header_table_size >= 65536:
-            score += 1
-            reasons.append(f"Header table size {header_table_size} is large (browser-like)")
-    
-    # Clamp score to 1-5
-    score = max(1, min(5, score))
-    
-    # Generate description
+            risk = max(1, risk - 1)
+            reasons.append(f"SETTINGS header table size {header_table_size} is large (browser-like)")
+
+    # If UA doesn't mention httpx but we're running httpx, treat as elevated inconsistency.
+    if not ua_looks_like_httpx:
+        risk += 1
+
+    risk = max(1, min(5, risk))
+
+    # Floors: this module is executed by httpx; "normal browser user" is not the default expectation.
+    min_risk = 1
+    if ua_looks_like_httpx or (ja3_hash and ja3_hash in PYTHON_JA3_HASHES):
+        min_risk = max(min_risk, 4)
+    if observed_user_agent.strip() and (not ua_looks_like_httpx):
+        # We ran httpx, but the observed UA string doesn't look like httpx — treat as rewrite/proxy oddity.
+        min_risk = max(min_risk, 4)
+    risk = max(risk, min_risk)
+    risk = max(1, min(5, risk))
+
     descriptions = {
-        1: "Certainly NOT a browser (script/VPN detected)",
-        2: "Probably NOT a browser (script likely)",
-        3: "Uncertain (cannot determine browser vs script)",
-        4: "Probably a browser",
-        5: "Certainly a browser"
+        1: "Browser-like: fingerprints look coherent for a typical browser user (low automation signal).",
+        2: "Mostly browser-like: minor anomalies; still plausibly a real browser.",
+        3: "Mixed: incomplete or conflicting HTTP/2 / TLS signals.",
+        4: "Suspicious: library/automation-class HTTP/2 or TLS fingerprints (script/bot signal).",
+        5: "Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile.",
     }
-    
-    return score, descriptions[score]
+    detail = "; ".join(reasons[:3]) + (" …" if len(reasons) > 3 else "")
+    return risk, f"{descriptions[risk]} ({detail})"
 
 
 def main():
@@ -340,15 +357,17 @@ def main():
     print("- Confidence:", confidence)
 
     # Calculate 1-5 score
+    print("\nScale: 1 = typical browser (low suspicion) · 5 = automation / library client (high suspicion)")
     score, score_desc = calculate_browser_score(
         ua_looks_like_httpx=ua_looks_like_httpx,
         http2_style=http2_style,
         ja3_hash=ja3_hash,
-        header_table_size=header_table_size
+        header_table_size=header_table_size,
+        observed_user_agent=observed_user_agent,
     )
 
     print(f"\nSCORE: {score}")
-    print(f"- {score_desc}")
+    print(f"STATUS: {score_desc}")
 
     print("\n============================================================")
     return score

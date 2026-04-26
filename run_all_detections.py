@@ -11,8 +11,12 @@ Outputs to console and generates a compact HTML report.
 Scripts whose source contains a TODO marker (word TODO) are not executed;
 they are reported as score 0 with comment "TODO:".
 
-TCP_stack.py runs via ``sudo -n`` (non-interactive). Configure NOPASSWD for your user
-in WSL/Linux, or that step will fail with a clear error in the report.
+TCP_stack.py normally runs via ``sudo -n`` (non-interactive) so the suite can finish unattended.
+If you don't want a password to be a blocker, either:
+
+- Grant **passwordless sudo** (NOPASSWD) for *only* the venv python + `vpn/TCP_stack.py`, or
+- One-time grant Linux file capabilities to the venv python (``setcap cap_net_raw,cap_net_admin``),
+  and this runner will detect that and run **without sudo**.
 """
 
 import html
@@ -127,6 +131,53 @@ def _wsl_invocation_prefix() -> list[str] | None:
     return None
 
 
+def _wsl_for_getcap() -> list[str] | None:
+    """If we're invoking WSL for python, reuse the same distro prefix for other commands."""
+    return _wsl_invocation_prefix()
+
+
+def venv_python_path() -> Path:
+    return BASE_DIR / "virtual_env" / "bin" / "python"
+
+
+def venv_has_raw_capture_caps() -> bool:
+    """
+    Best-effort check whether the venv python has Linux capabilities that allow
+    Scapy/pcap without sudo (common: cap_net_raw + cap_net_admin).
+    """
+    py = venv_python_path()
+    if not py.is_file():
+        return False
+
+    wsl_prefix = _wsl_for_getcap()
+    try:
+        if wsl_prefix:
+            # When the runner is on Windows, venv lives under /mnt/c/... inside WSL.
+            py_posix = _to_wsl_posix(py) if (len(str(py)) >= 2 and str(py)[1] == ":") else str(
+                py
+            ).replace("\\", "/")
+            cmd = wsl_prefix + [
+                "-e",
+                "getcap",
+                py_posix,
+            ]
+        else:
+            cmd = ["getcap", str(py)]
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        out = ((r.stdout or "") + (r.stderr or "")).lower()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    # getcap example:
+    #   /path/python cap_net_raw,cap_net_admin=eip
+    return "cap_net_raw" in out and "cap_net_admin" in out
+
+
 def script_has_todo(script_path: Path) -> bool:
     try:
         text = script_path.read_text(encoding="utf-8", errors="ignore")
@@ -137,6 +188,10 @@ def script_has_todo(script_path: Path) -> bool:
 
 def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int]:
     """Run a script and return (output, error, returncode)."""
+    if use_sudo and venv_has_raw_capture_caps():
+        # Avoid sudo entirely if the venv interpreter already has the needed network capabilities.
+        use_sudo = False
+
     timeout = SUDO_SCRIPT_TIMEOUT_SEC if use_sudo else 120
     try:
         script_str = str(script_path)

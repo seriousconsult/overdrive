@@ -337,7 +337,8 @@ def main():
             print("PASS: No private/local IP detected (RFC1918).")
 
         print(f"\nScore:{score}")
-        print(f"  {note}")
+        # First substantive line after Score is what run_all_detections.py prefers for HTML comments.
+        print(f"STATUS: {note}")
         print("  Scale: 1 = no leak signal  ·  5 = strong local (RFC1918) WebRTC leak")
 
         # Print concise evidence to make it debuggable
@@ -374,7 +375,7 @@ def main():
         print(f"Exception message: {e}")
         traceback.print_exc()
         print(f"\nSCORE: {score}")
-        print(f"  {note}")
+        print(f"STATUS: {note}")
     finally:
         if driver is not None:
             try:

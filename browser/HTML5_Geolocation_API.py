@@ -241,7 +241,7 @@ def main():
     score, geo_note = compute_multi_location_score(results)
     print("\n--- Multi-location score (1–5) ---")
     print(f"SCORE: {score}")
-    print(f"  {geo_note}")
+    print(f"STATUS: {geo_note}")
     print()
     print("Scale: 1 = single coherent GeoIP location  ·  5 = strong cross-provider disagreement")
     return score

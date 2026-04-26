@@ -232,11 +232,10 @@ def capture_live_syn_inline_subprocess(packet_count=3, timeout=30):
 
 def calculate_stack_score(consensus, expected):
     """
-    Scoring Logic:
-    5: Perfect match (e.g., Linux-like captured on Linux OS)
-    4: Uncertain/Neutral (Captures were inconclusive)
-    3: Slight Deviation (Matches basic family but weird scores)
-    1: Hard Mismatch (e.g., Windows-like captured on Linux OS)
+    Risk-style score (aligned with most Overdrive scripts):
+      1 — Low suspicion: captured SYN stack matches this machine’s OS family.
+      3 — Inconclusive capture / uncertain classification.
+      5 — High suspicion: captured SYN stack disagrees with OS (VPN/proxy/NAT rewrite, spoofing, etc.).
     """
     if consensus == "Uncertain":
         return 3 # Neutral/Probable match but inconclusive
@@ -246,9 +245,9 @@ def calculate_stack_score(consensus, expected):
     expected_family = expected.split("-")[0]
     
     if consensus_family == expected_family:
-        return 5 # Complete Match
+        return 1  # Coherent — low suspicion
     else:
-        return 1 # Hard Mismatch (Likely VPN/Proxy modification)
+        return 5  # Family mismatch — high suspicion (often tunnel / translation / spoof)
 
 def main():
     runtime_label, expected_stack = detect_runtime_os()
@@ -283,18 +282,18 @@ def main():
     print(f" SCORE: {score}")
     
     descriptions = {
-        5: "MATCH: Your TCP stack matches your OS perfectly.",
-        4: "LIKELY MATCH: Minor variations detected.",
-        3: "UNCERTAIN: Could not definitively verify stack signature.",
-        2: "PROBABLE MISMATCH: Your packets look suspicious.",
-        1: "HARD MISMATCH: Your OS is different from your packet signature (VPN/Proxy Detected)."
+        1: "MATCH: Captured TCP SYN stack matches this OS family (low suspicion).",
+        2: "LIKELY MATCH: Minor ambiguity; still mostly consistent with this OS.",
+        3: "UNCERTAIN: Could not definitively classify SYN stack vs OS.",
+        4: "PROBABLE MISMATCH: SYN stack plausibly altered vs this OS (investigate).",
+        5: "HARD MISMATCH: SYN stack disagrees with this OS (VPN/proxy/spoof/translator signal).",
     }
     
     print(f" STATUS: {descriptions.get(score)}")
     print("="*40)
     
-    if score == 1:
-        print("💡 ALERT: A web server seeing these packets will know you are masking your OS.")
+    if score >= 4:
+        print("💡 ALERT: A remote observer may infer OS/stack masking or tunneling from this mismatch.")
 
 if __name__ == "__main__":
     main()

@@ -107,7 +107,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <body>
 <header>
   <h1>Overdrive detection results</h1>
-  <span class="timestamp">2026-04-24 21:58:33</span>
+  <span class="timestamp">2026-04-26 00:24:28</span>
 </header>
 <main>
 <section>
@@ -119,13 +119,15 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <section>
 <h2>Browser</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">All providers agree on one country name — not multiple countries.</td></tr>
-<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Certainly NOT a browser (script/VPN detected)</td></tr>
-<tr><td class="script">WebRTC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">RFC1918 address visible via WebRTC (local/private leak).</td></tr>
+<tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: All providers agree on one country name — not multiple countries.</td></tr>
+<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile. (Observed UA names python-httpx/httpx (library client); HTTP/2 SETTINGS look library-like (Akamai heuristic); JA3 matches catalogued Python HTTP stacks …)</td></tr>
+<tr><td class="script">HTTP3_QUIC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: HeadlessChrome observed with HTTP/2 fallback and no QUIC transport-parameter evidence (strong automation/non-standard client signal).</td></tr>
+<tr><td class="script">WebRTC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: RFC1918 address visible via WebRTC (local/private leak).</td></tr>
 <tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">cookie_tracking.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">font_enumeration.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+<tr><td class="script">full_header.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Request headers and Client Hints look internally consistent for the detected family. | echo=https://httpbin.org/get</td></tr>
 <tr><td class="script">screen_capture.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 </tbody></table>
 </section>
@@ -134,22 +136,23 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">blacklist_check.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Not listed on queried DNSBLs (zen, spamcop, barracuda); no hosting flag from ip-api.</td></tr>
 <tr><td class="script">doh_detection.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No Firefox/Chromium Local State paths found and no platform DoH probe; inconclusive.</td></tr>
+<tr><td class="script">tor_proxy_reputation.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Strong IPv4 consensus; Onionoo and dual Tor-exit lists show no match; not on proxy list; AbuseIPDB not configured — likely clean, not fully verified.</td></tr>
 </tbody></table>
 </section>
 <section>
 <h2>Vpn</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">ASN.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Non-zero exit | requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://ipapi.co/json/</td></tr>
+<tr><td class="script">ASN.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: high-confidence suspicious egress: ipapi=5 (datacenter/hosting org pattern); ip-api=5 (ip-api isp heuristic: datacenter/hosting org pattern)</td></tr>
 <tr><td class="script">DNS.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Certain leak of IPv4.</td></tr>
 <tr><td class="script">IPv6_leak.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: No global IPv6 on host and no IPv6 egress to ipify — low IPv6 leak surface.</td></tr>
-<tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">ANALYSIS: Standard packet size. No VPN detected.</td></tr>
-<tr><td class="script">TCP_stack.py</td><td><span class="badge badge err">Error</span></td><td class="comment">sudo needs a password; allow NOPASSWD for this user to run TCP_stack unattended | sudo: a password is required</td></tr>
-<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">• Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
-<tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Non-zero exit | ValueError: ZoneInfo keys must be normalized relative paths, got: Please contact us for a trial account or sign up for a paid plan at https://ipapi.co/pricing</td></tr>
+<tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Measured via: ip -o link show (local link MTU; not path MTU to a remote host)</td></tr>
+<tr><td class="script">TCP_stack.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: MATCH: Captured TCP SYN stack matches this OS family (low suspicion).</td></tr>
+<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints. — Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
+<tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
 <tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
-<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Measured via: TCP Connect</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via: TCP Connect</td></tr>
 <tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No tunnel-pattern interfaces found (tun/tap/wg/…); no VPN-style virtual iface names.</td></tr>
-<tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">Scale: 1 = no OPEN VPN/proxy ports seen · 5 = at least one OPEN (in use / accepting)</td></tr>
+<tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target.</td></tr>
 </tbody></table>
 </section>
 </main>

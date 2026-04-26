@@ -405,7 +405,10 @@ def run_deep_analysis():
         5: "AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints.",
     }
     
-    print(f" STATUS: {messages.get(score)}")
+    # Intentionally do not print a standalone STATUS here: `run_all_detections.py` uses the
+    # *last* SCORE line and the following few lines; this module prints a second SCORE later
+    # in the full report, and STATUS should attach to that final composite score.
+    print(f"ROLLUP: {messages.get(score)}")
     print("="*45)
     
     if score >= 4:
@@ -591,6 +594,18 @@ def run_deep_analysis2():
     print("-" * 76)
     print("  Scale: 1 = normal browser fingerprint · 5 = script / bot / VPN-library-like")
     print(f"SCORE: {composite}")
+    messages = {
+        1: "NORMAL: Looks like a typical end-user browser (TLS / HTTP2 / ClientHello).",
+        2: "MOSTLY NORMAL: Small anomalies; still plausibly a real browser.",
+        3: "UNCERTAIN: Mixed or incomplete fingerprint signals.",
+        4: "SUSPICIOUS: Library TLS, HTTP/2 mismatch, or thin ClientHello vs browser UA.",
+        5: "AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints.",
+    }
+    # Keep this on one line so HTML reports / batch runners can grab it as the STATUS comment.
+    print(
+        "STATUS: "
+        + f"{messages.get(composite) or 'UNKNOWN:'} — {br.get('base') or ''}".strip(" —")
+    )
     print(f"  • {br['base']}")
     print(f"  • {br['grease']}")
     print(f"  • {br['akamai']}")

@@ -189,16 +189,24 @@ def run_audit() -> None:
     score = calculate_score(all_statuses)
     print("\n" + "=" * 50)
     print(f"SCORE: {score}")
-    print(
-        "  Scale: 1 = no OPEN VPN/proxy ports seen · 5 = at least one OPEN (in use / accepting)")
-    print("=" * 50)
-
     if score == 5:
-        print("\nSTATUS: VPN/proxy port(s) responded OPEN on at least one target.")
+        status_one_liner = (
+            "STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target."
+        )
     elif score == 1:
-        print("\nSTATUS: No OPEN ports; all probes closed (no sign those services are listening here).")
+        status_one_liner = (
+            "STATUS: No OPEN VPN/proxy-related ports; TCP closed and UDP mostly silent/filtered."
+        )
     else:
-        print("\nSTATUS: Inconclusive — mostly UDP silent/filtered; no clear OPEN.")
+        status_one_liner = (
+            "STATUS: Inconclusive — mostly UDP silent/filtered; no clear OPEN port."
+        )
+    # First line after SCORE is what run_all_detections.py uses as the HTML/summary comment.
+    print(status_one_liner)
+    print(
+        "  Scale: 1 = no OPEN VPN/proxy ports seen · 5 = at least one OPEN (in use / accepting)"
+    )
+    print("=" * 50)
 
 
 if __name__ == "__main__":

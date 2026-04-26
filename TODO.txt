@@ -1,8 +1,6 @@
 Additional checks to add
 
 
-Outbound IP reputation & context
---Datacenter / hosting / “VPN” ASN vs residential (you touch this in ASN.py-style ideas).
 
 DNS leak patterns
 --Resolver identity (which DNS answers for your probe domain vs what the VPN claims).
@@ -10,7 +8,8 @@ DNS leak patterns
 custom tooling).
 
 WebRTC / TURN / ICE (beyond IP leak)
---STUN/TURN candidates can expose extra addresses or NAT behavior; browser tests are richer than a single “RTC IP” line.
+--STUN/TURN candidates can expose extra addresses or NAT behavior; browser tests are richer than a 
+single “RTC IP” line.
 
 HTTP/3 (QUIC) fingerprint
 --Separate from TLS 1.3 + HTTP/2: QUIC transport params, initial packet traits — increasingly used for bot/automation detection.
@@ -43,3 +42,5 @@ If you want to extend the repo, the highest‑value additions that are usually m
  QUIC/HTTP3 fingerprint, 
  full header + Client Hints consistency, 
  and structured DNS-leak / resolver attribution 
+
+
