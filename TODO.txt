@@ -1,5 +1,8 @@
 Additional checks to add
 
+Router
+--see if an IP is browsing with multiple different browsers at once
+
 
 
 DNS leak patterns
