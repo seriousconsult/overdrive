@@ -1,9 +1,20 @@
 Additional checks to add
 
-Router
---see if an IP is browsing with multiple different browsers at once
-
-
+Consumer router & gateway (LAN-side, beyond router/*.py)
+--Same-LAN IP showing many distinct browser / UA families in a short window — weak “one human vs many devices” 
+heuristic (needs HTTP or proxy visibility; noisy on shared NAT PCs).
+--UPnP / SSDP: multicast 239.255.255.250:1900; parse SERVER, LOCATION, device XML — home CPE often leaks vendor/model.
+--mDNS / DNS-SD: mesh/AP gear sometimes advertises _http._tcp or vendor strings on .local.
+--SNMP 161/udp: when open, sysDescr / sysObjectID are strong CPE classifiers (also a hygiene signal if default/wide 
+communities).
+--Embedded admin TLS: cert CN/SAN (routerlogin.net, *.asuscomm.com), self-signed patterns; optional server-side JA3 
+from a client hello to the gateway HTTPS port.
+--DHCP fingerprinting: option order, vendor class, hostname — maps to device class (e.g. Fingerbank “Wi‑Fi router”) 
+when DHCP is visible on the LAN.
+--Path / NAT probes: traceroute first-hop anchoring; STUN-style or UPnP IGD external-address / port-mapping — 
+complements existing TTL + NAT heuristics in router/.
+--Nmap-style -sV / -O on gateway 80/443/8080/8443 — high fidelity but heavier and often ToS-sensitive; prefer passive 
+LAN evidence first.
 
 DNS leak patterns
 --Resolver identity (which DNS answers for your probe domain vs what the VPN claims).

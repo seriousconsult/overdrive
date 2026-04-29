@@ -4,17 +4,18 @@ Parent script that runs all detection scripts and outputs scores.
 
 Discovers scripts dynamically: root-level *.py (except this runner and
 virtual_env_setup.py) plus *.py in each immediate subfolder (skipping
-virtual_env, .git, etc.). Section order: Root first, then subfolders A–Z.
+virtual_env, .git, etc.), including **router/** (banner/OUI/TTL/NAT probes).
+Section order: Root first, then subfolders A–Z.
 
 Outputs to console and generates a compact HTML report.
 
 Scripts whose source contains a TODO marker (word TODO) are not executed;
 they are reported as score 0 with comment "TODO:".
 
-TCP_stack.py normally runs via ``sudo -n`` (non-interactive) so the suite can finish unattended.
+Scapy capture scripts (`vpn/TCP_stack.py`, `router/TTL.py`, `router/NAT_OS.py`) run via ``sudo -n`` (non-interactive) so the suite can finish unattended.
 If you don't want a password to be a blocker, either:
 
-- Grant **passwordless sudo** (NOPASSWD) for *only* the venv python + `vpn/TCP_stack.py`, or
+- Grant **passwordless sudo** (NOPASSWD) for *only* the venv python + those scripts (see README), or
 - One-time grant Linux file capabilities to the venv python (``setcap cap_net_raw,cap_net_admin``),
   and this runner will detect that and run **without sudo**.
 """
@@ -40,8 +41,8 @@ SKIP_SUBDIRS = frozenset(
     {"virtual_env", ".git", "__pycache__", ".venv", "node_modules", ".idea", ".vscode"}
 )
 
-# Scripts that need sudo (run with elevated privileges)
-SUDO_SCRIPTS = {"TCP_stack.py"}
+# Scripts that need sudo (run with elevated privileges; Scapy capture on Linux/WSL)
+SUDO_SCRIPTS = frozenset({"TCP_stack.py", "TTL.py", "NAT_OS.py"})
 
 
 def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
@@ -204,8 +205,8 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
             if not linux_venv.is_file():
                 return (
                     "",
-                    "TCP_stack needs virtual_env/bin/python (Linux/WSL venv). "
-                    "Windows-only venv (Scripts\\python.exe) cannot run Scapy capture.",
+                    "Scapy capture scripts need virtual_env/bin/python (Linux/WSL venv). "
+                    "Windows-only venv (Scripts\\python.exe) cannot run packet capture.",
                     -1,
                 )
 
@@ -232,7 +233,10 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
         if use_sudo and result.returncode != 0:
             ol = output.lower()
             if "password" in ol and ("sudo" in ol or "a password is required" in ol):
-                err = "sudo needs a password; allow NOPASSWD for this user to run TCP_stack unattended"
+                err = (
+                    "sudo needs a password; configure NOPASSWD for venv python + this capture script "
+                    "(see README: Passwordless sudo)"
+                )
             else:
                 err = "sudo or capture failed (see output; Scapy usually needs root)"
         return output, err, result.returncode
@@ -490,7 +494,7 @@ def main():
 
             use_sudo = script_name in SUDO_SCRIPTS
             if use_sudo:
-                print("  (running with sudo -n — needs passwordless sudo in WSL/Linux)")
+                print("  (running with sudo -n — needs NOPASSWD for capture scripts; see README)")
 
             output, error, returncode = run_script(script_path, use_sudo=use_sudo)
 

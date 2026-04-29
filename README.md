@@ -9,7 +9,7 @@ header mismatch signals, and hosting reputation checks).
 
 ## What You Get
 
-- Individual detection scripts grouped by topic (`vpn`, `browser`, `network`, and root checks)
+- Individual detection scripts grouped by topic (`vpn`, `browser`, `network`, `router`, and root checks)
 - A batch runner (`run_all_detections.py`) that discovers scripts automatically
 - Console output plus an HTML report at `detection_results.html`
 - Script-level scoring on a `1-5` scale
@@ -45,11 +45,51 @@ Outputs:
 
 ## Important Runtime Notes
 
-### WSL + `TCP_stack.py`
+### Passwordless sudo (Scapy capture scripts)
 
-`run_all_detections.py` runs `TCP_stack.py` with `sudo -n` (non-interactive).  
-If passwordless sudo is not configured in your Linux/WSL environment, that step will fail
-and be marked as an error in the report.
+`run_all_detections.py` runs these scripts with **`sudo -n`** (non-interactive sudo, no password prompt):
+
+- `vpn/TCP_stack.py`
+- `router/TTL.py`
+- `router/NAT_OS.py`
+
+Scapy packet capture usually needs elevated privileges on Linux/WSL. `router/NAT_OS.py` and `router/TTL.py` **re-exec** to `virtual_env/bin/python` when you launch them with `./…`, so the process matches the interpreter you granted **NOPASSWD** or **setcap** on (not whatever `python3` appears first on `PATH`).
+
+Running those scripts **without** `sudo` or `setcap` on that venv Python will raise **PermissionError**; the script catches that and prints example `sudo` / `setcap` commands.
+
+The batch runner never prompts for a password; if your user cannot run those commands **without** a password, those steps fail and show as **Error** in the HTML report.
+
+**Configure NOPASSWD for only the venv Python + those scripts** (adjust paths to match your clone; inside WSL, paths are typically under `/home/<you>/...` or `/mnt/c/...`):
+
+1. Resolve the interpreter path you use for Overdrive (for example the project venv):
+
+   ```bash
+   readlink -f virtual_env/bin/python
+   ```
+
+2. Edit sudoers safely:
+
+   ```bash
+   sudo visudo
+   ```
+
+3. Add one line per script (same `python` binary, different script path), replacing `YOURUSER` and the paths:
+
+   ```text
+   YOURUSER ALL=(root) NOPASSWD: /ABS/PATH/virtual_env/bin/python /ABS/PATH/vpn/TCP_stack.py
+   YOURUSER ALL=(root) NOPASSWD: /ABS/PATH/virtual_env/bin/python /ABS/PATH/router/TTL.py
+   YOURUSER ALL=(root) NOPASSWD: /ABS/PATH/virtual_env/bin/python /ABS/PATH/router/NAT_OS.py
+   ```
+
+   Paths must match what `sudo -n` executes (absolute paths; WSL is case-sensitive).
+
+**Alternative (Linux only):** grant capabilities to the venv interpreter so capture works **without** sudo, for example `cap_net_raw` and `cap_net_admin` on `virtual_env/bin/python` (`getcap` / `setcap`). The batch runner checks for those capabilities on the venv Python and, when present, runs **all** capture scripts above **without** sudo (same behavior as for `TCP_stack.py` alone).
+
+### Router probes from WSL2
+
+`router/upnp_discovery.py` often gets **no SSDP** inside WSL2 because multicast does not reach your LAN router; pass **`--ip`** with your **LAN gateway** (e.g. `192.168.1.1`) so M-SEARCH is also sent unicast to port 1900.
+
+`router/banners.py` prints a **short summary** by default; use **`-v`** / **`--verbose`** for every path.
 
 ### TODO-Based Skip Logic
 
