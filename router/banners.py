@@ -3,8 +3,6 @@
 (Layer 7)
 Port 80/443 "Banners"
 Most home routers have a web-based management page. They often leak information:
-Service Banners: Server: httpd/2.0 (AsusWRT) or Server: TP-LINK HTTPD.
-
 Default `--paths` is a small multi-vendor list (/, login pages, LuCI, etc.) so `/` alone is not the only probe.
 
 Unified suspicion score **1–5** (aligned with Overdrive): **higher** = stronger router-like banner signal.

@@ -36,6 +36,7 @@ echo "Setting up VM..."
 
 # --- 3. Handle the OSBoxes Disk ---
 # copy the OSBoxes file to the VM folder
+#  Username - osboxes Password - osboxes.org
 if [ -f "$OSBOXES_SRC" ]; then
     # Create the directory first (via WSL)
     mkdir -p "/mnt/c/Users/serio/VirtualBox VMs/$VM_NAME"
