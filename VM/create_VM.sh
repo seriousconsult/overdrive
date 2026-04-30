@@ -52,5 +52,5 @@ else
     exit 1
 fi
 
-echo "✨ Done! You can now start the VM in the VirtualBox GUI."
-echo "📝 Note: Default OSBoxes credentials are usually osboxes / osboxes.org"
+echo "Done! You can now start the VM in the VirtualBox GUI."
+echo "Note: Default OSBoxes credentials are usually osboxes / osboxes.org"
