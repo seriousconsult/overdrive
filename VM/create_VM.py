@@ -21,11 +21,16 @@ def get_active_bridged_interface(vbox_path):
     except: pass
     return "Intel(R) Wi-Fi 7 BE200 320MHz"
 
+def get_half_cpus():
+    total_cpus = os.cpu_count() or 2
+    return max(1, total_cpus // 2)
+
+# --- 2. Configuration ---
 win_user = get_windows_user()
 VBOX = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
 INTERFACE = get_active_bridged_interface(VBOX)
+VM_CPUS = get_half_cpus()
 
-# --- 2. Configuration ---
 VM_NAME = "Network_Test"
 OSBOXES_URL = "https://downloads.sourceforge.net/project/osboxes/v/vb/59-U-u-svr/24.10/64bit.7z"
 
@@ -37,26 +42,24 @@ VDI_DEST_WIN = f"C:\\Users\\{win_user}\\VirtualBox VMs\\{VM_NAME}\\Network_Test.
 VBOX_FILE_WIN = f"C:\\Users\\{win_user}\\VirtualBox VMs\\{VM_NAME}\\{VM_NAME}.vbox"
 
 def setup_osboxes_vm():
-    # Ensure VM directory exists
     os.makedirs(VM_BASE_WSL, exist_ok=True)
-    target_vdi = os.path.join(VM_BASE_WSL, "Network_Test.vdi")
+    target_vdi_wsl = os.path.join(VM_BASE_WSL, "Network_Test.vdi")
 
-    # 1. Skip Extraction if VDI already exists
-    if os.path.exists(target_vdi):
-        print(f"✅ VDI already exists at {target_vdi}. Skipping extraction.")
+    # --- Step 1: Extraction ---
+    if os.path.exists(target_vdi_wsl):
+        print(f"VDI already exists at {target_vdi_wsl}. Skipping extraction.")
     else:
-        # Download if archive missing
         if not os.path.exists(ARCHIVE_PATH):
-            print(f"📥 Downloading OSBoxes archive...")
+            print("Downloading OSBoxes archive...")
             r = requests.get(OSBOXES_URL, stream=True, allow_redirects=True)
             with open(ARCHIVE_PATH, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
         
-        print(f"📂 Extracting VDI...")
+        print("Extracting VDI...")
+        if os.path.exists(EXTRACT_DIR): shutil.rmtree(EXTRACT_DIR)
         os.makedirs(EXTRACT_DIR, exist_ok=True)
         subprocess.run(["7z", "x", ARCHIVE_PATH, f"-o{EXTRACT_DIR}", "-y"], check=True)
         
-        # Locate VDI in temp folder
         found_vdi = None
         for root, _, files in os.walk(EXTRACT_DIR):
             for file in files:
@@ -64,39 +67,42 @@ def setup_osboxes_vm():
                     found_vdi = os.path.join(root, file); break
         
         if found_vdi:
-            print(f"🚚 Moving {os.path.basename(found_vdi)}...")
-            shutil.move(found_vdi, target_vdi)
+            print(f"Moving {os.path.basename(found_vdi)} to VM folder...")
+            shutil.copy(found_vdi, target_vdi_wsl)
             shutil.rmtree(EXTRACT_DIR)
         else:
-            print("❌ Error: No VDI found in archive."); return
+            print("Error: No VDI found in archive."); return
 
-    # 2. Smart VM Registration (Fixes the CreateMachine error)
+    # --- Step 2: Registration ---
     vms = subprocess.run([VBOX, "list", "vms"], capture_output=True, text=True).stdout
-    
-    if f'"{VM_NAME}"' in vms:
-        print(f"✨ VM '{VM_NAME}' is already registered.")
-    else:
-        # Check if the .vbox file exists on disk but isn't in VirtualBox
+    if f'"{VM_NAME}"' not in vms:
         if os.path.exists(os.path.join(VM_BASE_WSL, f"{VM_NAME}.vbox")):
-            print(f"🔗 Registering existing settings file...")
+            print("Registering existing .vbox file...")
             subprocess.run([VBOX, "registervm", VBOX_FILE_WIN], check=True)
         else:
-            print(f"⚙️ Creating new VM...")
+            print("Creating new VM...")
             subprocess.run([VBOX, "createvm", "--name", VM_NAME, "--ostype", "Ubuntu_64", "--register"], check=True)
 
-    # 3. Final Configuration (safe to run multiple times)
-    print(f"📡 Configuring network on {INTERFACE}...")
-    subprocess.run([VBOX, "modifyvm", VM_NAME, 
-                    "--memory", "8192", "--vram", "96", 
-                    "--nic1", "bridged", "--bridgeadapter1", INTERFACE, 
-                    "--nicpromisc1", "allow-all", "--graphicscontroller", "vmsvga"], check=True)
+    # --- Step 3: Configuration ---
+    print(f"Configuring hardware: {VM_CPUS} CPUs, 8GB RAM, Bridged on {INTERFACE}...")
 
-    # Attach Disk
+    subprocess.run([VBOX, "modifyvm", VM_NAME, 
+                    "--memory", "8192", "--cpus", str(VM_CPUS), 
+                    "--nic1", "bridged", "--bridgeadapter1", INTERFACE,
+                    "--graphicscontroller", "vmsvga", "--vram", "128"], check=True)
+
+    # Enable host time sync
+    subprocess.run([VBOX, "setextradata", VM_NAME, "VBoxInternal/Devices/VMMDev/0/Config/GetHostTimeDisabled", "0"])
+
+    # Attach Storage
+    print("Attaching storage controllers and disk...")
     subprocess.run([VBOX, "storagectl", VM_NAME, "--name", "SATA", "--add", "sata"], stderr=subprocess.DEVNULL)
     subprocess.run([VBOX, "storageattach", VM_NAME, "--storagectl", "SATA", 
                     "--port", "0", "--device", "0", "--type", "hdd", "--medium", VDI_DEST_WIN], check=True)
 
-    print(f"🚀 Success! {VM_NAME} is ready.")
+    # --- Step 4: Final Start ---
+    print(f"Setup complete. Starting {VM_NAME}...")
+    subprocess.run([VBOX, "startvm", VM_NAME, "--type", "gui"], check=True)
 
 if __name__ == "__main__":
     setup_osboxes_vm()
