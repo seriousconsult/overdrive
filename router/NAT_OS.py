@@ -245,7 +245,7 @@ def main() -> None:
 
     print("-" * 30)
     print(f"SCORE: {score}")
-    print(f" {note}")
+    print(f"STATUS: {note}")
 
 
 if __name__ == "__main__":

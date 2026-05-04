@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
+
 import os
 import subprocess
 import requests
 import shutil
 import platform  # Added missing import
 import getpass
+
+
+'''
+ TODO: keep making it better
+'''
 
 # --- 1. Global Variables (Define these first!) ---
 VM_NAME = "Network_Test"
@@ -122,7 +128,8 @@ def setup_osboxes_vm():
         if os.path.exists(os.path.join(VM_BASE_WSL, f"{VM_NAME}.vbox")):
             subprocess.run([VBOX, "registervm", VBOX_FILE_WIN], check=True)
         else:
-            subprocess.run([VBOX, "createvm", "--name", VM_NAME, "--ostype", "Ubuntu_64", "--register"], check=True)
+            subprocess.run([VBOX, "createvm", "--name", VM_NAME, "--ostype", 
+                            "Ubuntu_64", "--register"], check=True)
 
     # Config
     print(f"Configuring {VM_NAME} on {INTERFACE}...")
@@ -132,7 +139,8 @@ def setup_osboxes_vm():
                     "--graphicscontroller", "vmsvga", "--vram", "128"], check=True)
 
     # Storage
-    subprocess.run([VBOX, "storagectl", VM_NAME, "--name", "SATA", "--add", "sata"], stderr=subprocess.DEVNULL)
+    subprocess.run([VBOX, "storagectl", VM_NAME, "--name", "SATA", "--add", "sata"], 
+                   stderr=subprocess.DEVNULL)
     subprocess.run([VBOX, "storageattach", VM_NAME, "--storagectl", "SATA", 
                     "--port", "0", "--device", "0", "--type", "hdd", "--medium", VDI_DEST_WIN], check=True)
     
@@ -147,3 +155,4 @@ def setup_osboxes_vm():
 
 if __name__ == "__main__":
     setup_osboxes_vm()
+    

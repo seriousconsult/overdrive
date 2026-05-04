@@ -151,32 +151,32 @@ def compute_multi_location_score(results: List[Dict[str, Any]]) -> tuple[int, st
 
     if dc == 2:
         return (
-            4,
+            5,
             f"Two distinct {kind}s — providers place this IP in different countries.",
         )
 
     score = 1
     note = f"All providers agree on one {kind} — not multiple countries."
 
-    if distinct_cities >= 3:
-        score = 2
+    if distinct_cities >= 4:
+        score = 3
         note = (
             "Single country but several different city labels — naming or database noise; "
             "mostly one country, slight ambiguity."
         )
-    elif distinct_cities == 2:
-        score = 2
-        note = "Single country but two city labels — minor inconsistency."
+    elif distinct_cities == 3:
+        score = 3
+        note = "Single country but two city labels — inconsistency."
 
     if score == 1 and distinct_tz >= 3:
-        score = 2
+        score = 3
         note = (
-            "One country but many timezones across APIs — unusual; treat as ambiguous "
+            "One country but many timezones across APIs — unusual; treat as alerting "
             "(data quality / regional TZ differences)."
         )
     elif score == 1 and distinct_tz == 2:
-        score = 2
-        note = "One country but two timezone values — weak ambiguity."
+        score = 3
+        note = "One country but two timezone values —  inconsistency."
 
     return score, note
 

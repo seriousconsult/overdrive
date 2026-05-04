@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 (Layer 2)
-MAC Address OUI: On the same local network, the first half of the device's MAC (the OUI) is registered to a manufacturer.
-
-Unified likelihood score **1–5** (aligned with Overdrive): **higher** = stronger signal that the target looks like consumer router / CPE gear from OUI heuristics.
+MAC Address OUI: On the same local network, the first half of the device's MAC
+ (the OUI) is registered to a manufacturer.
+Unified likelihood score **1–5** (aligned with Overdrive): 
+**higher** = stronger signal that the target looks like consumer 
+router / CPE gear from OUI heuristics.
 """
 
 from __future__ import annotations
@@ -269,7 +271,7 @@ def main() -> None:
 
     print("-" * 30)
     print(f"SCORE: {score}")
-    print(f" {score_note}")
+    print(f"STATUS: {score_note}")
 
 
 if __name__ == "__main__":

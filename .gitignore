@@ -1,16 +1,30 @@
-# Virtual environments
-virtual_env/
-venv/
-.env/
+# --- Security / Secrets ---
+.env
+*.log
+*.pot
+*.pyc
 
-# Python bytecode
+# --- Virtual Environments ---
+# Covering the most common naming conventions
+venv/
+.venv/
+env/
+virtual_env/
+bin/
+include/
+lib/
+share/
+
+# --- Python Internals ---
 __pycache__/
 *.py[cod]
+*$py.class
+
 
 # OS generated files
 .DS_Store
 Thumbs.db
 
-.png
-.txt
+*.png
+TODO.md
 

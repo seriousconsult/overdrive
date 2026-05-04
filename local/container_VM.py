@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """
-Best-effort VM/Container Likelihood Detector (traffic + local evidence)
+VM/Container Likelihood Detector (traffic for scoring + informational local evidence)
+ - Generates outbound HTTPS requests while sniffing
 
 Unified output: an integer score 1–5.
   1 — Very unlikely VM or container
   5 — Very likely VM or container
-  2–4 — increasing uncertainty / strength of evidence
+  2–4 — increasing uncertainty / strength of evidence that it is a VM
 
-Network traffic:
-  - Sniffs Ethernet frames (if visible) to observe source MAC OUIs
-  - Generates outbound HTTPS requests while sniffing
-
+Network traffic (Layer 2 and Layer 3):
+  - Sniffs Ethernet frames (if visible) to observe source MAC OUIs. 
+  Every Network Interface Card (NIC) has a unique MAC address. 
+  The first three bytes are the Organizationally Unique Identifier (OUI), which identifies the manufacturer.
+  - Time to Live (TTL) value. When a packet passes through a router or a virtual gateway, its TTL is reduced by 1.
+  -Virtual environments, especially containers using overlay networks (like Docker's overlay or Kubernetes' Calico), 
+  often have a smaller MTU (e.g., 1450 or 1480) to account for the "tunneling" headers added to the packet.
+ 
 Local system evidence (not strictly from traffic, but for internal self-awareness):
   - Container markers: /.dockerenv, /proc/1/cgroup, /run/*container* hints
   - VM markers: /proc/cpuinfo hypervisor flag + DMI product/board names
+  - WSL network mode, WSL is a VM. 
+
+  NOTE: On WSL2. Microsoft introduced Mirrored Mode (networkingMode=mirrored). nstead of a NAT router,
+    WSL "mirrors" your Windows network interfaces into Linux. Is it Bridged? Not technically,
+      but it appears similar because the network stack is shared.
 """
 
 import argparse
 import time
 import os
 import re
+import socket
 import subprocess
 from collections import Counter
 import requests
@@ -167,55 +178,110 @@ def generate_traffic(target="https://example.com", count=10, delay=0.12):
             pass
         time.sleep(delay)
 
+def check_wsl_networking_mode():
+    results = {
+        "mode": "Unknown",
+        "details": "",
+        "is_wsl": False
+    }
+
+    # 1. Verify we are actually in WSL
+    if not os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+        results["details"] = "Not running inside a WSL environment."
+        return results
+    
+    results["is_wsl"] = True
+
+    # 2. Try the modern 'wslinfo' tool (Official method)
+    try:
+        mode_cmd = subprocess.check_output(["wslinfo", "--networking-mode"], text=True).strip()
+        results["mode"] = mode_cmd.upper()
+        results["details"] = f"Detected via wslinfo: {mode_cmd}"
+        return results
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # 3. Fallback: Heuristic Analysis of IP and Routes
+    try:
+        # Get default gateway
+        route_out = subprocess.check_output(["ip", "route", "show", "default"], text=True)
+        # NAT usually has a default via 172.x.x.1
+        # Mirrored/Bridged usually show the host's actual gateway or no NAT-style route
+        
+        # Get local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+
+        if local_ip.startswith("172."):
+            results["mode"] = "NAT"
+            results["details"] = f"Heuristic: Private NAT IP detected ({local_ip})"
+        elif "mirrored" in route_out.lower() or local_ip.startswith("192.168.") or local_ip.startswith("10."):
+            # If IP is on a standard LAN range but we are in WSL, it's likely Bridged or Mirrored
+            results["mode"] = "MIRRORED or BRIDGED"
+            results["details"] = f"Heuristic: LAN-style IP detected ({local_ip}). Run 'wsl.exe --version' to confirm features."
+        else:
+            results["mode"] = "NAT (Likely)"
+            results["details"] = "Standard WSL2 isolation detected."
+            
+    except Exception as e:
+        results["details"] = f"Heuristic check failed: {str(e)}"
+
+    return results
+
 
 def compute_vm_container_score(
     cont_evid: list,
     vm_evid: list,
     local_vendor: str | None,
     mapped_obs: list,
-    ttl_values: Counter,  # New parameter
-) -> tuple[int, str]:
+    ttl_values: Counter,
+) -> tuple[int, str, str]:
     
-    has_local = bool(cont_evid) or bool(vm_evid) or bool(local_vendor)
     has_oui = bool(mapped_obs)
-    
-    # Check for TTL "hop" signatures (Commonly 63, 127, or 254)
-    # This suggests the traffic is being routed through a virtual gateway
-    virt_ttl_signatures = {63, 127, 254}
-    found_ttl_sig = any(ttl in virt_ttl_signatures for ttl in ttl_values)
+    found_ttl_sig = any(t in {63, 127, 254} for t in ttl_values)
 
-    # 1. Determine Score (Network-driven)
+    # 1. Determine Score (network-driven)
     score = 1
     if has_oui:
         score = 3 if len(mapped_obs) == 1 else 4
-    
-    # If we see a TTL signature but NO OUI, we still bump to 3 (Uncertain)
-    # If we see BOTH OUI and TTL signature, we bump to 5 (Very Likely)
+
     if found_ttl_sig:
         if score >= 3:
             score = 5
         else:
             score = 3
 
-    # 2. Determine Status Note
-    notes = []
-    if has_oui:
-        notes.append(f"Network: Virt-OUIs found ({', '.join([v for v,o,c in mapped_obs[:2]])}).")
-    if found_ttl_sig:
-        notes.append(f"Network: Detected 'hop' TTL signatures ({[t for t in ttl_values if t in virt_ttl_signatures]}).")
-    
-    if not has_oui and not found_ttl_sig:
-        notes.append("Network: No virt-OUIs or TTL anomalies detected.")
+    # 2. Network note (NO local info here)
+    network_notes = []
 
-    # (Keep your existing Local Info and Alignment logic here...)
-    # ...
-    
-    # Example finalized alignment note
+    if has_oui:
+        network_notes.append(
+            f"Network: Virt-OUIs found ({', '.join([v for v, o, c in mapped_obs[:2]])})."
+        )
+
+    if found_ttl_sig:
+        trigger_ttls = [t for t in ttl_values if t in {63, 127, 254}]
+        network_notes.append(f"Network: Detected 'hop' TTL signatures ({trigger_ttls}).")
+
+    if not has_oui and not found_ttl_sig:
+        network_notes.append("Network: No virt-OUIs or TTL anomalies detected.")
+
+    # 3. Local info (returned separately)
+    local_info = check_wsl_networking_mode()
+    if local_info.get("is_wsl"):
+        local_note = f"Local Info: WSL {local_info['mode']} Mode ({local_info['details']})."
+    else:
+        local_note = f"Local Info: {local_info['details']}"
+
     alignment = "Clean"
-    if score >= 4: alignment = "Likely Virtualized"
-    elif score == 3: alignment = "Uncertain"
-    
-    return score, f"{alignment}: {' '.join(notes)}"
+    if score >= 4:
+        alignment = "Likely Virtualized"
+    elif score == 3:
+        alignment = "Uncertain"
+
+    return score, f"{alignment}: {' '.join(network_notes)}", local_note
 
 
 def main():
@@ -312,12 +378,12 @@ def main():
             ", ".join([f"{v}({oui})x{cnt}" for v, oui, cnt in mapped_obs[:3]])
         )
 
-    score, unified_note = compute_vm_container_score(
-        cont_evid,
-        vm_evid,
-        local_vendor,
-        mapped_obs,
-        ttl_values  # Pass the counter here
+    score, unified_note, local_note = compute_vm_container_score(
+    cont_evid,
+    vm_evid,
+    local_vendor,
+    mapped_obs,
+    ttl_values
     )
 
     # --------- Output (trimmed/noise removed per your request) ----------
@@ -343,12 +409,14 @@ def main():
         for r in reasons_vm[:10]:
             print(f"  - {r}")
 
+    print("\nSupporting detail (Local / WSL networking mode):")
+    print(f"  - {local_note}")
+
     if reasons_container:
         print("\nSupporting detail (container hints):")
         for r in reasons_container[:10]:
             print(f"  - {r}")
 
-    print("\nDone.")
     return score
 
 

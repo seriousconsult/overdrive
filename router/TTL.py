@@ -329,7 +329,7 @@ def main():
 
     print("-" * 30)
     print(f"SCORE: {suite_score}")
-    print(f" {suite_note}")
+    print(f"STATUS: {suite_note}")
 
 
 if __name__ == "__main__":
