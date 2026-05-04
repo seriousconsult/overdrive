@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+import socket
+from typing import Any
+import requests
+
 """
 IP Blacklist Check
 
@@ -12,13 +17,22 @@ Score (1–5):
   2 — Not on queried lists, but ip-api marks IP as hosting/datacenter
   1 — Clean on queried lists and not flagged as hosting
 """
+#!/usr/bin/env python3
+"""
+IP Blacklist Check
 
-from __future__ import annotations
+Queries public IPv4 against several DNS blocklists (DNSBL / RBL).
+Uses ip-api metadata (hosting/datacenter) as a secondary signal.
 
-import socket
-from typing import Any
+Score (1–5):
+  5 — Listed on Spamhaus ZEN with a high-severity code (SBL/XBL/DROP/CSS, etc.)
+  4 — Listed on ZEN PBL only, or on other DNSBLs, or multiple hits
+  3 — Could not complete checks (no IPv4, DNS failures, or DNSBL Service Blocked)
+  2 — Not on queried lists, but ip-api marks IP as hosting/datacenter
+  1 — Clean on queried lists and not flagged as hosting
+"""
 
-import requests
+
 
 IPIFY = "https://api.ipify.org?format=json"
 IP_API = "http://ip-api.com/json/{ip}"
@@ -35,6 +49,8 @@ DNSBL_ZONES: tuple[tuple[str, str], ...] = (
 # Spamhaus ZEN last-octet meanings (127.0.0.X)
 ZEN_SEVERE_OCTETS = frozenset({2, 3, 4, 9, 11})  # SBL, CSS, XBL, DROP, extended CSS
 ZEN_PBL_OCTET = 10
+# Spamhaus Service Error Codes (127.255.255.X)
+ZEN_BLOCKED_RESOLVER = "127.255.255.254"
 
 
 def public_ipv4() -> str | None:
@@ -63,11 +79,6 @@ def reverse_ipv4_for_dnsbl(ip: str) -> str | None:
 
 
 def dnsbl_lookup(ip: str, zone: str) -> tuple[str, str | None]:
-    """
-    Returns (status, detail).
-    status: "listed" | "clean" | "error"
-    detail: response IP (e.g. 127.0.0.2) or error message
-    """
     rev = reverse_ipv4_for_dnsbl(ip)
     if not rev:
         return "error", "not-ipv4"
@@ -79,12 +90,16 @@ def dnsbl_lookup(ip: str, zone: str) -> tuple[str, str | None]:
     except OSError as e:
         return "error", str(e)
 
-    if resolved.startswith("127."):
-        return "listed", resolved
+    # Check specifically for Spamhaus block codes
+    if resolved == ZEN_BLOCKED_RESOLVER:
+        return "error", "dns-resolver-blocked-by-spamhaus"
+    
     return "listed", resolved
 
 
 def zen_severity(list_return: str) -> str:
+    if list_return == ZEN_BLOCKED_RESOLVER:
+        return "blocked"
     try:
         last = int(list_return.rsplit(".", 1)[-1])
     except ValueError:
@@ -113,11 +128,14 @@ def check_ip_blacklist() -> tuple[int, str]:
     hits: list[str] = []
     zen_hit: str | None = None
     errors = 0
+    dns_blocked = False
 
     for zone, label in DNSBL_ZONES:
         status, detail = dnsbl_lookup(ip, zone)
         if status == "error":
             errors += 1
+            if detail == "dns-resolver-blocked-by-spamhaus":
+                dns_blocked = True
             if detail:
                 hits.append(f"{label}:error({detail})")
             continue
@@ -126,10 +144,16 @@ def check_ip_blacklist() -> tuple[int, str]:
             if label == "spamhaus-zen":
                 zen_hit = detail
 
+    if dns_blocked:
+        return (
+            3,
+            "Spamhaus query blocked: Using a public DNS resolver (e.g. Google/Cloudflare) is not supported for ZEN queries."
+        )
+
     if errors == len(DNSBL_ZONES):
         return (
             3,
-            "All DNSBL lookups failed (resolver blocked Spamhaus, offline, or policy).",
+            "All DNSBL lookups failed (resolver blocked, offline, or policy).",
         )
 
     if zen_hit:

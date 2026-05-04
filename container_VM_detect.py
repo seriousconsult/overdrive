@@ -2,7 +2,7 @@
 """
 Best-effort VM/Container Likelihood Detector (traffic + local evidence)
 
-Unified output: an integer score 1–5 (see compute_vm_container_score).
+Unified output: an integer score 1–5.
   1 — Very unlikely VM or container
   5 — Very likely VM or container
   2–4 — increasing uncertainty / strength of evidence
@@ -11,7 +11,7 @@ Network traffic:
   - Sniffs Ethernet frames (if visible) to observe source MAC OUIs
   - Generates outbound HTTPS requests while sniffing
 
-Local system evidence (not strictly from traffic, but increases accuracy):
+Local system evidence (not strictly from traffic, but for internal self-awareness):
   - Container markers: /.dockerenv, /proc/1/cgroup, /run/*container* hints
   - VM markers: /proc/cpuinfo hypervisor flag + DMI product/board names
 """
@@ -22,9 +22,8 @@ import os
 import re
 import subprocess
 from collections import Counter
-
 import requests
-from scapy.all import AsyncSniffer, sniff, Ether, IP, TCP  # type: ignore
+from scapy.all import AsyncSniffer, Ether, IP, TCP  # type: ignore
 
 
 # Common virtualization OUIs (heuristic; expand as needed).
@@ -174,62 +173,49 @@ def compute_vm_container_score(
     vm_evid: list,
     local_vendor: str | None,
     mapped_obs: list,
+    ttl_values: Counter,  # New parameter
 ) -> tuple[int, str]:
-    """
-    Single likelihood score 1–5 for "is this environment a VM or container?"
+    
+    has_local = bool(cont_evid) or bool(vm_evid) or bool(local_vendor)
+    has_oui = bool(mapped_obs)
+    
+    # Check for TTL "hop" signatures (Commonly 63, 127, or 254)
+    # This suggests the traffic is being routed through a virtual gateway
+    virt_ttl_signatures = {63, 127, 254}
+    found_ttl_sig = any(ttl in virt_ttl_signatures for ttl in ttl_values)
 
-    1 — Very unlikely (no local virtualization/container signals detected).
-    2 — Unlikely / weak hints only.
-    3 — Uncertain (mixed, weak, or sniff-only hints).
-    4 — Likely VM or container (solid local evidence).
-    5 — Very likely (strong combined local evidence).
+    # 1. Determine Score (Network-driven)
+    score = 1
+    if has_oui:
+        score = 3 if len(mapped_obs) == 1 else 4
+    
+    # If we see a TTL signature but NO OUI, we still bump to 3 (Uncertain)
+    # If we see BOTH OUI and TTL signature, we bump to 5 (Very Likely)
+    if found_ttl_sig:
+        if score >= 3:
+            score = 5
+        else:
+            score = 3
 
-    Observed Ethernet OUIs alone are treated as weak (often remote peers); they
-    cannot push the score above 3 without local VM/container/NIC evidence.
-    """
-    has_c = bool(cont_evid)
-    has_v = bool(vm_evid)
-    has_lv = bool(local_vendor)
-    has_tr = bool(mapped_obs)
+    # 2. Determine Status Note
+    notes = []
+    if has_oui:
+        notes.append(f"Network: Virt-OUIs found ({', '.join([v for v,o,c in mapped_obs[:2]])}).")
+    if found_ttl_sig:
+        notes.append(f"Network: Detected 'hop' TTL signatures ({[t for t in ttl_values if t in virt_ttl_signatures]}).")
+    
+    if not has_oui and not found_ttl_sig:
+        notes.append("Network: No virt-OUIs or TTL anomalies detected.")
 
-    local_stack = has_c or has_v or has_lv
-
-    raw = 0
-    if has_c:
-        raw += 5
-    if has_v:
-        raw += 4
-    if has_lv:
-        raw += 2
-    if has_tr:
-        raw += 1
-
-    if not local_stack:
-        if has_tr:
-            return (
-                3,
-                "Uncertain: only virtualization-tagged OUIs seen on the wire (may be remote); "
-                "no local VM/container checks fired.",
-            )
-        raw = 0
-
-    if raw <= 0:
-        score = 1
-        note = "No VM/container local signals; no mapped virt OUIs in capture."
-    elif raw <= 2:
-        score = 2
-        note = "Weak local hints only (e.g. virt NIC OUI without other VM/container markers)."
-    elif raw == 3:
-        score = 3
-        note = "Some evidence but ambiguous; review reasons below."
-    elif raw <= 7:
-        score = 4
-        note = "Solid local evidence of a container and/or hypervisor environment."
-    else:
-        score = 5
-        note = "Very strong combined indicators (container + VM/network markers align)."
-
-    return score, note
+    # (Keep your existing Local Info and Alignment logic here...)
+    # ...
+    
+    # Example finalized alignment note
+    alignment = "Clean"
+    if score >= 4: alignment = "Likely Virtualized"
+    elif score == 3: alignment = "Uncertain"
+    
+    return score, f"{alignment}: {' '.join(notes)}"
 
 
 def main():
@@ -270,10 +256,11 @@ def main():
             if oui:
                 seen_ouis[oui] += 1
 
-        # L3/L4 (kept, but we won't print TTL/traffic blocks per your request)
         if IP in pkt:
             ip_seen += 1
-            ttl_values[int(pkt[IP].ttl)] += 1
+            # Capture TTLs from outbound packets (those matching your local MAC)
+            if pkt[Ether].src == local_mac:
+                ttl_values[int(pkt[IP].ttl)] += 1
         if TCP in pkt:
             tcp_seen += 1
             flags = int(pkt[TCP].flags)
@@ -330,6 +317,7 @@ def main():
         vm_evid,
         local_vendor,
         mapped_obs,
+        ttl_values  # Pass the counter here
     )
 
     # --------- Output (trimmed/noise removed per your request) ----------

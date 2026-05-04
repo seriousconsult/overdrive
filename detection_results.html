@@ -107,7 +107,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <body>
 <header>
   <h1>Overdrive detection results</h1>
-  <span class="timestamp">2026-04-28 20:25:55</span>
+  <span class="timestamp">2026-05-04 09:05:00</span>
 </header>
 <main>
 <section>
@@ -120,7 +120,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <h2>Browser</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: All providers agree on one country name — not multiple countries.</td></tr>
-<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile. (Observed UA names python-httpx/httpx (library client); HTTP/2 SETTINGS look library-like (Akamai heuristic); JA3 matches catalogued Python HTTP stacks …)</td></tr>
+<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile. (Observed UA names python-httpx/httpx (library client); HTTP/2 SETTINGS look library-like (Akamai heuristic); SETTINGS header table size 4096 is small (library-like))</td></tr>
 <tr><td class="script">HTTP3_QUIC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: HeadlessChrome observed with HTTP/2 fallback and no QUIC transport-parameter evidence (strong automation/non-standard client signal).</td></tr>
 <tr><td class="script">WebRTC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: RFC1918 address visible via WebRTC (local/private leak).</td></tr>
 <tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
@@ -134,9 +134,9 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <section>
 <h2>Network</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">blacklist_check.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Not listed on queried DNSBLs (zen, spamcop, barracuda); no hosting flag from ip-api.</td></tr>
+<tr><td class="script">blacklist_check.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Listed on Spamhaus ZEN (127.255.255.254).</td></tr>
 <tr><td class="script">doh_detection.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No Firefox/Chromium Local State paths found and no platform DoH probe; inconclusive.</td></tr>
-<tr><td class="script">tor_proxy_reputation.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Listed on FireHOL open-proxy netset</td></tr>
+<tr><td class="script">tor_proxy_reputation.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Strong IPv4 consensus; Onionoo and dual Tor-exit lists show no match; not on proxy list; AbuseIPDB not configured — likely clean, not fully verified.</td></tr>
 </tbody></table>
 </section>
 <section>
@@ -144,22 +144,29 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">NAT_OS.py</td><td><span class="badge badge n2">2</span></td><td class="comment">Traffic seen; TTL families look single-stack per source (no strong NAT signal).</td></tr>
 <tr><td class="script">OUI.py</td><td><span class="badge badge n2">2</span></td><td class="comment">MAC present; OUI not in heuristic map.</td></tr>
-<tr><td class="script">TTL.py</td><td><span class="badge badge n2">2</span></td><td class="comment">Strongest suspect 172.66.147.243: Possible Linux/mac/IoT-ish stack (heuristic TTL)</td></tr>
-<tr><td class="script">banners.py</td><td><span class="badge badge n1">1</span></td><td class="comment">No strong router banner signal (heuristic)</td></tr>
+<tr><td class="script">TTL.py</td><td><span class="badge badge n2">2</span></td><td class="comment">Strongest suspect 172.29.63.79: Possible Linux/mac/IoT-ish stack (heuristic TTL)</td></tr>
+<tr><td class="script">UPNP.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No SSDP (add --ip &lt;LAN gateway&gt;)</td></tr>
+<tr><td class="script">banners.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No Server banner (16 probes)</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Vm</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">create_VM.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
 </tbody></table>
 </section>
 <section>
 <h2>Vpn</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">ASN.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: high-confidence suspicious egress: ipapi=5 (VPN / anonymization provider (org name)); ip-api=5 (ip-api: proxy=true)</td></tr>
+<tr><td class="script">ASN.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: high-confidence suspicious egress: ipapi=5 (datacenter/hosting org pattern); ip-api=5 (ip-api isp heuristic: datacenter/hosting org pattern)</td></tr>
 <tr><td class="script">DNS.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Certain leak of IPv4.</td></tr>
 <tr><td class="script">IPv6_leak.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: No global IPv6 on host and no IPv6 egress to ipify — low IPv6 leak surface.</td></tr>
-<tr><td class="script">MTU.py</td><td><span class="badge badge n4">4</span></td><td class="comment">Measured via: ip -o link show (local link MTU; not path MTU to a remote host)</td></tr>
+<tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Measured via: ip -o link show (local link MTU; not path MTU to a remote host)</td></tr>
 <tr><td class="script">TCP_stack.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: MATCH: Captured TCP SYN stack matches this OS family (low suspicion).</td></tr>
-<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints. — Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
+<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: UNCERTAIN: Mixed or incomplete fingerprint signals. — Declared script UA; TLS is not a catalogued library hash (custom stack or rare build).</td></tr>
 <tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
 <tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
-<tr><td class="script">timing_latency.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Measured via: TCP Connect</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via: TCP Connect</td></tr>
 <tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No tunnel-pattern interfaces found (tun/tap/wg/…); no VPN-style virtual iface names.</td></tr>
 <tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target.</td></tr>
 </tbody></table>
