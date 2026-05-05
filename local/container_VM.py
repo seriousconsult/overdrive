@@ -21,7 +21,7 @@ Local system evidence (not strictly from traffic, but for internal self-awarenes
   - VM markers: /proc/cpuinfo hypervisor flag + DMI product/board names
   - WSL network mode, WSL is a VM. 
 
-  NOTE: On WSL2. Microsoft introduced Mirrored Mode (networkingMode=mirrored). nstead of a NAT router,
+  NOTE: On WSL2. Microsoft introduced Mirrored Mode (networkingMode=mirrored). Instead of a NAT router,
     WSL "mirrors" your Windows network interfaces into Linux. Is it Bridged? Not technically,
       but it appears similar because the network stack is shared.
 """
