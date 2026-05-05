@@ -19,10 +19,15 @@ Windows catches those requests and resolves them using the Windows Host's curren
 Because your script sees the "gateway" IP (10.255.255.254) as the nameserver in both cases, 
 it thinks the DNS hasn't changed, even though the upstream resolver on the Windows side likely has.
 '''
+import ipaddress
+import json
+import os
+import platform
 import socket
 import subprocess
-import platform
-import os
+import urllib.error
+import urllib.request
+from typing import Any
 
 
 def is_wsl() -> bool:
@@ -70,43 +75,76 @@ def _resolv_nameservers() -> list[str]:
     return out
 
 
-# Known Public DNS Providers (Commonly blocked by some providers)
-DNS_PROVIDER_MAP = {
-    # --- Major Global Resolvers ---
-    "8.8.8.8": "Google Public DNS",
-    "8.8.4.4": "Google Public DNS",
-    "1.1.1.1": "Cloudflare",
-    "1.0.0.1": "Cloudflare",
-    "9.9.9.9": "Quad9",
-    "149.112.112.112": "Quad9 (Secondary)",
-    "208.67.222.222": "OpenDNS (Cisco)",
-    "208.67.220.220": "OpenDNS (Cisco)",
+def _reverse_dns(ip: str) -> str | None:
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except (socket.herror, socket.gaierror, OSError):
+        return None
 
-    # --- Privacy & Security Focused ---
-    "94.140.14.14": "AdGuard DNS",
-    "94.140.15.15": "AdGuard DNS",
-    "76.76.2.0": "Control D",
-    "76.76.10.0": "Control D",
-    "185.228.168.9": "CleanBrowsing",
-    "185.228.169.9": "CleanBrowsing",
-    "45.33.97.5": "Alternate DNS",
-    "37.235.1.174": "FreeDNS",
 
-    # --- Infrastructure / ISP Managed ---
-    "64.6.64.6": "Verisign Public DNS",
-    "64.6.65.6": "Verisign Public DNS",
-    "4.2.2.1": "Level3 (CenturyLink)",
-    "4.2.2.2": "Level3 (CenturyLink)",
-    "8.26.56.26": "Comodo Secure DNS",
-    "8.20.247.20": "Comodo Secure DNS",
+def _parse_arin_response(data: dict[str, Any]) -> str | None:
+    net = data.get("net") or {}
+    for key in ("orgRef", "registration", "org-name"):
+        entry = net.get(key)
+        if isinstance(entry, dict):
+            owner = entry.get("@name") or entry.get("name")
+            if owner:
+                return owner
+        elif isinstance(entry, str):
+            return entry
+    return None
 
-    # --- Internal / Virtualization Gateways ---
-    "172.18.0.1": "WSL Internal Gateway (NAT)",
-    "192.168.1.1": "Common Local ISP's Router",
-    "10.0.0.1": "Common Local VPN's Router",
-    "10.2.0.1": "Common Local VPN's Router",
-    "10.255.255.254": "Corporate/ISP Gateway",
-}
+
+def _get_arin_owner(ip: str) -> str | None:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if addr.is_private:
+        return None
+
+    url = f"https://whois.arin.net/rest/ip/{ip}.json"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "my_DNS.py/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            if response.status != 200:
+                return None
+            data = json.load(response)
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
+        return None
+
+    return _parse_arin_response(data)
+
+
+def _describe_dns_ip(ip: str) -> tuple[str, bool]:
+    hostname = _reverse_dns(ip)
+    owner = _get_arin_owner(ip)
+
+    try:
+        public = not ipaddress.ip_address(ip).is_private
+    except ValueError:
+        public = False
+
+    if public:
+        if hostname and owner:
+            description = f"{hostname} (ARIN: {owner})"
+        elif hostname:
+            description = f"{hostname}"
+        elif owner:
+            description = f"ARIN: {owner}"
+        else:
+            description = "Unknown Public Provider"
+    else:
+        if hostname:
+            description = f"ISP/Internal ({hostname})"
+        else:
+            description = "Private/Unknown Provider"
+
+    return f"{ip} ({description})", public
+
 
 def get_dns_info():
     dns_ips = []
@@ -144,26 +182,33 @@ def get_dns_info():
 
     # --- Step 2: Identify and Format ---
     dns_details_strings = []
-    for ip in dns_ips:
-        name = DNS_PROVIDER_MAP.get(ip)
-        
-        if name:
-            # If it's a known public provider, mark as potentially problematic for DNSBL
-            if "Public" in name or "Cloudflare" in name or "OpenDNS" in name:
-                is_public_dns = True
-        else:
-            try:
-                hostname = socket.gethostbyaddr(ip)[0]
-                name = f"ISP/Internal ({hostname})"
-            except (socket.herror, socket.gaierror):
-                name = "Private/Unknown Provider"
-        
-        dns_details_strings.append(f"{ip} ({name})")
-    
-    # Logic for score based on DNS type
+    has_isp_lookup = False
+    has_home_router_dns = False
+    for raw_ip in dns_ips:
+        ip = raw_ip.strip()
+        description, public = _describe_dns_ip(ip)
+        dns_details_strings.append(description)
+        is_public_dns |= public
+        if "ISP/Internal" in description:
+            has_isp_lookup = True
+        try:
+            addr = ipaddress.ip_address(ip.split("%", 1)[0])
+        except ValueError:
+            addr = None
+        if addr and addr == ipaddress.ip_address("192.168.1.1"):
+            has_home_router_dns = True
+
+    # Score: public resolver → 5; ISP-identifying PTR (ISP/Internal) → 5;
+    # typical consumer gateway 192.168.1.1 → 4; else baseline 2.
     if is_public_dns:
         final_score = 5
         status_msg = f"Public DNS detected: {', '.join(dns_details_strings)}"
+    elif has_isp_lookup:
+        final_score = 5
+        status_msg = f"System DNS (ISP-identified PTR): {', '.join(dns_details_strings)}"
+    elif has_home_router_dns:
+        final_score = 4
+        status_msg = f"System DNS (192.168.1.1 gateway resolver): {', '.join(dns_details_strings)}"
     else:
         final_score = 2
         status_msg = f"System DNS: {', '.join(dns_details_strings)}"
