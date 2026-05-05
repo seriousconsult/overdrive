@@ -102,8 +102,9 @@ DNS_PROVIDER_MAP = {
 
     # --- Internal / Virtualization Gateways ---
     "172.18.0.1": "WSL Internal Gateway (NAT)",
-    "192.168.1.1": "Common Local Router",
-    "10.0.0.1": "Common Local Router",
+    "192.168.1.1": "Common Local ISP's Router",
+    "10.0.0.1": "Common Local VPN's Router",
+    "10.2.0.1": "Common Local VPN's Router",
     "10.255.255.254": "Corporate/ISP Gateway",
 }
 
