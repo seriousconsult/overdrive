@@ -76,7 +76,7 @@ python_exe = os.path.join(venv_dir, "bin", "python") if sys.platform != "win32" 
 
 # 3. Install Python libs
 print("Installing Python packages...")
-subprocess.check_call([python_exe, "-m", "pip", "install", "requests", "selenium", "httpx[http2]", "scapy"])
+subprocess.check_call([python_exe, "-m", "pip", "install", "requests", "selenium", "httpx[http2]","scapy"])
 
 # 4. Handle System Deps
 install_system_deps()
