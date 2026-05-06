@@ -1,118 +1,198 @@
 #!/usr/bin/env python3
+import gzip
 import os
+import platform
+import shutil
 import subprocess
-import platform 
-import getpass
-import time
-'''
-TODO: finish this script to automate the creation of an OpenWrt VM in VirtualBox, 
-with dynamic path detection for both WSL and Linux environments. 
-The script should handle downloading the OpenWrt image, converting it to VDI format,
- creating/registering the VM, configuring it with appropriate settings.
-'''
+import urllib.request
+from pathlib import Path
 
-# --- 1. Global Variables ---
+"""Create a basic OpenWrt router VM in VirtualBox from WSL or native Linux.
+
+Two network legs (typical home-router style in a lab):
+  * NIC1 — WAN: bridged to the host’s physical adapter (or VirtualBox NAT if no bridge is found)
+  * NIC2 — LAN: internal network; attach other VMs with the same intnet name to sit “behind” OpenWrt
+"""
+
 VM_NAME = "OpenWrt_2026_Router"
-VBOX = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
+# Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 openwrt-lan``
+LAN_INTNET_NAME = "openwrt-lan"
 OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
+IMAGE_NAME = "openwrt_2026.img"
+VDI_NAME = "openwrt.vdi"
 
-# --- 2. Dynamic Detection Functions ---
-def get_system_paths():
-    is_wsl = "microsoft-standard" in platform.release().lower()
-    if is_wsl:
-        proc = subprocess.run(["cmd.exe", "/c", "echo %USERPROFILE%"], capture_output=True, text=True)
-        win_profile = proc.stdout.strip()
-        wsl_user_path = win_profile.replace('C:', '/mnt/c').replace('\\', '/')
-        return {
-            "base_path": wsl_user_path,
-            "is_wsl": True,
-            "win_user": win_profile.split('\\')[-1],
-            "win_profile": win_profile
-        }
-    else:
-        return {
-            "base_path": os.path.expanduser("~"),
-            "is_wsl": False,
-            "win_user": getpass.getuser(),
-            "win_profile": os.path.expanduser("~")
-        }
 
-def get_active_bridged_interface(vbox_path):
+def is_wsl_environment() -> bool:
+    return "microsoft" in platform.release().lower() or os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop")
+
+
+def wsl_to_windows_path(path: str) -> str:
     try:
-        res = subprocess.run([vbox_path, "list", "-l", "bridgedifs"], capture_output=True, text=True, check=True)
-        adapters = res.stdout.strip().split('\n\n')
-        for block in adapters:
-            details = {line.split(":", 1)[0].strip(): line.split(":", 1)[1].strip() for line in block.splitlines() if ":" in line}
-            if details.get("Status") == "Up":
-                return details.get("Name")
-    except: pass
-    return "Ethernet"
+        result = subprocess.run(["wslpath", "-w", path], capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        if path.startswith("/mnt/"):
+            drive, _, rest = path[1:].partition("/")
+            return f"{drive.upper()}:\\{rest.replace('/', '\\')}"
+        return path
 
-# --- 3. Path Resolution ---
-paths = get_system_paths()
-win_user = paths["win_user"]
-win_profile = paths["win_profile"]
-base = paths["base_path"]
 
-# WSL Paths for Python/Linux commands
-IMG_PATH_WSL = f"{base}/Downloads/openwrt_2026.img"
-VM_BASE_WSL = f"{base}/VirtualBox VMs/{VM_NAME}"
-INTERFACE = get_active_bridged_interface(VBOX)
+def get_system_paths() -> dict:
+    linux_home = str(Path.home())
+    if is_wsl_environment():
+        try:
+            proc = subprocess.run(["cmd.exe", "/c", "echo", "%USERPROFILE%"], capture_output=True, text=True, check=True)
+            win_profile = proc.stdout.strip()
+        except subprocess.CalledProcessError:
+            win_profile = None
+        return {
+            "is_wsl": True,
+            "linux_home": linux_home,
+            "win_profile": win_profile,
+            "img_path": os.path.join(linux_home, "Downloads", IMAGE_NAME),
+            "vm_base": os.path.join(linux_home, "VirtualBox VMs", VM_NAME),
+        }
+    return {
+        "is_wsl": False,
+        "linux_home": linux_home,
+        "win_profile": None,
+        "img_path": os.path.join(linux_home, "Downloads", IMAGE_NAME),
+        "vm_base": os.path.join(linux_home, "VirtualBox VMs", VM_NAME),
+    }
 
-# Windows Paths for VBoxManage.exe
-IMG_PATH_WIN = f"{win_profile}\\Downloads\\openwrt_2026.img"
-VDI_DEST_WIN = f"{win_profile}\\VirtualBox VMs\\{VM_NAME}\\openwrt.vdi"
-VBOX_FILE_WIN = f"{win_profile}\\VirtualBox VMs\\{VM_NAME}\\{VM_NAME}.vbox"
 
-# --- 4. Main Execution ---
-def setup_openwrt_vm():
-    os.makedirs(VM_BASE_WSL, exist_ok=True)
-    target_vdi_wsl = os.path.join(VM_BASE_WSL, "openwrt.vdi")
+def find_vboxmanage(paths: dict) -> str:
+    if paths["is_wsl"]:
+        windows_path = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
+        if os.path.exists(windows_path):
+            return windows_path
+        return shutil.which("VBoxManage.exe") or shutil.which("VBoxManage")
+    return shutil.which("VBoxManage") or shutil.which("VBoxManage.exe")
 
-    if os.path.exists(target_vdi_wsl):
-        print(f"VDI already exists. Skipping download.")
+
+def download_openwrt_image(url: str, dest_path: str) -> None:
+    dest = Path(dest_path)
+    if dest.exists():
+        print(f"OpenWrt raw image already exists at {dest}")
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading OpenWrt image to {dest}...")
+    with urllib.request.urlopen(url) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Download failed with HTTP {response.status}")
+        with gzip.GzipFile(fileobj=response) as gz:
+            with open(dest, "wb") as out_file:
+                shutil.copyfileobj(gz, out_file)
+    print("Download complete.")
+
+
+def get_active_bridged_interface(vboxmanage: str) -> str | None:
+    """Prefer an interface with Status=Up; otherwise first listed bridged adapter."""
+    try:
+        result = subprocess.run([vboxmanage, "list", "-l", "bridgedifs"], capture_output=True, text=True, check=True)
+        blocks = [block for block in result.stdout.split("\n\n") if block.strip()]
+        first_name: str | None = None
+        for block in blocks:
+            attrs = {}
+            for line in block.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                attrs[key.strip()] = value.strip()
+            name = attrs.get("Name")
+            if name and first_name is None:
+                first_name = name
+            if attrs.get("Status") == "Up" and name:
+                return name
+        return first_name
+    except subprocess.CalledProcessError:
+        pass
+    return None
+
+
+def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
+    print(f"Executing: {vboxmanage} {' '.join(args)}")
+    subprocess.run([vboxmanage] + args, check=True, **kwargs)
+
+
+def setup_openwrt_vm() -> None:
+    paths = get_system_paths()
+    vboxmanage = find_vboxmanage(paths)
+    if not vboxmanage:
+        raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
+
+    img_path = paths["img_path"]
+    vm_base = paths["vm_base"]
+    vdi_path = os.path.join(vm_base, VDI_NAME)
+    os.makedirs(vm_base, exist_ok=True)
+
+    download_openwrt_image(OPENWRT_URL, img_path)
+
+    src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
+    dst_path = wsl_to_windows_path(vdi_path) if paths["is_wsl"] else vdi_path
+
+    if not os.path.exists(vdi_path):
+        print("Converting raw image to VDI...")
+        run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
     else:
-        print(f"Downloading and unzipping OpenWrt 25.12.2...")
-        # Use zcat for Linux stream, output to the WSL-visible path
-        cmd = f"curl -L {OPENWRT_URL} | zcat > '{IMG_PATH_WSL}'"
-        subprocess.run(cmd, shell=True, check=True)
-        
-        # Give Windows a second to acknowledge the new file
-        time.sleep(2)
+        print("VDI already exists; skipping conversion.")
 
-        print(f"Converting Image to VDI...")
-        print(f"Source: {IMG_PATH_WIN}")
-        print(f"Dest: {VDI_DEST_WIN}")
-        
-        # Use Windows-style paths for the conversion
-        subprocess.run([VBOX, "convertfromraw", IMG_PATH_WIN, VDI_DEST_WIN, "--format", "VDI"], check=True)
-        
-        if os.path.exists(IMG_PATH_WSL):
-            os.remove(IMG_PATH_WSL)
-
-    # Register/Create VM
-    vms = subprocess.run([VBOX, "list", "vms"], capture_output=True, text=True).stdout
-    if f'"{VM_NAME}"' not in vms:
-        if os.path.exists(os.path.join(VM_BASE_WSL, f"{VM_NAME}.vbox")):
-            subprocess.run([VBOX, "registervm", VBOX_FILE_WIN], check=True)
+    registered_vms = subprocess.run([vboxmanage, "list", "vms"], capture_output=True, text=True, check=True).stdout
+    if f'"{VM_NAME}"' not in registered_vms:
+        vmx_file = os.path.join(vm_base, f"{VM_NAME}.vbox")
+        if os.path.exists(vmx_file):
+            run_vboxmanage(vboxmanage, ["registervm", vmx_file])
         else:
-            subprocess.run([VBOX, "createvm", "--name", VM_NAME, "--ostype", "Linux_64", "--register"], check=True)
+            run_vboxmanage(vboxmanage, ["createvm", "--name", VM_NAME, "--ostype", "Linux_64", "--basefolder", vm_base, "--register"])
 
-    # Configuration
-    print(f"Configuring {VM_NAME}...")
-    subprocess.run([VBOX, "modifyvm", VM_NAME, 
-                    "--memory", "512", "--cpus", "1", 
-                    "--nic1", "bridged", "--bridgeadapter1", INTERFACE,
-                    "--graphicscontroller", "vmsvga"], check=True)
+    bridge_interface = get_active_bridged_interface(vboxmanage)
+    if bridge_interface:
+        wan_args = ["--nic1", "bridged", "--bridgeadapter1", bridge_interface]
+        wan_note = f"bridged → {bridge_interface!r} (WAN / uplink)"
+    else:
+        wan_args = ["--nic1", "nat"]
+        wan_note = "NAT (WAN fallback — no bridged adapter resolved)"
 
-    # Storage Setup
-    subprocess.run([VBOX, "storagectl", VM_NAME, "--name", "IDE", "--remove"], stderr=subprocess.DEVNULL)
-    subprocess.run([VBOX, "storagectl", VM_NAME, "--name", "IDE", "--add", "ide"], check=True)
-    subprocess.run([VBOX, "storageattach", VM_NAME, "--storagectl", "IDE", 
-                    "--port", "0", "--device", "0", "--type", "hdd", "--medium", VDI_DEST_WIN], check=True)
+    lan_args = ["--nic2", "intnet", "--intnet2", LAN_INTNET_NAME]
 
-    print(f"\nSUCCESS. Starting VM...")
-    subprocess.run([VBOX, "startvm", VM_NAME, "--type", "gui"], check=True)
+    print(f"Configuring VM {VM_NAME}…")
+    print(f"  WAN (NIC1): {wan_note}")
+    print(
+        f"  LAN (NIC2): internal network {LAN_INTNET_NAME!r} — "
+        "client VMs use e.g. "
+        f"`VBoxManage modifyvm <vm> --nic1 intnet --intnet1 {LAN_INTNET_NAME}`"
+    )
+    print(
+        "  In OpenWrt, map NIC1→WAN and NIC2→LAN (often eth0 / eth1); "
+        "assign LAN subnet & DHCP under Network → Interfaces."
+    )
+    run_vboxmanage(
+        vboxmanage,
+        [
+            "modifyvm",
+            VM_NAME,
+            "--memory",
+            "512",
+            "--cpus",
+            "1",
+            "--graphicscontroller",
+            "vmsvga",
+            *wan_args,
+            *lan_args,
+        ],
+    )
+
+    try:
+        run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--remove"])
+    except subprocess.CalledProcessError:
+        pass
+
+    run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
+    run_vboxmanage(vboxmanage, ["storageattach", VM_NAME, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", dst_path])
+
+    print("Starting VM...")
+    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+
 
 if __name__ == "__main__":
     setup_openwrt_vm()
