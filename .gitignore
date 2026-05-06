@@ -25,6 +25,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# --- Other ---
 *.png
 TODO.md
-

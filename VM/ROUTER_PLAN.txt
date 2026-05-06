@@ -1,0 +1,212 @@
+ROUTER VM ACCEPTANCE PLAN (PLAIN ENGLISH)
+==========================================
+
+This note explains why the OpenWrt VirtualBox setup exists, how we intend to check it against Overdrive probes, and what work remains if you want checks to be accurate and repeatable.
+
+
+1. WHAT PROBLEM WE ARE SOLVING
+------------------------------
+
+We want an OpenWrt VM that, under the same kinds of passive and active probes a forensic analyst might use on a home router, behaves like a plausible residential gateway—not obviously like a generic Linux VM.
+
+Important distinction: you generally cannot reach a state where the VM is indistinguishable from a specific brand of ISP CPE. Virtual machines still leave hypervisor-side traces (timing, NIC defaults, VirtualBox artifacts). The practical goal is a repeatable lab baseline: explicit PASS/FAIL rules and the same topology every run.
+
+
+2. ETHICS AND SCOPE
+-------------------
+
+Do not use another organization’s IEEE OUI on networks where impersonation could harm others or break policy. Prefer locally administered MAC addresses (VirtualBox can set MAC addresses explicitly) or documented lab-only values.
+
+Forensic accuracy here means: what we report matches what we actually measured (correct target IP, correct acceptance profile, stable thresholds). Aspirationally you want fewer obvious VM tells; technically you still may not fool every expert forever.
+
+
+3. HOW THE LAB NETWORK SHOULD LOOK
+----------------------------------
+
+We model a two-legged home router.
+
+  WAN leg: faces the internet or your upstream LAN.
+           VirtualBox: NIC1 bridged to a host adapter when possible; otherwise NAT fallback.
+           Implemented in: VM/create_VM_OpenWrt_router.py
+
+  LAN leg: faces devices behind the router.
+           VirtualBox: NIC2 on internal network named openwrt-lan.
+           Implemented in: VM/create_VM_OpenWrt_router.py
+
+Two acceptance profiles (both matter):
+
+  WAN profile — Highest priority for how we think about residential gateways.
+                Run checks from the host machine (or anything on the same bridged segment as OpenWrt’s WAN).
+                Target IP is OpenWrt’s WAN address on that segment (often DHCP from your home router).
+
+  LAN profile — Run checks from a second VM whose NIC is attached to openwrt-lan.
+                Target IP is OpenWrt’s LAN address (whatever you configure in OpenWrt, e.g. 192.168.2.1).
+
+If you only test one profile, you only validate half of the story.
+
+ASCII sketch:
+
+  WAN profile:     Host_PC --- NIC1 bridged --- OpenWrt WAN
+
+  LAN profile:     Client_VM --- NIC2 openwrt-lan --- OpenWrt LAN
+
+
+4. WHAT WE RUN TO ACCEPT THE ROUTER
+-----------------------------------
+
+We use two complementary methods. Together they support WAN-first measurement, passive plus active probes, and scores that mean what we say they mean.
+
+4.1 Full suite
+
+Run from the repository root:
+
+  python run_all_detections.py
+
+That driver discovers and runs most Overdrive modules (vpn, browser, network, router folders, and root-level scripts). It prints to the console and writes an HTML report file (the project README describes this workflow and scoring).
+
+Default PASS goal for typical modules: treat SCORE less than or equal to 3 as acceptable where higher scores mean stronger anomaly, mismatch, or suspicion (see README.md in the repo root for the general scoring idea).
+
+Important exception: several router-folder heuristics (banners, OUI, UPNP) encode router-likeness. For those, a higher score can mean stronger consumer-gateway-like signals, not more suspicious. Do not apply a blind less-than-or-equal-to-3 rule unless you invert or bucket them explicitly. You need a score-semantics matrix: each script id maps to pass_mode (for example: lte_3 for anomaly-style scripts, gte_min for router-likelihood scripts, skip, or manual review).
+
+4.2 Directed router battery (intended; not shipped as a standalone script yet)
+
+The full suite usually probes whatever your environment’s default gateway is. That may not be OpenWrt. For router VM acceptance you also need probes aimed explicitly at OpenWrt’s WAN IP and LAN IP from the correct vantage point:
+
+  From host (or WAN segment): probe OpenWrt WAN address.
+
+  From a client VM on openwrt-lan: probe OpenWrt LAN address.
+
+Today that means calling router/banners.py, router/OUI.py, and router/UPNP.py yourself with their --ip argument (and keeping privilege and timing consistent). Backlog item 4 adds a small runner to automate that pair of profiles.
+
+
+5. FILES THAT ALREADY EXIST AND MATTER HERE
+--------------------------------------------
+
+  run_all_detections.py       repo root — full detection sweep
+  README.md                   repo root — scoring and sudo/setcap notes
+  VM/create_VM_OpenWrt_router.py — build the two-NIC OpenWrt VM
+  router/banners.py           HTTP/S banner probe (supports --ip)
+  router/OUI.py                 MAC / OUI heuristic (supports --ip)
+  router/UPNP.py              SSDP / UPnP probe (supports --ip)
+  router/TTL.py               TTL capture heuristic (needs capture privileges)
+  router/NAT_OS.py            NAT / OS-jumble heuristic (needs capture privileges)
+  local/my_DNS.py             DNS identification helper (optional context)
+  local/my_router.py          Combined MAC / UPnP-style probe (optional; uses MY_MORE_ROUTER_IP on WSL)
+
+
+BACKLOG — IMPROVE CHECKING FIDELITY AND LAB REALISM
+==================================================
+
+Goals (what “better” means):
+
+  G1  Residential plausibility — Gateway-like behavior under passive and active probes; WAN-facing checks weighted first.
+
+  G2  Honest measurement — PASS/FAIL matches declared targets (IP, profile, score interpretation). Section 4 dual method is mandatory context.
+
+  G3  Fewer obvious VM tells — Where technically possible; accept that perfect mimicry of a specific ISP box is not guaranteed.
+
+Methods (what we improve):
+
+  M1  Full suite — Parse and gate run_all_detections.py output with per-script rules (anomaly-style lte_3 vs router-likelihood gte_min).
+
+  M2  Directed battery — Explicit WAN/LAN IPs and stable thresholds once a runner exists (items 4–9).
+
+
+SECTION A — FULL SUITE ACCEPTANCE (M1)
+
+  1  Publish a score-semantics matrix: script name or stable id, pass_mode (lte_3 | gte_min | skip | manual), optional min/max threshold, notes. Store it as plain text or data the validator reads.
+
+  2  Build a validator that reads the HTML report produced by run_all_detections.py and extracts the final SCORE per script, then applies the matrix. Prefer robust parsing; avoid one-off string hacks that break when HTML layout changes.
+
+  3  If HTML parsing stays brittle, standardize machine-readable output from run_all_detections.py (optional JSON sidecar) so acceptance does not depend on scraping.
+
+  4  Document clearly when full-suite results do not validate the OpenWrt VM (e.g. default gateway is your ISP router, not the VM). Topology diagrams belong in lab notes.
+
+  5  Classify capture-heavy scripts (router/TTL.py, router/NAT_OS.py, vpn/TCP_stack.py per README): separate PASS rules or exclude from VM gateway acceptance unless capture iface and traffic are controlled.
+
+
+SECTION B — DIRECTED ROUTER BATTERY (M2)
+
+  6  Implement a small runner under router/ that, for each profile, invokes router/banners.py, router/OUI.py, router/UPNP.py with explicit --ip and fixed timeouts; supports WAN vs LAN IP arguments; exits non-zero on failure.
+
+  7  Emit structured output from that runner (JSON or YAML): profile, target IP, subprocess name, exit code, parsed score, elapsed time.
+
+  8  Deterministic score extraction: one canonical SCORE line per subprocess or parse per probe block so trailing logs cannot flip PASS/FAIL.
+
+  9  Privilege parity: run Scapy-backed probes with the same sudo or Linux capability setup documented in README.md so failures reflect the router, not the runner laptop.
+
+ 10  Optional repeat: run each probe N times and take median or worst-case for flaky UPnP listen windows on internal networks.
+
+ 11  Optional separate CLI thresholds for WAN vs LAN when bridge or double-NAT skews banner/OUI/UPNP scores.
+
+ 12  Optional integration with local/my_router.py when MY_MORE_ROUTER_IP is set (exit code and stderr checks); document sudo requirements.
+
+
+SECTION C — TTL AND NAT HEURISTICS (OPTIONAL STACK PROOF)
+
+ 13  Define capture topology: which host iface sees OpenWrt WAN vs LAN vs downstream clients; document router/TTL.py and router/NAT_OS.py --iface usage.
+
+ 14  PASS rules for TTL/NAT separate from IP-directed probes—they observe local traffic mix, not “responds on this IP.”
+
+ 15  Controlled traffic fixture: at least two downstream clients (different OS families if possible) generating outbound flows so NAT_OS “OS jumble” heuristics have signal instead of idle noise.
+
+
+SECTION D — CALIBRATE DETECTION SCRIPTS
+
+ 16  router/OUI.py: extend DEFAULT_OUI_MAP with lab-assigned OUIs tied to MACs you deliberately program on NICs; PASS means “matches our lab registry,” not spoofing retail gear on the public internet.
+
+ 17  router/banners.py: enrich or normalize fingerprints if you must separate OpenWrt LuCI/uhttpd stacks from OEM firmware under controlled vocabulary.
+
+ 18  router/UPNP.py: tune SSDP listen times; validate multicast vs unicast behavior on VirtualBox internal networks; prefer unicast targeting when --ip is supplied.
+
+
+SECTION E — VM IMAGE (VirtualBox / create_VM_OpenWrt_router.py)
+
+ 19  Set NIC types to Intel 82540EM (VBoxManage nictype1 / nictype2) on both adapters where supported—fewer default “virtio VM” fingerprints.
+
+ 20  MAC policy: generate locally administered unicast MACs by default; optional CLI flags for lab-fixed WAN/LAN MACs; avoid well-known hypervisor OUIs that local/my_router.py flags.
+
+ 21  Audit VirtualBox paravirtualization provider and remove unnecessary virtual devices (audio, USB) that add forensic surface without lab value.
+
+ 22  Keep disk image and VDI paths consistent for WSL invoking Windows VBoxManage (wslpath conversion already relevant on hybrid setups).
+
+
+SECTION F — OPENWRT RUNTIME (ON THE DEVICE)
+
+ 23  Set system hostname and LAN domain via UCI so DNS/PTR expectations align with probes (compare behavior with local/my_DNS.py if useful).
+
+ 24  Install and configure UPnP (e.g. miniupnpd) only after base networking is stable; tune device-description strings for Method M2 thresholds—still no impersonation of real victims on public networks.
+
+ 25  uhttpd / LuCI tradeoff: reducing OpenWrt-specific HTTP leakage may reduce LuCI convenience—decide per lab policy.
+
+ 26  Firewall: ensure WAN/LAN firewall zones allow probe ports from the declared vantage (host vs internal client) during acceptance runs.
+
+ 27  DHCP/DNS on LAN: predictable leases and forwarder behavior so repeated runs see stable IPs for scripted probes.
+
+ 28  NTP or consistent clock if any probe logs or TLS validity windows matter to your methodology.
+
+
+SECTION G — PROCESS AND REPRODUCIBILITY
+
+ 29  Pin OpenWrt image URL / version in VM/create_VM_OpenWrt_router.py comments or a short changelog when upgrading builds.
+
+ 30  When the directed runner exists: store anonymized golden JSON outputs plus scrubbed HTML snapshots per tagged baseline for regression diff.
+
+ 31  Keep ROUTER_PLAN.txt and the score-semantics matrix updated whenever thresholds or scripts change.
+
+ 32  Snapshot or clone the VM before destructive UCI experiments so acceptance runs stay repeatable.
+
+
+SECTION H — STRETCH / ENVIRONMENT HARDENING
+
+ 33  IPv6: either disable consistently or define acceptance rules if probes are IPv4-only but the LAN advertises v6.
+
+ 34  TLS: document use of insecure HTTPS flags where scripts allow self-signed admin certs on OpenWrt.
+
+ 35  Second client VM running Windows vs Linux to diversify NAT observation when exercising router/NAT_OS.py.
+
+ 36  Minimal VirtualBox VM export diff review so unintended hardware additions do not creep into golden images.
+
+
+END
+
