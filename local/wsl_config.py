@@ -20,15 +20,6 @@ To switch back to standard NAT:
 python3 python3 this_script.py --disable
 '''
 
-def get_windows_user():
-    try:
-        # Ask Windows directly for the username it's using
-        win_user = subprocess.check_output(["cmd.exe", "/c", "echo %USERNAME%"], 
-                                          stderr=subprocess.DEVNULL).decode().strip()
-        return win_user
-    except:
-        # If that fails, we can't reliably guess.
-        return None
 
 def get_current_mode():
     """Detects mode by inspecting global IPv4 addresses on interfaces."""
@@ -85,13 +76,30 @@ def get_current_mode():
         return f"ERROR ({str(e)})"
     
 
+def get_windows_user():
+    try:
+        # This gets the full Windows path (e.g., C:\Users\Wo)
+        win_path = subprocess.check_output(["cmd.exe", "/c", "echo %USERPROFILE%"], 
+                                          stderr=subprocess.DEVNULL).decode().strip()
+        
+        # Convert "C:\Users\Name" to "/mnt/c/Users/Name"
+        if win_path and ":" in win_path:
+            parts = win_path.split(":")
+            drive = parts[0].lower() # 'c'
+            path = parts[1].replace("\\", "/") # '/Users/Wo'
+            return f"/mnt/{drive}{path}"
+        return None
+    except:
+        return None
+
 def manage_wsl_mode(enable_mirrored=True):
-    win_user = get_windows_user()
-    if not win_user:
-        print("[-] Error: Could not identify Windows user.")
+    # This now returns the full /mnt/c/Users/Whatever path
+    config_dir = get_windows_user()
+    if not config_dir:
+        print("[-] Error: Could not identify Windows user profile path.")
         return
 
-    config_path = f"/mnt/c/Users/{win_user}/.wslconfig"
+    config_path = os.path.join(config_dir, ".wslconfig")
     
     # Configuration blocks
     if enable_mirrored:

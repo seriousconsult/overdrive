@@ -530,9 +530,8 @@ def main() -> None:
             print(_raw_xml[:8000])
     else:
         print(
-            "Router model (UPnP): not available — tried :49152 and common paths on :80. "
-            "Enable UPnP on the router or set MY_MORE_UPNP_RAW=1 after a working URL.",
-            file=sys.stderr,
+            "Router model (UPnP): not available — tried :49152 and common paths on :80. ",
+            file=sys.stderr
         )
 
 
