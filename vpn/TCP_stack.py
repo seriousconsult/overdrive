@@ -1,7 +1,7 @@
 #!/mnt/c/code/overdrive/virtual_env/bin/python
 
 
-'''TCP Stack Fingerprinting (Layer 4)
+'''TCP Stack Fingerprinting (Layer 3)
 
 Every OS (Windows, Linux, iOS) handles TCP packets slightly differently
  (initial window size, TTL, etc.). Some VPNs change these values to look like a different OS.
@@ -28,47 +28,42 @@ This version:
 - Tries each Scapy-discovered interface until it captures packets
 '''
 
+
+
 import os
 import platform
 import subprocess
-from collections import Counter
 import time
+from collections import Counter
 
-from scapy.all import (
-    sniff, TCP, IP, conf, L3RawSocket, get_if_list, AsyncSniffer
-)
+from scapy.all import TCP, IP, conf, get_if_list, AsyncSniffer, L3RawSocket
 
-# --- CONFIGURATION ---
-conf.L3socket = L3RawSocket
+# Prefer Linux socket implementation if available
+try:
+    from scapy.arch.linux import L3PacketSocket
+except ImportError:
+    L3PacketSocket = L3RawSocket
 
-TARGET_HOST = "google.com"   # IPv4-only connect will be attempted
-TARGET_PORT = 443            # change to 80/443/etc if desired
-TRAFFIC_SUBPROCESS_TIMEOUT = 10
+# For mirrored mode in your setup, libpcap works reliably
+conf.L3socket = L3PacketSocket
+conf.use_pcap = True
+
+TARGET_HOST = "google.com"
+TARGET_PORT = 443
+
 CAPTURE_PACKET_COUNT = 3
-CAPTURE_TIMEOUT = 10
+CAPTURE_TIMEOUT = 10          # overall timeout per interface attempt
+TRAFFIC_BURST_ATTEMPTS = 12
+TRAFFIC_DELAY_S = 0.08
+TRAFFIC_SUBPROCESS_TIMEOUT = 8
 
 
-def get_linux_distro_info():
-    if platform.system() != "Linux":
-        return {"error": "System is not Linux", "os": platform.system()}
-
+def get_iface_operstate(ifname: str) -> str:
     try:
-        result = subprocess.run(
-            ["cat", "/etc/os-release"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        data = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                data[key] = value.strip('"')
-        return data
-    except subprocess.CalledProcessError as e:
-        return {"error": f"Failed to retrieve OS info: {e}"}
-    except FileNotFoundError:
-        return {"error": "/etc/os-release not found."}
+        with open(f"/sys/class/net/{ifname}/operstate", "r") as f:
+            return f.read().strip().lower()
+    except Exception:
+        return "unknown"
 
 
 def detect_runtime_os():
@@ -96,7 +91,6 @@ def extract_syn_features(pkt):
     tcp = pkt[TCP]
     opts = tcp.options or []
     mss = next((val for name, val in opts if name == "MSS"), None)
-
     return {
         "ip_src": ip.src,
         "ip_dst": ip.dst,
@@ -105,6 +99,15 @@ def extract_syn_features(pkt):
         "mss": mss,
         "opts": opts,
     }
+
+
+def is_syn_noack(p) -> bool:
+    if IP not in p or TCP not in p:
+        return False
+    flags = int(p[TCP].flags)
+    SYN = 0x02
+    ACK = 0x10
+    return (flags & SYN) != 0 and (flags & ACK) == 0
 
 
 def classify_linux_vs_windows(ip_ttl, tcp_win, opts_list):
@@ -133,31 +136,30 @@ def classify_linux_vs_windows(ip_ttl, tcp_win, opts_list):
     return "Uncertain", "low", linux_score, windows_score
 
 
-def traffic_subprocess_ipv4_connect(host: str, port: int):
-    """
-    Generates outbound IPv4 TCP SYNs by attempting a TCP connect.
-    Implemented as a subprocess to match your requirement.
-    """
-    # Force IPv4 (AF_INET), connect, then close immediately.
-    # We keep it quick so the capture window is focused.
+def traffic_subprocess_ipv4_connect(host: str, port: int, attempts: int, delay_s: float):
     traffic_code = r"""
-import socket, sys
+import socket, sys, time
 host = sys.argv[1]
 port = int(sys.argv[2])
+attempts = int(sys.argv[3])
+delay_s = float(sys.argv[4])
+
 addrinfos = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
-# try first IPv4 address
 af, socktype, proto, canonname, sa = addrinfos[0]
-s = socket.socket(af, socktype, proto)
-s.settimeout(3.0)
-try:
-    s.connect(sa)
-except Exception:
-    pass
-finally:
+
+for _ in range(attempts):
+    s = socket.socket(af, socktype, proto)
+    s.settimeout(1.0)
     try:
-        s.close()
+        s.connect(sa)
     except Exception:
         pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    time.sleep(delay_s)
 """
     cmd = [
         "python3",
@@ -165,6 +167,8 @@ finally:
         traffic_code,
         host,
         str(port),
+        str(attempts),
+        str(delay_s),
     ]
     subprocess.run(
         cmd,
@@ -175,112 +179,128 @@ finally:
     )
 
 
-def capture_live_syn_inline_subprocess(packet_count=3, timeout=30):
+def capture_live_tcp_then_filter_syn(packet_count: int, timeout: int):
     """
-    Captures outgoing TCP SYN packets (IPv4-only) while generating traffic via a subprocess.
-    Tries each interface until packets are captured.
+    Multi-interface auto-detect:
+      - Sniff TCP on each candidate interface (libpcap)
+      - Filter SYN,no-ACK in Python
+      - Stop early as soon as we have packet_count SYN packets
     """
-    # Required: standard working expression + IPv4 restriction
-    syn_filter = "ip and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0"
-
     ifaces = get_if_list() or []
-    print(f"[*] Using filter: {syn_filter}")
-    print(f"[*] Interfaces discovered by scapy: {ifaces}")
-
     if not ifaces:
-        print("[-] Error: no interfaces discovered via scapy.get_if_list().")
+        print("[-] Error: no interfaces discovered.")
         return []
 
-    # Prefer non-loopback first
-    candidates = [i for i in ifaces if i != "lo"]
+    up_ifaces = [i for i in ifaces if get_iface_operstate(i) == "up"]
+    candidates = []
     if "lo" in ifaces:
         candidates.append("lo")
+    candidates += [i for i in up_ifaces if i != "lo"]
+    if not candidates:
+        candidates = ifaces
 
-    print(f"[*] Interface attempt order: {candidates}")
+    print("[*] Candidate interfaces (operstate=up): " + ", ".join(candidates))
+
+    tcp_filter = "tcp"
+    deadline_global = time.time() + (timeout * max(1, len(candidates)))
 
     for iface in candidates:
-        print(f"[*] Starting sniffer on iface='{iface}' ...")
-        sniffer = AsyncSniffer(
-            iface=iface,
-            filter=syn_filter,
-            store=True,
-        )
-        sniffer.start()
+        if time.time() > deadline_global:
+            break
 
-        # Give the sniffer a moment to arm before traffic generation
-        time.sleep(0.3)
+        print(f"[*] Sniffing (tcp) on iface='{iface}' ...")
 
-        print(f"[*] Generating IPv4 TCP traffic to {TARGET_HOST}:{TARGET_PORT} (subprocess) ...")
-        traffic_subprocess_ipv4_connect(TARGET_HOST, TARGET_PORT)
+        try:
+            sniffer = AsyncSniffer(
+                iface=iface,
+                filter=tcp_filter,
+                store=True
+            )
+            sniffer.start()
+            time.sleep(0.35)  # warmup so we don't miss the burst
 
-        # Allow a small grace period for packets to arrive
-        time.sleep(0.5)
+            # Generate a burst while sniffing
+            traffic_subprocess_ipv4_connect(
+                TARGET_HOST,
+                TARGET_PORT,
+                attempts=TRAFFIC_BURST_ATTEMPTS,
+                delay_s=TRAFFIC_DELAY_S,
+            )
 
-        # Stop sniffer and collect results
-        sniffer.stop()
+            # Stop early when enough SYNs are captured
+            t_end = time.time() + timeout
+            while time.time() < t_end:
+                pkts = sniffer.results or []
+                tcp_pkts = [p for p in pkts if IP in p and TCP in p]
+                syn_pkts = [p for p in tcp_pkts if is_syn_noack(p)]
+                if len(syn_pkts) >= packet_count:
+                    sniffer.stop()
+                    return syn_pkts[:packet_count]
+                time.sleep(0.05)
 
-        pkts = sniffer.results or []
-        # Optionally trim to expected count
-        if packet_count and len(pkts) > packet_count:
-            pkts = pkts[:packet_count]
+            # Timeout for this interface
+            pkts = sniffer.stop() or []
+            pkts = sniffer.results or pkts
 
-        print(f"    -> captured {len(pkts)} packet(s) on iface='{iface}'")
-        if pkts:
-            return pkts
+            tcp_pkts = [p for p in pkts if IP in p and TCP in p]
+            syn_pkts = [p for p in tcp_pkts if is_syn_noack(p)]
+            print(f"    -> captured {len(tcp_pkts)} TCP, SYN,no-ACK matched: {len(syn_pkts)}")
+
+            if syn_pkts:
+                return syn_pkts[:packet_count]
+
+        except Exception as e:
+            print(f"    [!] Error on iface {iface}: {e}")
+            continue
 
     return []
 
+
 def calculate_stack_score(consensus, expected):
-    """
-    Risk-style score (aligned with most Overdrive scripts):
-      1 — Low suspicion: captured SYN stack matches this machine’s OS family.
-      3 — Inconclusive capture / uncertain classification.
-      5 — High suspicion: captured SYN stack disagrees with OS (VPN/proxy/NAT rewrite, spoofing, etc.).
-    """
     if consensus == "Uncertain":
-        return 3 # Neutral/Probable match but inconclusive
-    
-    # Extract the base family (e.g., "Linux" from "Linux-like")
+        return 3
     consensus_family = consensus.split("-")[0]
     expected_family = expected.split("-")[0]
-    
-    if consensus_family == expected_family:
-        return 1  # Coherent — low suspicion
-    else:
-        return 5  # Family mismatch — high suspicion (often tunnel / translation / spoof)
+    return 1 if consensus_family == expected_family else 5
+
 
 def main():
     runtime_label, expected_stack = detect_runtime_os()
     print("=== TCP Stack Fingerprint Analysis ===")
     print(f"Runtime Environment: {runtime_label}")
-    print(f"Expected Network Signature: {expected_stack}\n")
+    print(f"Expected Network Signature: {expected_stack}")
+    print(f"Scapy conf.use_pcap={conf.use_pcap}\n")
 
-    pkts = capture_live_syn_inline_subprocess(
+    pkts = capture_live_tcp_then_filter_syn(
         packet_count=CAPTURE_PACKET_COUNT,
         timeout=CAPTURE_TIMEOUT,
     )
 
     if not pkts:
-        print("[-] Error: No packets captured for analysis.")
+        print("[-] Error: No SYN,no-ACK packets captured for analysis.")
         return
+
+    print("\nCaptured SYN packets (debug):")
+    for i, p in enumerate(pkts, 1):
+        feats = extract_syn_features(p)
+        print(
+            f"  pkt{i}: {p.summary()} | TTL={feats['ip_ttl']} WIN={feats['tcp_win']} "
+            f"MSS={feats['mss']} OPTS={feats['opts']}"
+        )
 
     syn_results = []
     for p in pkts:
-        if IP in p and TCP in p:
-            feats = extract_syn_features(p)
-            label, conf_lvl, l_score, w_score = classify_linux_vs_windows(
-                feats["ip_ttl"], feats["tcp_win"], feats["opts"]
-            )
-            syn_results.append(label)
+        feats = extract_syn_features(p)
+        label, _, _, _ = classify_linux_vs_windows(feats["ip_ttl"], feats["tcp_win"], feats["opts"])
+        syn_results.append(label)
 
-    # Determine Consensus and Score
     counts = Counter(syn_results)
     consensus, _ = counts.most_common(1)[0]
     score = calculate_stack_score(consensus, expected_stack)
 
-    print("\n" + "="*40)
-    print(f" SCORE: {score}")
-    
+    print("\n" + "=" * 40)
+    print(f"SCORE: {score}")
+
     descriptions = {
         1: "MATCH: Captured TCP SYN stack matches this OS family (low suspicion).",
         2: "LIKELY MATCH: Minor ambiguity; still mostly consistent with this OS.",
@@ -288,12 +308,12 @@ def main():
         4: "PROBABLE MISMATCH: SYN stack plausibly altered vs this OS (investigate).",
         5: "HARD MISMATCH: SYN stack disagrees with this OS (VPN/proxy/spoof/translator signal).",
     }
-    
-    print(f" STATUS: {descriptions.get(score)}")
-    print("="*40)
-    
+    print(f"STATUS: {descriptions.get(score)}")
+    print("=" * 40)
+
     if score >= 4:
         print("💡 ALERT: A remote observer may infer OS/stack masking or tunneling from this mismatch.")
+
 
 if __name__ == "__main__":
     main()

@@ -60,16 +60,16 @@ def run_dns_leak_test():
             score = 5
             message = "Certain leak of IPv4 AND IPv6."
         elif has_ipv4_leak and not has_ipv6_leak:
-            score = 4
+            score = 5
             message = "Certain leak of IPv4."
         elif non_vpn_servers > 0 and non_vpn_servers == total_servers:
-            score = 1
+            score = 5
             message = "Certain leak (All DNS traffic is public)."
         elif non_vpn_servers > (total_servers / 2):
-            score = 3
+            score = 4
             message = "Probable leak (Majority of servers are non-VPN)."
         elif non_vpn_servers > 0:
-            score = 2
+            score = 3
             message = "Possible leak (Mixed results detected)."
         else:
             score = 0 # No leak detected

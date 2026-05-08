@@ -3,15 +3,7 @@
 
 Resolve the LAN default gateway, then show router MAC + vendor and UPnP model info.
 
-- **WSL:** Gateway IP comes from Windows (not the WSL vNIC). MAC comes from Windows neighbor
-  cache (``Get-NetNeighbor`` / ``arp``) after a Windows ping — Scapy cannot ARP the LAN router.
-- **Linux:** MAC from Scapy ARP, then ``ip neigh`` / ``/proc/net/arp`` fallback.
-- **Model:** Parsed from UPnP device description XML (several common URLs). Set
-  ``MY_MORE_ROUTER_IP`` if gateway discovery fails; ``MY_MORE_UPNP_RAW=1`` to dump XML when
-  parsing finds no standard fields.
-
-  
-  NOTE: run with  sudo /mnt/c/code/overdrive/virtual_env/bin/python ./my_router.py
+NOTE: run with  sudo /mnt/c/code/overdrive/virtual_env/bin/python ./my_router.py
   
   """
 

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+
+'''
+TODO: finish this script to automate the creation of an OpenWrt router in VirtualBox.
+'''
+
+
 import gzip
 import os
 import platform

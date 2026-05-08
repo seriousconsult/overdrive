@@ -45,6 +45,30 @@ Outputs:
 
 ## Important Runtime Notes
 
+### WSL2 Prerequisite: Mirrored Networking
+If you are running Overdrive inside Windows Subsystem for Linux (WSL2), the default NAT networking isolates your environment, preventing accurate discovery of local routers, mDNS services, and broadcast traffic.
+
+You must enable Mirrored Networking to make WSL a peer to your Windows host.
+
+1. Configure WSL Mode
+Run the included configuration utility from within your Overdrive directory:
+
+Bash
+chmod +x wsl_config.py
+./wsl_config.py --enable
+2. Restart WSL
+Configuration changes to the WSL VM require a full shutdown to take effect. Run this in a Windows PowerShell terminal:
+
+PowerShell
+wsl --shutdown
+3. Verify
+Re-open your WSL terminal and run:
+
+Bash
+./wsl_config.py
+It should now report [*] Current WSL Networking Mode: MIRRORED.
+
+
 ### Passwordless sudo (Scapy capture scripts)
 
 `run_all_detections.py` runs these scripts with **`sudo -n`** (non-interactive sudo, no password prompt):

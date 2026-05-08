@@ -13,20 +13,6 @@ Uses ip-api metadata (hosting/datacenter) as a secondary signal.
 Score (1–5):
   5 — Listed on Spamhaus ZEN with a high-severity code (SBL/XBL/DROP/CSS, etc.)
   4 — Listed on ZEN PBL only, or on other DNSBLs, or multiple hits
-  3 — Could not complete checks (no IPv4, DNS failures)
-  2 — Not on queried lists, but ip-api marks IP as hosting/datacenter
-  1 — Clean on queried lists and not flagged as hosting
-"""
-#!/usr/bin/env python3
-"""
-IP Blacklist Check
-
-Queries public IPv4 against several DNS blocklists (DNSBL / RBL).
-Uses ip-api metadata (hosting/datacenter) as a secondary signal.
-
-Score (1–5):
-  5 — Listed on Spamhaus ZEN with a high-severity code (SBL/XBL/DROP/CSS, etc.)
-  4 — Listed on ZEN PBL only, or on other DNSBLs, or multiple hits
   3 — Could not complete checks (no IPv4, DNS failures, or DNSBL Service Blocked)
   2 — Not on queried lists, but ip-api marks IP as hosting/datacenter
   1 — Clean on queried lists and not flagged as hosting
@@ -146,7 +132,7 @@ def check_ip_blacklist() -> tuple[int, str]:
 
     if dns_blocked:
         return (
-            3,
+            4,
             "Spamhaus query blocked: Using a public DNS resolver (e.g. Google/Cloudflare) is not supported for ZEN queries."
         )
 
