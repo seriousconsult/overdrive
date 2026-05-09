@@ -136,9 +136,16 @@ def install_system_deps():
                         os.unlink(deb_path)
                     except OSError:
                         pass
+
+        # 4. Install nmap
+        if not shutil.which("nmap"):
+            print("Installing nmap...")
+            subprocess.run(["sudo", mgr, "install", "-y", "nmap"], check=True)
+        else:
+            print("nmap is already installed.")
+
     except subprocess.CalledProcessError as e:
         print(f"❌ Error during system install: {e}")
-
 
 # --- Main Logic ---
 

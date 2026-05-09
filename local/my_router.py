@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Resolve the LAN default gateway, then show router MAC + vendor and UPnP model info.
+Resolve the LAN default gateway, show router MAC + vendor and UPnP model info, then
+run ``nmap -p- -A -T4 -v`` on the gateway and print a **forensic digest** (classification,
+CPE inventory, attack surface, service fingerprints)—not raw nmap output (slow).
 
-NOTE: run with  sudo /mnt/c/code/overdrive/virtual_env/bin/python ./my_router.py
-  
-  """
+NOTE: run with  sudo <full path to >/virtual_env/bin/python ./my_router.py
+(requires ``nmap`` on PATH).
+"""
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import requests
@@ -445,6 +449,373 @@ def resolve_router_ipv4_and_iface() -> tuple[str, str | None, bool]:
     return gw, iface, False
 
 
+def _nmap_xml_for_etree(xml_text: str) -> str:
+    """Drop default xmlns on ``<nmaprun>`` so ElementTree ``findall('host')`` works."""
+    return re.sub(
+        r'(<nmaprun\b[^>]*?)\s+xmlns="[^"]+"',
+        r"\1",
+        xml_text,
+        count=1,
+    )
+
+
+def _xml_local_tag(tag: str) -> str:
+    return tag.split("}")[-1]
+
+
+def _collect_host_cpes(host: ET.Element) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for el in host.iter():
+        if _xml_local_tag(el.tag) != "cpe":
+            continue
+        t = (el.text or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+# Ports often seen on SOHO routers; anything else is called out for triage.
+_COMMON_ROUTER_PORTS: frozenset[int] = frozenset(
+    {
+        21,
+        22,
+        23,
+        25,
+        53,
+        80,
+        111,
+        139,
+        443,
+        445,
+        554,
+        631,
+        853,
+        1883,
+        1900,
+        2000,
+        3000,
+        3333,
+        4567,
+        49152,
+        5000,
+        5106,
+        5353,
+        8008,
+        8080,
+        8443,
+        8888,
+        9000,
+        9100,
+    }
+)
+
+
+def _nmap_script_forensic_fact(script_id: str, raw: str) -> str | None:
+    """One synthesized line per script; no raw nmap script dumps."""
+    o = raw.strip()
+    if not o:
+        return None
+    sid = script_id.strip()
+
+    if sid == "http-title":
+        t = re.sub(r"\s+", " ", o)[:140]
+        return f"HTTP title: {t}" if t else None
+
+    if sid == "ssl-cert":
+        subj = iss = None
+        for line in o.splitlines():
+            ls = line.strip()
+            if ls.startswith("Subject:"):
+                subj = ls[8:].strip()[:100]
+            elif ls.startswith("Issuer:"):
+                iss = ls[7:].strip()[:100]
+        if subj and iss:
+            return f"TLS cert: {subj} | CA: {iss}"
+        if subj:
+            return f"TLS cert subject: {subj}"
+        return None
+
+    if sid == "ssl-date":
+        t = re.sub(r"\s+", " ", o)[:100]
+        return f"TLS clock: {t}" if t else None
+
+    if sid in ("ssh-hostkey", "ssh2-enum-algos"):
+        for line in o.splitlines():
+            ls = line.strip()
+            if "fingerprint" in ls.lower() or ls.startswith("ssh-"):
+                return f"SSH: {re.sub(r'\s+', ' ', ls)[:130]}"
+        t = re.sub(r"\s+", " ", o)[:130]
+        return f"SSH: {t}" if len(t) > 8 else None
+
+    if sid == "snmp-info":
+        t = re.sub(r"\s+", " ", o)[:120]
+        return f"SNMP: {t}" if t else None
+
+    if sid == "smb-os-discovery":
+        t = re.sub(r"\s+", " ", o)[:120]
+        return f"SMB/OS: {t}" if t else None
+
+    return None
+
+
+def _web_stack_hint(
+    svc_el: ET.Element | None, svc_name: str, product: str, version: str
+) -> str | None:
+    if svc_el is None:
+        return None
+    name_l = svc_name.lower()
+    prod_l = product.lower()
+    if not (
+        "http" in name_l
+        or name_l in ("https", "http-proxy", "ssl/http")
+        or any(
+            k in prod_l
+            for k in (
+                "httpd",
+                "apache",
+                "nginx",
+                "lighttpd",
+                "thttpd",
+                "mini_httpd",
+                "uhttpd",
+                "boa",
+                "cherokee",
+                "caddy",
+                "tomcat",
+            )
+        )
+    ):
+        return None
+    bits = [product or svc_name, version]
+    extra = (svc_el.get("extrainfo") or "").strip()
+    if extra and len(extra) < 40:
+        bits.append(extra)
+    return " ".join(x for x in bits if x).strip() or svc_name
+
+
+def parse_nmap_forensic_digest(xml_text: str) -> list[str]:
+    """
+    Build a short **forensic digest** from nmap XML: classification, CPE inventory,
+    attack surface, versioned services, and a few script-derived facts—no raw nmap text.
+    """
+    lines: list[str] = []
+    cleaned = _nmap_xml_for_etree(xml_text)
+    try:
+        root = ET.fromstring(cleaned)
+    except ET.ParseError as e:
+        return [f"(nmap XML parse error: {e})"]
+
+    nmap_ver = (root.get("version") or "").strip()
+    start_s = (root.get("start") or "").strip()
+    prov: list[str] = []
+    if nmap_ver:
+        prov.append(f"nmap {nmap_ver}")
+    if start_s.isdigit():
+        try:
+            utc = datetime.fromtimestamp(int(start_s), tz=timezone.utc)
+            prov.append(f"UTC {utc.strftime('%Y-%m-%d %H:%M:%S')}")
+        except (ValueError, OSError):
+            prov.append(f"start {start_s}")
+
+    hosts = root.findall("host")
+    if not hosts:
+        tail = " · ".join(prov) if prov else ""
+        return [f"(No host in XML){' · ' + tail if tail else ''}"]
+
+    lines.append("--- Nmap digest (forensic) ---")
+    if prov:
+        lines.append("Provenance: " + " · ".join(prov))
+
+    host = hosts[0]
+    status_el = host.find("status")
+    state = (status_el.get("state") or "").strip() if status_el is not None else ""
+
+    ip = ""
+    for addr in host.findall("address"):
+        if addr.get("addrtype") == "ipv4":
+            ip = (addr.get("addr") or "").strip()
+            break
+
+    head = "Target: " + (ip or "?")
+    if state:
+        head += f" | {state}"
+    lines.append(head)
+
+    device_types: list[str] = []
+    seen_dt: set[str] = set()
+    os_guess = ""
+    os_acc = ""
+    os_el = host.find("os")
+    if os_el is not None:
+        for osc in os_el.findall("osclass"):
+            typ = (osc.get("type") or "").strip()
+            if typ and typ not in seen_dt:
+                seen_dt.add(typ)
+                device_types.append(typ)
+        for osmatch in os_el.findall("osmatch"):
+            name = (osmatch.get("name") or "").strip()
+            acc = (osmatch.get("accuracy") or "").strip()
+            if name:
+                os_guess, os_acc = name, acc
+                break
+
+    if device_types:
+        lines.append("Device type: " + " · ".join(device_types))
+    if os_guess:
+        lines.append(
+            "OS classification: " + os_guess + (f" (confidence {os_acc}%)" if os_acc else "")
+        )
+
+    cpes = sorted(_collect_host_cpes(host))
+    if cpes:
+        cpe_chunk = 10
+        for i in range(0, len(cpes), cpe_chunk):
+            chunk = " · ".join(cpes[i : i + cpe_chunk])
+            label = f"CPE ({len(cpes)} total): " if i == 0 else "CPE (cont.): "
+            lines.append(label + chunk)
+
+    ports_el = host.find("ports")
+    open_tcp: list[int] = []
+    versioned: list[str] = []
+    web_hints: list[str] = []
+    script_facts: set[str] = set()
+
+    if ports_el is not None:
+        for port in ports_el.findall("port"):
+            st = port.find("state")
+            if st is None or (st.get("state") or "").lower() != "open":
+                continue
+            proto = (port.get("protocol") or "").strip()
+            pid = (port.get("portid") or "").strip()
+            if proto == "tcp" and pid.isdigit():
+                open_tcp.append(int(pid))
+
+            svc_el = port.find("service")
+            name = product = version = extrainfo = ""
+            if svc_el is not None:
+                name = (svc_el.get("name") or "").strip() or "unknown"
+                product = (svc_el.get("product") or "").strip()
+                version = (svc_el.get("version") or "").strip()
+                extrainfo = (svc_el.get("extrainfo") or "").strip()
+
+            svc_bits = " ".join(x for x in (product, version, extrainfo) if x).strip()
+            if svc_bits or (product or version):
+                versioned.append(f"{pid}/{proto} {name}: {svc_bits}".rstrip(": "))
+            elif name and name != "unknown":
+                versioned.append(f"{pid}/{proto} {name}")
+
+            wh = _web_stack_hint(svc_el, name, product, version)
+            if wh:
+                web_hints.append(f"{pid}/{proto} {wh}")
+
+            for scr in port.findall("script"):
+                sid = (scr.get("id") or "").strip()
+                out = (scr.get("output") or "").strip()
+                fact = _nmap_script_forensic_fact(sid, out)
+                if fact:
+                    script_facts.add(fact)
+                elif sid == "http-server-header" and out:
+                    t = re.sub(r"\s+", " ", out)[:100]
+                    if t:
+                        script_facts.add(f"Server header ({pid}/{proto}): {t}")
+
+    for hs in host.findall("hostscript"):
+        for scr in hs.findall("script"):
+            sid = (scr.get("id") or "").strip()
+            out = (scr.get("output") or "").strip()
+            fact = _nmap_script_forensic_fact(sid, out)
+            if fact:
+                script_facts.add(fact)
+
+    open_tcp.sort()
+    if open_tcp:
+        lines.append(f"Open TCP count: {len(open_tcp)} — {','.join(str(p) for p in open_tcp)}")
+        odd = [p for p in open_tcp if p not in _COMMON_ROUTER_PORTS]
+        if odd:
+            lines.append(f"Non-typical router ports (triage): {','.join(str(p) for p in odd)}")
+    else:
+        lines.append("Open TCP: none in XML (filtered/closed or failed scan).")
+
+    if versioned:
+        lines.append("Services (fingerprints): " + " | ".join(versioned[:24]))
+        if len(versioned) > 24:
+            lines.append(f"… +{len(versioned) - 24} more fingerprinted rows omitted")
+
+    if web_hints:
+        lines.append("Web / admin stack: " + " | ".join(dict.fromkeys(web_hints)))
+
+    if script_facts:
+        for fact in sorted(script_facts)[:18]:
+            lines.append(fact)
+        if len(script_facts) > 18:
+            lines.append(f"… +{len(script_facts) - 18} more script-derived facts omitted")
+
+    rs = root.find("runstats")
+    if rs is not None:
+        finished = rs.find("finished")
+        if finished is not None:
+            elapsed = (finished.get("elapsed") or "").strip()
+            if elapsed:
+                lines.append(f"Scan duration: {elapsed}s")
+
+    return lines
+
+
+def run_router_nmap_summary(ip: str) -> None:
+    """
+    Run ``nmap -p- -A -T4 -v`` against ``ip``, parse ``-oX -``, print a **forensic digest**
+    (classification, CPEs, attack surface, fingerprints)—not raw nmap script output.
+    """
+    nmap_bin = shutil.which("nmap")
+    if not nmap_bin:
+        print("nmap: not found in PATH; install nmap (e.g. apt install nmap).", file=sys.stderr)
+        return
+
+    cmd = [
+        nmap_bin,
+        "-p-",
+        "-A",
+        "-T4",
+        "-v",
+        "-oX",
+        "-",
+        ip,
+    ]
+    print(
+        "\n--- nmap (full TCP, OS/service/scripts; can take many minutes) ---",
+        file=sys.stderr,
+    )
+    print(f"Running: nmap -p- -A -T4 -v -oX - {ip}", file=sys.stderr)
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=None,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as e:
+        print(f"nmap failed to start: {e}", file=sys.stderr)
+        return
+
+    xml_out = (proc.stdout or "").strip()
+    if proc.returncode != 0 and not xml_out.lstrip().startswith("<?xml"):
+        err = (proc.stderr or "").strip().splitlines()
+        err_tail = "\n".join(err[-8:]) if err else "(no stderr)"
+        print(
+            f"nmap exited {proc.returncode}. Last stderr lines:\n{err_tail}",
+            file=sys.stderr,
+        )
+        if not xml_out:
+            return
+
+    for line in parse_nmap_forensic_digest(xml_out):
+        print(line)
+
+
 def _print_upnp_summary(fields: dict[str, str]) -> None:
     if not fields:
         return
@@ -532,6 +903,8 @@ def main() -> None:
             "Router model (UPnP): not available — tried :49152 and common paths on :80. ",
             file=sys.stderr
         )
+
+    run_router_nmap_summary(target_ip)
 
 
 if __name__ == "__main__":
