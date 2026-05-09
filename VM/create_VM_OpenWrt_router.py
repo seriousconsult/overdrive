@@ -2,7 +2,8 @@
 
 
 '''
-TODO: finish this script to automate the creation of an OpenWrt router in VirtualBox.
+TODO: finish this script to automate the creation of an OpenWrt router in VirtualBox that looks like a
+ typical residential router.
 '''
 
 
