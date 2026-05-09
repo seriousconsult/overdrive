@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
+"""Geo-latency consistency (heuristic).
+
+Purpose: Compare geolocation distance (from IP) vs observed RTT (ICMP ping or TCP connect to :443).
+
+Score (1–5): 1 = latency plausibly matches distance. 5 = strong timing/geo disagreement.
+Not definitive VPN detection.
+
+Environment: Linux/WSL with ping or TCP fallback; uses outbound HTTP for geo hints.
+
+Exit code: 0 when SCORE was computed; 1 on failure (coords or timing unavailable).
 """
-Geo-Latency Consistency Check (heuristic)
 
-Compare geolocation distance (from IP) vs observed network timing (ping or TCP connect).
-If ICMP is blocked, falls back to TCP connect to :443.
-
-SCORE scale: **1** = latency matches geographic distance (consistent). **5** = mismatch
-(impossible RTT vs claimed distance, or very long “scenic” route vs distance).
-This is NOT definitive VPN detection.
-
-Exit codes: 0 on success (SCORE printed), 1 on failure so batch runners do not treat errors as OK.
-"""
+from __future__ import annotations
 
 import math
 import re
@@ -167,14 +168,14 @@ def tcp_connect_ms(host, port=443):
     return sum(timings) / len(timings) if timings else None
 
 
-def run_test(target_host="www.canberra.edu.au") -> bool:
+def run_test(target_host: str = "www.canberra.edu.au") -> bool:
     print(f"--- Geo-Latency Analysis vs {target_host} ---")
 
     me = get_my_coords()
     target = get_host_coords(target_host)
     if not me or not target:
         print(
-            "❌ Error: Could not resolve coordinates for your IP or target host "
+            "Error: Could not resolve coordinates for your IP or target host "
             "(network, rate limit, or DNS).",
             file=sys.stderr,
         )
@@ -194,7 +195,7 @@ def run_test(target_host="www.canberra.edu.au") -> bool:
         method = "TCP Connect"
 
     if not rtt:
-        print("❌ Error: All timing attempts failed (ping + TCP).", file=sys.stderr)
+        print("Error: All timing attempts failed (ping + TCP).", file=sys.stderr)
         return False
 
     score = calculate_latency_score(dist, rtt)
@@ -210,18 +211,18 @@ def run_test(target_host="www.canberra.edu.au") -> bool:
         5: "MISMATCH: RTT too low for claimed distance, or far too high (timing vs geo disagree).",
     }
     verdict = messages.get(score, "N/A (invalid inputs)")
-    # Keep STATUS under ~180 chars so batch HTML extraction always picks it up.
-    print(f"STATUS: Measured via: {method}")
-    print(f" Latency: {rtt:.2f} ms")
-    print(f" RESULT: {verdict}")
+    print(f"STATUS: Measured via {method}; RTT {rtt:.2f} ms — {verdict}")
     print("=" * 45)
     return True
 
 
-if __name__ == "__main__":
+def main() -> int:
     try:
-        ok = run_test()
+        return 0 if run_test() else 1
     except Exception as exc:
-        print(f"❌ Error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    sys.exit(0 if ok else 1)
+        print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

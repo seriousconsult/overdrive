@@ -1,37 +1,23 @@
-#!/mnt/c/code/overdrive/virtual_env/bin/python
+#!/usr/bin/env python3
+"""TCP SYN stack fingerprinting vs runtime OS (Scapy capture).
 
+Purpose: Compare outbound SYN TTL/window/options to Linux-like vs Windows-like heuristics and to the
+actual runtime OS family (Linux bare-metal / Linux-WSL / Windows).
 
-'''TCP Stack Fingerprinting (Layer 3)
+Score (1–5): 1 = captured SYN classification matches expected OS family (low suspicion).
+5 = mismatch suggesting masking/VPN/proxy/translator signal. 3 = uncertain.
 
-Every OS (Windows, Linux, iOS) handles TCP packets slightly differently
- (initial window size, TTL, etc.). Some VPNs change these values to look like a different OS.
-If your IP says "Linux Server" (VPN) but your TCP fingerprint says "iPhone," 
-a site may flag you for "Proxy Usage."
+Environment: Requires raw capture — typically sudo or Linux capabilities on the Python binary used
+to run this script (virtual_env Python path recommended so Scapy matches README NOPASSWD/setcap).
 
-Because this is below packet level Python is not the ideal tool.
+Exit code: 0 when the script finishes (including inconclusive capture — encoded as SCORE 3).
+"""
 
-NOTE:scapy needs sudo however sudo does not use the Python virtual env. So you need to run like this: 
-sudo /mnt/c/code/overdrive/virtual_env/bin/python /mnt/c/code/overdrive/vpn/TCP_stack.py
-
-TCP SYN stack inspection + comparison vs actual OS environment.
-
-- Reads wsl_syn.pcap
-- For each outgoing SYN packet:
-  - extracts TTL, TCP window, and TCP options (MSS, WScale, Timestamp, SACK/SAckOK)
-  - classifies as Linux-like vs Windows-like (heuristic)
-- Detects the actual runtime OS/kernel environment (Windows/Linux/WSL)
-- Compares: captured SYN classification vs actual OS expectation
-
-This version:
-- Captures outgoing TCP SYN packets using AsyncSniffer
-- Generates IPv4-only TCP SYN traffic using a Python subprocess (NO curl)
-- Tries each Scapy-discovered interface until it captures packets
-'''
-
-
+from __future__ import annotations
 
 import os
 import platform
+import sys
 import subprocess
 import time
 from collections import Counter
@@ -264,7 +250,7 @@ def calculate_stack_score(consensus, expected):
     return 1 if consensus_family == expected_family else 5
 
 
-def main():
+def main() -> int:
     runtime_label, expected_stack = detect_runtime_os()
     print("=== TCP Stack Fingerprint Analysis ===")
     print(f"Runtime Environment: {runtime_label}")
@@ -278,7 +264,11 @@ def main():
 
     if not pkts:
         print("[-] Error: No SYN,no-ACK packets captured for analysis.")
-        return
+        print("\n" + "=" * 40)
+        print("SCORE: 3")
+        print("STATUS: No SYN packets captured — inconclusive (permissions, iface, or quiet network).")
+        print("=" * 40)
+        return 0
 
     print("\nCaptured SYN packets (debug):")
     for i, p in enumerate(pkts, 1):
@@ -312,8 +302,11 @@ def main():
     print("=" * 40)
 
     if score >= 4:
-        print("💡 ALERT: A remote observer may infer OS/stack masking or tunneling from this mismatch.")
+        print(
+            "ALERT: A remote observer may infer OS/stack masking or tunneling from this mismatch."
+        )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

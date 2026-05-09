@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-"""
-Port checks for common VPN / proxy ports
+"""Port checks for common VPN / proxy ports.
 
-Scans from this Linux environment (works on bare metal, VMs, and WSL2):
+Purpose: Scan egress, loopback, and (on WSL2) default gateway for VPN-related TCP/UDP listeners.
 
-- **Public IPv4** — what you get from ipify-style APIs (egress; on WSL2 this is
-  the NAT path, not necessarily the Windows host’s own public IP).
-- **127.0.0.1** — listeners on *this* Linux instance (WSL distro or native Linux).
-- **WSL2 only** — default-route gateway IPv4, which is usually the Windows host
-  vNIC (useful cross-check; not identical to “in-browser localhost on Windows”).
+Environment: Linux — bare metal, VM, or WSL2. Targets include public IPv4 (NAT egress on WSL2),
+127.0.0.1, and WSL2 default gateway (often Windows host vNIC).
 
-UDP ports often look SILENT/FILTERED when no reply is received; that is expected.
+Score (1–5): **5** = OPEN VPN/proxy-related port on at least one target. **1** = no OPEN ports.
+Middle scores = UDP silent/filtered uncertainty.
 
-Score (this module): **5** = at least one probe saw an **OPEN** VPN/proxy-related
-port (or strong response). **1** = **no** OPEN ports; probes look **closed** /
-not in use. Middle scores = mostly inconclusive **UDP silent/filtered** results.
-
-Exit: 0 after a completed audit (even if public IP lookup failed for one target).
+Exit code: **0** after completed audit; **130** on Ctrl+C.
 """
 
 from __future__ import annotations
@@ -145,7 +138,7 @@ def calculate_score(statuses: list[str]) -> int:
     return 2
 
 
-def run_audit() -> None:
+def run_audit() -> int:
     public_ip = get_public_ipv4()
 
     targets: list[tuple[str, str]] = []
@@ -190,28 +183,29 @@ def run_audit() -> None:
     print("\n" + "=" * 50)
     print(f"SCORE: {score}")
     if score == 5:
-        status_one_liner = (
-            "STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target."
-        )
+        status_msg = "VPN/proxy-related port(s) responded OPEN on at least one scan target."
     elif score == 1:
-        status_one_liner = (
-            "STATUS: No OPEN VPN/proxy-related ports; TCP closed and UDP mostly silent/filtered."
+        status_msg = (
+            "No OPEN VPN/proxy-related ports; TCP closed and UDP mostly silent/filtered."
         )
     else:
-        status_one_liner = (
-            "STATUS: Inconclusive — mostly UDP silent/filtered; no clear OPEN port."
-        )
-    # First line after SCORE is what run_all_detections.py uses as the HTML/summary comment.
-    print(status_one_liner)
+        status_msg = "Inconclusive — mostly UDP silent/filtered; no clear OPEN port."
+    # Next line after SCORE should be STATUS for run_all_detections HTML extraction.
+    print(f"STATUS: {status_msg}")
     print(
         "  Scale: 1 = no OPEN VPN/proxy ports seen · 5 = at least one OPEN (in use / accepting)"
     )
     print("=" * 50)
+    return 0
+
+
+def main() -> int:
+    try:
+        return run_audit()
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
-    try:
-        run_audit()
-    except KeyboardInterrupt:
-        print("\nInterrupted.", file=sys.stderr)
-        sys.exit(130)
+    sys.exit(main())

@@ -107,7 +107,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <body>
 <header>
   <h1>Overdrive detection results</h1>
-  <span class="timestamp">2026-05-08 18:02:56</span>
+  <span class="timestamp">2026-05-09 00:16:58</span>
 </header>
 <main>
 <section>
@@ -145,9 +145,9 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <section>
 <h2>Router</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">NAT_OS.py</td><td><span class="badge badge err">Error</span></td><td class="comment">sudo needs a password; configure NOPASSWD for venv python + this capture script (see README: Passwordless sudo) | sudo: a password is required</td></tr>
+<tr><td class="script">NAT_OS.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Traffic seen; TTL families look single-stack per source (no strong NAT signal).</td></tr>
 <tr><td class="script">OUI.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: MAC present; OUI not in heuristic map.</td></tr>
-<tr><td class="script">TTL.py</td><td><span class="badge badge err">Error</span></td><td class="comment">sudo needs a password; configure NOPASSWD for venv python + this capture script (see README: Passwordless sudo) | sudo: a password is required</td></tr>
+<tr><td class="script">TTL.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Insufficient samples for per-source TTL scoring.</td></tr>
 <tr><td class="script">UPNP.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Verizon | G3100 | G3100 | G3100 | G401119081362912</td></tr>
 <tr><td class="script">banners.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No Server banner (16 probes)</td></tr>
 <tr><td class="script">mDNS_mesh.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: Score and status not implemented</td></tr>
@@ -169,10 +169,10 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <tr><td class="script">IPv6_leak.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: IPv4/IPv6 agree (US); ISP metadata similar — no obvious split exit.</td></tr>
 <tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Measured via: ip -o link show (local link MTU; not path MTU to a remote host)</td></tr>
 <tr><td class="script">TCP_stack.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: MATCH: Captured TCP SYN stack matches this OS family (low suspicion).</td></tr>
-<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints. — Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
+<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints. Breakdown: Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
 <tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
 <tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
-<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via: TCP Connect</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 225.79 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
 <tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No tunnel name patterns matched, but many interfaces (6) — possible VM/container or complex routing.</td></tr>
 <tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target.</td></tr>
 </tbody></table>

@@ -12,11 +12,14 @@ Score (1–5), higher = stronger evidence of a proxy on the HTTP path:
   3 — Weak / single ambiguous header (e.g. Via only) or partial errors
   2 — Proxy env vars set but echo shows no added forward headers (or echo failed one mirror)
   1 — No proxy env and no forward headers observed
+
+Exit code: 0 after analysis completes.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from urllib.parse import urlparse
 
 import requests
@@ -135,7 +138,7 @@ def check_proxy_headers() -> tuple[int, str]:
     return 1, "No proxy env vars; echo showed no common forward headers."
 
 
-def main():
+def main() -> int:
     print("=" * 60)
     print("Proxy Detection")
     print("=" * 60)
@@ -166,7 +169,8 @@ def main():
     print(f"STATUS: {description}")
     print("-" * 40)
     print("=" * 60)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -34,7 +34,7 @@ SUDO_SCRIPT_TIMEOUT_SEC = 180
 BASE_DIR = Path(__file__).parent
 
 # Root-level .py files to skip (runner / tooling, not detection modules)
-EXCLUDE_ROOT_SCRIPTS = frozenset({"run_all_detections.py", "virtual_env_setup.py"})
+EXCLUDE_ROOT_SCRIPTS = frozenset({"run_all_detections.py", "setup_virtual_env.py"})
 
 # Subdirectories under BASE_DIR to skip when auto-discovering
 SKIP_SUBDIRS = frozenset(

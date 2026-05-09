@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
+"""Deep TLS fingerprint analysis (JA3 / JA4 / PeetPrint / Akamai H2 / GREASE) via tls.peet.ws.
 
+Purpose: Estimate whether this client's TLS + HTTP/2 shape looks like a normal browser or like
+automation / library / VPN-client stacks (JA3-style fingerprinting).
 
-'''
-VPN servers often use specific versions of OpenSSL or other libraries. 
-A server can look at the  hash of your SSL handshake (JA3).
-If that hash matches a known "NordVPN Exit Node" or "OpenVPN Client" signature,
-they know you aren't just a typial person on Chrome and are using a VPN.
+Score (1–5): 1 ≈ browser-like composite; 5 ≈ script/bot/VPN-library TLS (automation signal only).
 
+Environment: Python httpx with HTTP/2; outbound HTTPS to tls.peet.ws required.
 
-Since JA3 hashes change slightly when libraries (like openssl) update, one way to do this is to keep 
-an eye on JA3 Fingerprint Databases, such as:
-https://www.google.com/search?q=JA3er.com: A massive community-driven database of hashes.
-Abuse.ch: Often lists JA3 hashes associated with malware or known botnets/VPN nodes.
+Exit code: 0 after successful runs; 1 on HTTP or unexpected errors from tls.peet.ws.
 
-Many high-end VPNs use TLS Grease. This adds random data to the handshake so that your JA3 hash 
-changes every single time you connect. If you run your script twice and get two different hashes,
- your VPN is using "Grease" to try to defeat fingerprinting matches to a specific fingerprint.   
+Note: run_all_detections uses the last SCORE line in combined output — phase-2 composite is final.
+"""
 
-
-Also uses raw TLS ClientHello details from the API when present:
-  negotiated/record version, cipher list size, extension list, supported_groups
-  (curves), and signature_algorithms — as extra consistency checks vs User-Agent.
-
-Deep TLS Fingerprint Analysis (JA3 + JA4 + PeetPrint + Akamai + TLS shape) using tls.peet.ws.
-
-Composite score is an **automation signal**: **1** ≈ normal user browser, **5** ≈ script, bot, or
-library/VPN-style TLS (including a browser UA that does not match the handshake).
-
-Output is formatted into clear sections with wrapped long fields.
-'''
+from __future__ import annotations
 
 import re
+import sys
+
 import httpx
 
 
@@ -386,9 +373,9 @@ def run_deep_analysis():
         tls=tls,
     )
 
-    print("\n" + "="*45)
+    print("\n" + "=" * 45)
     print("Scale: 1 = normal browser · 5 = script/bot/VPN-library TLS")
-    print(f"SCORE: {score} (JA3 + JA4 + PeetPrint + GREASE + Akamai + TLS shape)")
+    print(f"Phase1_composite (informative only; final SCORE appears in phase 2): {score}")
     print(f"  • {br['base']}")
     print(f"  • {br['grease']}")
     print(f"  • {br['akamai']}")
@@ -396,7 +383,7 @@ def run_deep_analysis():
         print(f"  • {br['tls_shape']}")
     if br.get("ja4_note"):
         print(f"  • {br['ja4_note']}")
-    
+
     messages = {
         1: "NORMAL: Looks like a typical end-user browser (TLS / HTTP2 / ClientHello).",
         2: "MOSTLY NORMAL: Small anomalies; still plausibly a real browser.",
@@ -404,16 +391,13 @@ def run_deep_analysis():
         4: "SUSPICIOUS: Library TLS, HTTP/2 mismatch, or thin ClientHello vs browser UA.",
         5: "AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints.",
     }
-    
-    # Intentionally do not print a standalone STATUS here: `run_all_detections.py` uses the
-    # *last* SCORE line and the following few lines; this module prints a second SCORE later
-    # in the full report, and STATUS should attach to that final composite score.
-    print(f"ROLLUP: {messages.get(score)}")
-    print("="*45)
+
+    print(f"Phase1_summary: {messages.get(score)}")
+    print("=" * 45)
     
     if score >= 4:
         print(
-            "🚨 High score: traffic looks like a script, bot, or VPN/library TLS — "
+            "High score: traffic looks like a script, bot, or VPN/library TLS — "
             "not a normal home browser fingerprint."
         )
 
@@ -569,11 +553,11 @@ def run_deep_analysis2():
     print_kv("GREASE detected values", ", ".join(map(str, grease_values)) if grease_values else "(none)")
 
     if grease_values:
-        print("GREASE STATUS: DETECTED")
-        print(f"  Values ({len(grease_values)}): {grease_values}")
+        print(f"GREASE: detected ({len(grease_values)} values)")
+        print(f"  Values: {grease_values}")
     else:
-        print("GREASE STATUS: ❌ NOT DETECTED")
-        print("  Heuristic note: can indicate a non-browser/static client, but it's NOT VPN proof.")
+        print("GREASE: not detected in JA3 heuristic")
+        print("  Note: common in minimal/library stacks; not VPN proof alone.")
 
     print("\nDatabase Match (exact JA3 lookup):")
     print("-" * 76)
@@ -590,10 +574,6 @@ def run_deep_analysis2():
         tls=tls,
     )
 
-    print("\n[7] Composite score (JA3 + JA4 + PeetPrint + GREASE + Akamai + TLS shape)")
-    print("-" * 76)
-    print("  Scale: 1 = normal browser fingerprint · 5 = script / bot / VPN-library-like")
-    print(f"SCORE: {composite}")
     messages = {
         1: "NORMAL: Looks like a typical end-user browser (TLS / HTTP2 / ClientHello).",
         2: "MOSTLY NORMAL: Small anomalies; still plausibly a real browser.",
@@ -601,11 +581,10 @@ def run_deep_analysis2():
         4: "SUSPICIOUS: Library TLS, HTTP/2 mismatch, or thin ClientHello vs browser UA.",
         5: "AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints.",
     }
-    # Keep this on one line so HTML reports / batch runners can grab it as the STATUS comment.
-    print(
-        "STATUS: "
-        + f"{messages.get(composite) or 'UNKNOWN:'} — {br.get('base') or ''}".strip(" —")
-    )
+
+    print("\n[7] Composite score (JA3 + JA4 + PeetPrint + GREASE + Akamai + TLS shape)")
+    print("-" * 76)
+    print("  Scale: 1 = normal browser fingerprint · 5 = script / bot / VPN-library-like")
     print(f"  • {br['base']}")
     print(f"  • {br['grease']}")
     print(f"  • {br['akamai']}")
@@ -614,29 +593,41 @@ def run_deep_analysis2():
     if br.get("ja4_note"):
         print(f"  • {br['ja4_note']}")
 
+    summary_line = messages.get(composite) or "UNKNOWN composite fingerprint outcome."
+    status_body = f"{summary_line} Breakdown: {br.get('base') or ''}".strip()
+    print(f"SCORE: {composite}")
+    print(f"STATUS: {status_body}")
+
     print("\n[8] Consistency / VPN Relevance (Heuristic Only)")
     print("-" * 76)
     if not ua_present:
-        print("⚠️ Low confidence: User-Agent missing/blank; consistency checks are unreliable.")
+        print("Low confidence: User-Agent missing/blank; consistency checks are unreliable.")
     else:
         if looks_python and grease_values:
-            print("⚠️ Note: UA looks like Python, but GREASE detected.")
+            print("Note: UA looks like Python, but GREASE detected.")
             print("  This can happen depending on TLS stack/implementation; not definitive.")
         elif (not looks_python) and ("python" in db_match.lower()):
-            print("🚨 Inconsistency: UA doesn't look Python, but DB match suggests Python (heuristic).")
+            print("Inconsistency: UA doesn't look Python, but DB match suggests Python (heuristic).")
             print("  Treat as low confidence; DB exact-string matching is brittle.")
         else:
-            print("🟢 Consistency looks reasonable for the observed client stack.")
+            print("Consistency looks reasonable for the observed client stack.")
             print("  Still: fingerprints alone are not reliable proof of VPN on/off.")
 
     print("\n" + line)
 
 
-if __name__ == "__main__":
+def main() -> int:
     try:
         run_deep_analysis()
         run_deep_analysis2()
+        return 0
     except httpx.HTTPError as e:
-        print(f"❌ HTTP error: {e}")
+        print(f"HTTP error: {e}")
+        return 1
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

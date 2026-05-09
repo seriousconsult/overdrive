@@ -8,6 +8,8 @@ Score (1–5), higher = more suspicious / non-residential:
   3 — Mixed / unknown / providers disagree
   2 — Likely residential / mobile carrier
   1 — Strong residential ISP signal
+
+Exit code: 0 after lookup completes (including partial provider failures).
 """
 
 from __future__ import annotations
@@ -397,10 +399,11 @@ def lookup_asn(ip_address: str = "") -> None:
     print(f"STATUS: {final_status}")
 
 
-def main() -> None:
+def main() -> int:
     arg_ip = sys.argv[1] if len(sys.argv) > 1 else ""
     lookup_asn(arg_ip)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

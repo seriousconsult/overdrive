@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
+"""Local clock vs geo-IP timezone offset heuristic.
+
+Purpose: Compare your machine's UTC offset to the offset implied by the egress IP's timezone
+(ip-api style metadata). Large skew can suggest VPN/geo inconsistency (weak signal).
+
+Score (1–5): 1 = offsets align. 5 = material mismatch. 3 = inconclusive when timezone lookup fails.
+
+Environment: Needs outbound HTTP (requests) and local zoneinfo.
+
+Exit code: 0 after scoring completes.
+"""
+
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -179,9 +192,9 @@ def calculate_match_score(local_offset, ip_offset):
         return 4  # strong skew
     return 5  # material mismatch
 
-def main():
+def main() -> int:
     ip_zone, provenance = get_ip_timezone()
-    
+
     if not ip_zone:
         print("Could not determine a valid IANA timezone for egress IP.")
         print(f"Provenance: {provenance}")
@@ -189,7 +202,7 @@ def main():
         print(
             "STATUS: Inconclusive — geo-IP timezone lookup failed (rate limit, blocking HTML, or API error)."
         )
-        return
+        return 0
     
     local_offset = get_local_utc_offset()
     ip_offset = get_ip_utc_offset(ip_zone)
@@ -221,6 +234,8 @@ def main():
         print(
             "STATUS: Material offset mismatch — high suspicion for VPN/geo/TZ inconsistency (heuristic)."
         )
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

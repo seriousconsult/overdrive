@@ -16,6 +16,8 @@ Score (1–5):
   3 = Inconclusive (partial failures, odd local vs egress)
   2 = No working IPv6 egress / effectively no global IPv6 path
   1 = IPv4 and IPv6 exits look consistent (same country, similar ISP string)
+
+Exit code: 0 after the probe completes.
 """
 
 from __future__ import annotations
@@ -208,7 +210,7 @@ def check_ipv6_leak() -> tuple[int, str]:
     )
 
 
-def main():
+def main() -> int:
     print("=" * 60)
     print("IPv6 Leak Detection")
     print("=" * 60)
@@ -231,7 +233,8 @@ def main():
     print(f"STATUS: {description}")
     print("-" * 40)
     print("=" * 60)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

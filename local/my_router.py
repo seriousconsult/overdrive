@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-
 Resolve the LAN default gateway, then show router MAC + vendor and UPnP model info.
 
 NOTE: run with  sudo /mnt/c/code/overdrive/virtual_env/bin/python ./my_router.py
