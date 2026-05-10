@@ -47,6 +47,8 @@ def wsl_to_windows_path(path: str) -> str:
 
 def get_system_paths() -> dict:
     linux_home = str(Path.home())
+    vms_root = os.path.join(linux_home, "VirtualBox VMs")
+    vm_base = os.path.join(vms_root, VM_NAME)
     if is_wsl_environment():
         try:
             proc = subprocess.run(["cmd.exe", "/c", "echo", "%USERPROFILE%"], capture_output=True, text=True, check=True)
@@ -58,14 +60,16 @@ def get_system_paths() -> dict:
             "linux_home": linux_home,
             "win_profile": win_profile,
             "img_path": os.path.join(linux_home, "Downloads", IMAGE_NAME),
-            "vm_base": os.path.join(linux_home, "VirtualBox VMs", VM_NAME),
+            "vms_root": vms_root,
+            "vm_base": vm_base,
         }
     return {
         "is_wsl": False,
         "linux_home": linux_home,
         "win_profile": None,
         "img_path": os.path.join(linux_home, "Downloads", IMAGE_NAME),
-        "vm_base": os.path.join(linux_home, "VirtualBox VMs", VM_NAME),
+        "vms_root": vms_root,
+        "vm_base": vm_base,
     }
 
 
@@ -123,6 +127,30 @@ def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
     subprocess.run([vboxmanage] + args, check=True, **kwargs)
 
 
+def resolve_vbox_settings_path(vm_dir: str, vm_name: str) -> str | None:
+    """Find ``.vbox`` (flat or legacy nested layout from wrong ``--basefolder``)."""
+    flat = os.path.join(vm_dir, f"{vm_name}.vbox")
+    if os.path.isfile(flat):
+        return flat
+    nested = os.path.join(vm_dir, vm_name, f"{vm_name}.vbox")
+    if os.path.isfile(nested):
+        return nested
+    try:
+        for p in Path(vm_dir).rglob(f"{vm_name}.vbox"):
+            if p.is_file():
+                return str(p)
+    except OSError:
+        pass
+    return None
+
+
+def vm_is_registered(vboxmanage: str, vm_name: str) -> bool:
+    out = subprocess.run(
+        [vboxmanage, "list", "vms"], capture_output=True, text=True, check=True
+    ).stdout
+    return f'"{vm_name}"' in out
+
+
 def setup_openwrt_vm() -> None:
     paths = get_system_paths()
     vboxmanage = find_vboxmanage(paths)
@@ -131,13 +159,16 @@ def setup_openwrt_vm() -> None:
 
     img_path = paths["img_path"]
     vm_base = paths["vm_base"]
+    vms_root = paths["vms_root"]
     vdi_path = os.path.join(vm_base, VDI_NAME)
     os.makedirs(vm_base, exist_ok=True)
+    os.makedirs(vms_root, exist_ok=True)
 
     download_openwrt_image(OPENWRT_URL, img_path)
 
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
     dst_path = wsl_to_windows_path(vdi_path) if paths["is_wsl"] else vdi_path
+    vms_root_for_vbox = wsl_to_windows_path(vms_root) if paths["is_wsl"] else vms_root
 
     if not os.path.exists(vdi_path):
         print("Converting raw image to VDI...")
@@ -145,13 +176,31 @@ def setup_openwrt_vm() -> None:
     else:
         print("VDI already exists; skipping conversion.")
 
-    registered_vms = subprocess.run([vboxmanage, "list", "vms"], capture_output=True, text=True, check=True).stdout
-    if f'"{VM_NAME}"' not in registered_vms:
-        vmx_file = os.path.join(vm_base, f"{VM_NAME}.vbox")
-        if os.path.exists(vmx_file):
-            run_vboxmanage(vboxmanage, ["registervm", vmx_file])
+    # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir (Windows path for VBoxManage.exe).
+    if not vm_is_registered(vboxmanage, VM_NAME):
+        existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
+        if existing_vbox:
+            reg_path = (
+                wsl_to_windows_path(existing_vbox)
+                if paths["is_wsl"]
+                else existing_vbox
+            )
+            print(f"Registering existing settings file: {existing_vbox}")
+            run_vboxmanage(vboxmanage, ["registervm", reg_path])
         else:
-            run_vboxmanage(vboxmanage, ["createvm", "--name", VM_NAME, "--ostype", "Linux_64", "--basefolder", vm_base, "--register"])
+            run_vboxmanage(
+                vboxmanage,
+                [
+                    "createvm",
+                    "--name",
+                    VM_NAME,
+                    "--ostype",
+                    "Linux_64",
+                    "--basefolder",
+                    vms_root_for_vbox,
+                    "--register",
+                ],
+            )
 
     bridge_interface = get_active_bridged_interface(vboxmanage)
     if bridge_interface:

@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """
-Create a Linux desktop VM in VirtualBox for use **behind** the OpenWrt router from
+Create a Linux VM in VirtualBox for use **behind** the OpenWrt router from
 ``create_VM_OpenWrt_router.py``.
+
+The default OSBoxes image is **Ubuntu Server** (URL contains ``svr``): first boot ends at a **text
+console** (``osboxes login:``), not a full desktop. A black screen with green ``[ OK ]`` lines is
+normal—it is **not** frozen. Click the VM window, press **Enter**, log in, then optionally install a
+desktop (see printed hints). Confirm current password on https://www.osboxes.org/
 
 Networking (lab):
   * **NIC1** — VirtualBox **internal network** ``openwrt-lan`` (same name as the router’s LAN leg).
     The guest gets DHCP from OpenWrt’s LAN; default gateway is the OpenWrt LAN IP (e.g. 192.168.1.1).
+
+The client often has **no path to the Internet** until OpenWrt DHCP works, so **this script** (on the
+**WSL host**, which does have Internet) runs ``virt-customize`` to pre-install ``isc-dhcp-client``,
+``ping``, ``dig``, and a ``lab-net-troubleshoot`` helper **into the VDI before first lab boot**. Use
+``--skip-vdi-prime`` only if you know what you are doing.
 
 This VM is **not** bridged to your Windows/WSL LAN. WSL **mirrored** mode only affects the Linux
 namespace on the host; it does not change VirtualBox intnet isolation. To browse from the host
 through OpenWrt, use RDP/guest tools or a second setup—this script targets the standard “client on
 router LAN” topology.
 
-**Clipboard (host ↔ guest):** The VM uses **bidirectional** shared clipboard. By default this script
-tries to **inject Guest Additions into the VDI while the VM is off** using ``virt-customize``
-(``libguestfs-tools`` on WSL/Ubuntu), matching the **host** ISO from VirtualBox. That avoids manual
-steps inside the guest. Use ``--skip-guest-additions`` to skip injection (clipboard will not work
-until you install additions yourself). If the VM is **running**, injection is skipped unless you
-pass ``--force-poweroff-for-ga``.
 
-Requires: ``VBoxManage``, ``7z``. Optional: ``virt-customize`` (``sudo apt install libguestfs-tools``).
-Network only for first-time OSBoxes download.
+Requires: ``VBoxManage``, ``7z``. **Strongly recommended:** ``virt-customize``
+(``sudo apt install libguestfs-tools`` on WSL) so the guest gets DHCP tools without in-guest ``apt``.
+Network on the **host** for OSBoxes download + ``virt-customize`` package installs into the VDI.
 """
 
 from __future__ import annotations
@@ -41,11 +46,74 @@ LAN_INTNET_NAME = "openwrt-lan"
 VM_NAME = "OpenWrt_LAN_Client"
 CLIENT_VDI_NAME = "client_browser.vdi"
 
-# Ubuntu 24.10 server image from OSBoxes (desktop-capable; install a browser in-guest if needed)
+# Ubuntu 24.10 **Server** from OSBoxes (no GUI until you install one in the guest).
 OSBOXES_URL = (
     "https://downloads.sourceforge.net/project/osboxes/v/vb/59-U-u-svr/24.10/64bit.7z"
 )
 ARCHIVE_NAME = "ubuntu_osboxes_2410.7z"
+# Default OSBoxes credentials (verify on the OSBoxes download page for this image).
+OSBOXES_LOGIN_USER = "osboxes"
+OSBOXES_LOGIN_PASSWORD_HINT = "osboxes.org"
+
+# If VDI priming was skipped and the guest somehow has Internet, this still works:
+IN_GUEST_INSTALL_ISC_DHCP_CLIENT = "sudo apt install -y isc-dhcp-client"
+
+# Installed into the guest by ``prime_client_vdi_for_intnet_lab`` (host-side virt-customize).
+LAB_NET_TROUBLESHOOT_SCRIPT = r"""#!/bin/bash
+# Installed by create_VM_client_browser.py — run: lab-net-troubleshoot  (uses sudo when needed)
+set -u
+echo "================================================================"
+echo " Lab network troubleshoot (OpenWrt intnet client)"
+echo " Run: lab-net-troubleshoot   (or sudo lab-net-troubleshoot)"
+echo "================================================================"
+echo ""
+echo "=== IPv4 addresses ==="
+ip -br -4 addr 2>/dev/null || true
+echo ""
+echo "=== Routes ==="
+ip route 2>/dev/null || true
+echo ""
+echo "=== Default IPv4 route ==="
+if ip -4 route show default 2>/dev/null | grep -q .; then
+  ip -4 route show default
+else
+  echo "(none) — no DHCP lease or no gateway from OpenWrt."
+fi
+echo ""
+echo "=== DHCP on each Ethernet-like interface ==="
+if ! command -v dhclient >/dev/null 2>&1; then
+  echo "ERROR: dhclient missing. Re-run create_VM_client_browser.py on WSL with libguestfs-tools."
+  exit 1
+fi
+for IFACE in /sys/class/net/*; do
+  IFACE=$(basename "$IFACE")
+  [ "$IFACE" = lo ] && continue
+  [ ! -e "/sys/class/net/$IFACE/device" ] && continue
+  echo "--- dhclient $IFACE ---"
+  if [ "$(id -u)" -eq 0 ]; then
+    dhclient -v -1 "$IFACE" 2>&1 | tail -25 || true
+  else
+    sudo dhclient -v -1 "$IFACE" 2>&1 | tail -25 || true
+  fi
+done
+echo ""
+echo "=== After DHCP ==="
+ip -br -4 addr 2>/dev/null || true
+ip -4 route show default 2>/dev/null || true
+echo ""
+echo "=== Static fallback (OpenWrt LAN often 192.168.1.1/24) ==="
+echo "  IFACE=enp0s3    # from: ip -br link"
+echo '  sudo ip addr flush dev "$IFACE" 2>/dev/null || true'
+echo '  sudo ip addr add 192.168.1.50/24 dev "$IFACE"'
+echo '  sudo ip link set "$IFACE" up'
+echo '  sudo ip route replace default via 192.168.1.1 dev "$IFACE"'
+echo "  ping -c2 192.168.1.1"
+echo ""
+if command -v dig >/dev/null 2>&1; then
+  echo "=== dig via router (optional) ==="
+  dig +short @192.168.1.1 openwrt.org 2>/dev/null || true
+fi
+"""
 
 
 def is_wsl_environment() -> bool:
@@ -164,112 +232,49 @@ def get_vm_state(vboxmanage: str, vm_name: str) -> str | None:
     return None
 
 
-def find_guest_additions_iso() -> str | None:
-    candidates = [
-        "/mnt/c/Program Files/Oracle/VirtualBox/VBoxGuestAdditions.iso",
-        "/usr/share/virtualbox/VBoxGuestAdditions.iso",
-        "/usr/lib/virtualbox/additions/VBoxGuestAdditions.iso",
-    ]
-    for p in candidates:
-        if p and os.path.isfile(p):
-            return p
-    return None
-
-
-def extract_vbox_linux_additions_run(iso_path: str, out_dir: Path) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["7z", "e", "-y", f"-o{out_dir}", iso_path, "VBoxLinuxAdditions.run"],
-        check=True,
-    )
-    run_file = out_dir / "VBoxLinuxAdditions.run"
-    if not run_file.is_file():
-        raise RuntimeError(
-            "7z did not extract VBoxLinuxAdditions.run from Guest Additions ISO."
-        )
-    return run_file
-
-
-def guest_additions_present_in_vdi(vdi_linux: str) -> bool:
-    vc = shutil.which("virt-customize")
-    if not vc:
-        return False
-    r = subprocess.run(
-        [
-            vc,
-            "-a",
-            vdi_linux,
-            "--run-command",
-            "test -x /usr/sbin/VBoxService",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    return r.returncode == 0
-
-
-def inject_guest_additions_into_vdi(
+def prime_client_vdi_for_intnet_lab(
     vdi_linux: str,
     vboxmanage: str,
     vm_name: str,
     work_root: Path,
     *,
     force_poweroff: bool,
+    skip_prime: bool,
 ) -> bool:
     """
-    Install Oracle Guest Additions into the **powered-off** VDI via libguestfs (no manual guest steps).
-
-    Returns True if additions are present afterward, False if skipped or failed.
+    On the **WSL/Linux host** (which has Internet), inject DHCP client, ping, dig, and
+    ``lab-net-troubleshoot`` into the VDI so the guest works **without** in-guest ``apt`` when
+    OpenWrt has not yet provided a route.
     """
+    if skip_prime:
+        print(
+            "[!] --skip-vdi-prime: skipping offline lab network tools. "
+            "The guest may have no dhclient until you fix networking another way."
+        )
+        return False
+
     vc = shutil.which("virt-customize")
     if not vc:
         print(
-            "[!] virt-customize not found; skipping Guest Additions injection.\n"
-            "    Install: sudo apt install libguestfs-tools\n"
-            "    Then re-run this script, or install additions manually in the guest.",
+            "\n" + "*" * 62 + "\n"
+            "WARNING: ``virt-customize`` not found (install libguestfs-tools on **this** WSL host).\n"
+            "  sudo apt install -y libguestfs-tools\n"
+            "Without it, the lab client may ship **without** dhclient. If OpenWrt DHCP fails, the\n"
+            "guest has **no Internet**, so ``apt install isc-dhcp-client`` inside the guest will fail.\n"
+            "Re-run this script after installing libguestfs-tools (VM powered off).\n" + "*" * 62 + "\n"
         )
         return False
 
-    state = get_vm_state(vboxmanage, vm_name)
-    if state == "running" or state == "paused":
-        if not force_poweroff:
-            print(
-                f"[!] VM {vm_name!r} is {state}; cannot safely modify the VDI.\n"
-                "    Power it off and re-run, or pass --force-poweroff-for-ga.",
-            )
-            return False
-        print(f"Powering off {vm_name} so the VDI can be modified…")
-        subprocess.run([vboxmanage, "controlvm", vm_name, "poweroff"], check=False)
-        for _ in range(30):
-            time.sleep(1)
-            st = get_vm_state(vboxmanage, vm_name)
-            if st in (None, "poweroff", "aborted"):
-                break
-        else:
-            print("[!] VM did not power off in time; skipping Guest Additions injection.")
-            return False
-
-    if guest_additions_present_in_vdi(vdi_linux):
-        print("Guest Additions already present in disk image; skipping injection.")
-        return True
-
-    iso = find_guest_additions_iso()
-    if not iso:
-        print(
-            "[!] VBoxGuestAdditions.iso not found (expected under "
-            "C:\\Program Files\\Oracle\\VirtualBox\\ on Windows).\n"
-            "    Skipping injection.",
-        )
+    if not _poweroff_vm_for_vdi_edit(vboxmanage, vm_name, force_poweroff=force_poweroff):
+        print("[!] VDI priming skipped (VM running). Power off or use --force-poweroff-for-vdi.")
         return False
 
-    ga_dir = work_root / "vbox_ga_extract"
-    if ga_dir.exists():
-        shutil.rmtree(ga_dir, ignore_errors=True)
-    print(f"Extracting Guest Additions installer from {iso} …")
-    ga_run = extract_vbox_linux_additions_run(iso, ga_dir)
+    script_host = work_root / "lab_net_troubleshoot.sh"
+    script_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8")
+    script_host.chmod(0o644)
 
     print(
-        "Injecting Guest Additions into the VDI (virt-customize; may take several minutes)…"
+        "Priming VDI on **host** (virt-customize): isc-dhcp-client, ping, dig, lab-net-troubleshoot…"
     )
     try:
         subprocess.run(
@@ -277,11 +282,10 @@ def inject_guest_additions_into_vdi(
                 vc,
                 "-a",
                 vdi_linux,
-                "--verbose",
                 "--update",
                 "--run-command",
                 "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-                "linux-headers-$(uname -r) build-essential dkms bzip2 psmisc",
+                "isc-dhcp-client iputils-ping dnsutils",
             ],
             check=True,
         )
@@ -291,7 +295,7 @@ def inject_guest_additions_into_vdi(
                 "-a",
                 vdi_linux,
                 "--copy-in",
-                f"{ga_run}:/root/VBoxLinuxAdditions.run",
+                f"{script_host.resolve()}:/usr/local/bin/lab-net-troubleshoot",
             ],
             check=True,
         )
@@ -300,40 +304,50 @@ def inject_guest_additions_into_vdi(
                 vc,
                 "-a",
                 vdi_linux,
-                "--run-command",
-                "chmod +x /root/VBoxLinuxAdditions.run",
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [
-                vc,
-                "-a",
-                vdi_linux,
-                "--run-command",
-                "DEBIAN_FRONTEND=noninteractive /root/VBoxLinuxAdditions.run --nox11",
+                "--chmod",
+                "0755:/usr/local/bin/lab-net-troubleshoot",
             ],
             check=True,
         )
     except subprocess.CalledProcessError as e:
-        print(
-            f"[!] Guest Additions injection failed ({e}).\n"
-            "    You can install manually: Devices → Insert Guest Additions CD image in the VM window.",
-        )
-        shutil.rmtree(ga_dir, ignore_errors=True)
+        print(f"[!] VDI priming failed ({e}). Fix WSL networking/apt, then re-run with VM off.")
         return False
 
-    shutil.rmtree(ga_dir, ignore_errors=True)
-    print("[+] Guest Additions injected into the VDI. First boot may take a moment.")
+    print(
+        "[+] VDI primed: guest has dhclient/ping/dig + ``lab-net-troubleshoot`` (no in-guest apt needed)."
+    )
     return True
+
+
+def _poweroff_vm_for_vdi_edit(
+    vboxmanage: str, vm_name: str, *, force_poweroff: bool
+) -> bool:
+    """Return True if the VM is off (or we powered it off)."""
+    state = get_vm_state(vboxmanage, vm_name)
+    if state not in ("running", "paused"):
+        return True
+    if not force_poweroff:
+        print(
+            f"[!] VM {vm_name!r} is {state}; power it off to modify the VDI, "
+            "or pass --force-poweroff-for-vdi."
+        )
+        return False
+    print(f"Powering off {vm_name} for VDI maintenance…")
+    subprocess.run([vboxmanage, "controlvm", vm_name, "poweroff"], check=False)
+    for _ in range(30):
+        time.sleep(1)
+        st = get_vm_state(vboxmanage, vm_name)
+        if st in (None, "poweroff", "aborted"):
+            return True
+    print("[!] VM did not power off in time.")
+    return False
 
 
 def setup_client_vm(
     *,
-    install_guest_additions: bool = True,
-    force_poweroff_for_ga: bool = False,
+    force_poweroff_for_vdi: bool = False,
     start_vm: bool = True,
-    guest_additions_only: bool = False,
+    skip_vdi_prime: bool = False,
 ) -> None:
     paths = get_system_paths()
     vboxmanage = find_vboxmanage(paths)
@@ -394,21 +408,14 @@ def setup_client_vm(
 
     work_root = Path(download_dir)
 
-    do_ga = guest_additions_only or install_guest_additions
-    if do_ga:
-        inject_guest_additions_into_vdi(
-            vdi_wsl,
-            vboxmanage,
-            VM_NAME,
-            work_root,
-            force_poweroff=force_poweroff_for_ga,
-        )
-    elif not guest_additions_only:
-        print("Skipping Guest Additions injection (--skip-guest-additions).")
-
-    if guest_additions_only:
-        print("Guest Additions step finished (--guest-additions-only).")
-        return
+    prime_client_vdi_for_intnet_lab(
+        vdi_wsl,
+        vboxmanage,
+        VM_NAME,
+        work_root,
+        force_poweroff=force_poweroff_for_vdi,
+        skip_prime=skip_vdi_prime,
+    )
 
     if not vm_is_registered(vboxmanage, VM_NAME):
         existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
@@ -457,9 +464,6 @@ def setup_client_vm(
             "intnet",
             "--intnet1",
             LAN_INTNET_NAME,
-            # Host ↔ guest cut/paste (needs Guest Additions in the guest; see post-setup message)
-            "--clipboard",
-            "bidirectional",
         ],
     )
 
@@ -499,13 +503,22 @@ def setup_client_vm(
 
     print(
         f"\nDone. Start the OpenWrt VM first, then start {VM_NAME}.\n"
-        f"In the guest: install a browser if needed (e.g. apt install firefox) and run "
-        f"Overdrive ``router/*.py`` with default gateway = OpenWrt LAN IP, or ``--ip`` that IP.\n"
         "\n"
-        "--- Clipboard ---\n"
-        "VM uses bidirectional shared clipboard. If injection succeeded, log in once; if paste fails,\n"
-        "confirm VirtualBox menu: Devices → Shared Clipboard → Bidirectional.\n"
-        "Manual fallback: Insert Guest Additions CD image → run VBoxLinuxAdditions.run in the guest.\n"
+        "--- Lab networking (no guest Internet required) ---\n"
+        "This script should have **pre-installed** dhclient/ping/dig on the **disk from WSL**.\n"
+        "After login run:   lab-net-troubleshoot\n"
+        "That script renews DHCP and prints static-IP fallback commands if OpenWrt has no DHCP.\n"
+        "Only if the guest **does** have Internet and tools are missing:\n"
+        f"  sudo apt update && {IN_GUEST_INSTALL_ISC_DHCP_CLIENT}\n"
+        "\n"
+        "--- If ``ip -4 route show default`` prints nothing ---\n"
+        "There is no default IPv4 route (usually DHCP from OpenWrt never ran or failed).\n"
+        "• Start the **OpenWrt** VM **before** this client; both NICs must use intnet ``openwrt-lan`` for LAN.\n"
+        "• In OpenWrt (LuCI): LAN = static or DHCP **server** on br-lan, firewall zone LAN→WAN allowed.\n"
+        "• In the client: ``ip -br a`` and ``ip route`` — confirm an address on the LAN interface.\n"
+        "• Run ``lab-net-troubleshoot`` first; only then try ``sudo networkctl renew <iface>``.\n"
+        "• Manual test route: ``sudo ip route add default via 192.168.1.1 dev <iface>`` (use your OpenWrt LAN IP).\n"
+        "\n"
     )
     if start_vm:
         run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
@@ -518,14 +531,9 @@ if __name__ == "__main__":
         description="Create / refresh OpenWrt LAN client VM (VirtualBox).",
     )
     ap.add_argument(
-        "--skip-guest-additions",
+        "--force-poweroff-for-vdi",
         action="store_true",
-        help="Do not inject Guest Additions into the VDI (shared clipboard will not work until you install manually).",
-    )
-    ap.add_argument(
-        "--force-poweroff-for-ga",
-        action="store_true",
-        help="If the VM is running, power it off so Guest Additions can be injected into the disk image.",
+        help="If the VM is running, power it off so virt-customize can modify the VDI (priming).",
     )
     ap.add_argument(
         "--no-start",
@@ -533,14 +541,13 @@ if __name__ == "__main__":
         help="Configure the VM but do not start it.",
     )
     ap.add_argument(
-        "--guest-additions-only",
+        "--skip-vdi-prime",
         action="store_true",
-        help="Only run the Guest Additions injection step (VDI must exist); then exit.",
+        help="Do not inject DHCP/ping/dig/lab-net-troubleshoot via virt-customize (not recommended).",
     )
     ns = ap.parse_args()
     setup_client_vm(
-        install_guest_additions=not ns.skip_guest_additions,
-        force_poweroff_for_ga=ns.force_poweroff_for_ga,
+        force_poweroff_for_vdi=ns.force_poweroff_for_vdi,
         start_vm=not ns.no_start,
-        guest_additions_only=ns.guest_additions_only,
+        skip_vdi_prime=ns.skip_vdi_prime,
     )
