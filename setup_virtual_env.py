@@ -144,7 +144,8 @@ def install_system_deps():
             subprocess.run(["sudo", mgr, "install", "-y", "nmap"], check=True)
         else:
             print("nmap is already installed.")
-
+    except:
+        print("dependancies failed to install.")
 
 
 # --- Main Logic ---
