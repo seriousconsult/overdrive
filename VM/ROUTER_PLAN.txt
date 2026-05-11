@@ -26,11 +26,13 @@ Forensic accuracy here means: what we report matches what we actually measured (
 We model a two-legged home router.
 
   WAN leg: faces the internet or your upstream LAN.
-           VirtualBox: NIC1 bridged to a host adapter when possible; otherwise NAT fallback.
+           VirtualBox: NIC2 bridged to a host adapter when possible; otherwise NAT fallback.
+           (Order matches stock OpenWrt: wan on eth1.)
            Implemented in: VM/create_VM_OpenWrt_router.py
 
   LAN leg: faces devices behind the router.
-           VirtualBox: NIC2 on internal network named openwrt-lan.
+           VirtualBox: NIC1 on internal network named openwrt-lan.
+           (Order matches stock OpenWrt: br-lan on eth0.)
            Implemented in: VM/create_VM_OpenWrt_router.py
 
 Two acceptance profiles (both matter):
@@ -46,9 +48,9 @@ If you only test one profile, you only validate half of the story.
 
 ASCII sketch:
 
-  WAN profile:     Host_PC --- NIC1 bridged --- OpenWrt WAN
+  WAN profile:     Host_PC --- NIC2 bridged --- OpenWrt WAN
 
-  LAN profile:     Client_VM --- NIC2 openwrt-lan --- OpenWrt LAN
+  LAN profile:     Client_VM --- NIC1 openwrt-lan --- OpenWrt LAN
 
 
 4. WHAT WE RUN TO ACCEPT THE ROUTER

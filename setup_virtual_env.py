@@ -102,6 +102,7 @@ def install_system_deps():
         print(f"Installing {info['pcap']}...")
         subprocess.run(["sudo", mgr, "install", "-y", info["pcap"]], check=True)
 
+
         # 2. Install 7-Zip
         if not shutil.which("7z"):
             print(f"Installing {info['7zip']}...")
@@ -144,8 +145,7 @@ def install_system_deps():
         else:
             print("nmap is already installed.")
 
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Error during system install: {e}")
+
 
 # --- Main Logic ---
 

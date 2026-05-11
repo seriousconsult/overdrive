@@ -209,6 +209,114 @@ def resolve_vbox_settings_path(vm_dir: str, vm_name: str) -> str | None:
     return None
 
 
+def vbox_closemedium_disk_delete_best_effort(
+    vboxmanage: str,
+    medium_path: str,
+) -> None:
+    """
+    Remove a disk from VirtualBox's media registry and delete the file if present.
+
+    Needed when a previous run deleted files on disk but left a stale UUID in
+    ``VirtualBox.xml`` (UUID mismatch on ``startvm`` / ``storageattach``).
+    """
+    r = subprocess.run(
+        [vboxmanage, "closemedium", "disk", medium_path, "--delete"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        combined = ((r.stderr or "") + (r.stdout or "")).lower()
+        if (
+            "vbox_e_object_not_found" in combined
+            or "could not find" in combined
+            or "does not exist" in combined
+        ):
+            return
+
+
+def try_unregistervm_delete(
+    vboxmanage: str,
+    vm_name: str,
+    *,
+    max_wait_s: int = 120,
+    poll_s: float = 3.0,
+) -> bool:
+    """``unregistervm --delete``, retrying while the session reports the VM as locked."""
+    deadline = time.monotonic() + max_wait_s
+    warned = False
+    while time.monotonic() < deadline:
+        ur = subprocess.run(
+            [vboxmanage, "unregistervm", vm_name, "--delete"],
+            capture_output=True,
+            text=True,
+        )
+        if ur.returncode == 0:
+            return True
+        err = ((ur.stderr or "") + (ur.stdout or "")).lower()
+        if "locked" in err or "invalid_object_state" in err or "0x80bb0007" in err:
+            if not warned:
+                print(
+                    "Waiting for VirtualBox to release the VM lock "
+                    "(close the guest window or Manager details tab if open)…"
+                )
+                warned = True
+            time.sleep(poll_s)
+            continue
+        msg = (ur.stderr or ur.stdout or "").strip()
+        if msg:
+            print(f"[!] unregistervm --delete: {msg}")
+        return False
+    print(
+        f"[!] Timed out after {max_wait_s}s; VM {vm_name!r} is still locked. "
+        "Close VirtualBox UI for that VM, then re-run this script."
+    )
+    return False
+
+
+def remove_existing_client_vm(
+    vboxmanage: str,
+    vm_base: str,
+    *,
+    medium_path_for_vbox: str,
+) -> None:
+    """Drop any prior VM + disk folder for ``VM_NAME`` so this run starts clean."""
+    if vm_is_registered(vboxmanage, VM_NAME):
+        state = get_vm_state(vboxmanage, VM_NAME)
+        if state == "saved":
+            print(f"Discarding saved state for {VM_NAME!r}…")
+            subprocess.run(
+                [vboxmanage, "discardstate", VM_NAME], capture_output=True, text=True
+            )
+            state = get_vm_state(vboxmanage, VM_NAME)
+        if state in ("running", "paused", "stopping", "starting"):
+            print(f"Powering off existing VM {VM_NAME!r} ({state})…")
+            subprocess.run([vboxmanage, "controlvm", VM_NAME, "poweroff"], check=False)
+            for _ in range(45):
+                time.sleep(1)
+                st = get_vm_state(vboxmanage, VM_NAME)
+                if st in (None, "poweroff", "aborted"):
+                    break
+            else:
+                print(
+                    f"[!] VM {VM_NAME!r} did not reach poweroff in time; "
+                    "unregister may fail — close the VM window or run ``VBoxManage controlvm … poweroff``."
+                )
+        time.sleep(3)
+
+        print(f"Unregistering and deleting VirtualBox VM {VM_NAME!r} (all media)…")
+        if not try_unregistervm_delete(vboxmanage, VM_NAME):
+            raise RuntimeError(
+                f"Could not unregister {VM_NAME!r} (VirtualBox still has it locked). "
+                "Close any window showing that VM, exit stray VBoxManage sessions, then re-run."
+            )
+
+    vbox_closemedium_disk_delete_best_effort(vboxmanage, medium_path_for_vbox)
+
+    if os.path.isdir(vm_base):
+        print(f"Removing leftover VM directory {vm_base!r}…")
+        shutil.rmtree(vm_base, ignore_errors=True)
+
+
 def vm_is_registered(vboxmanage: str, vm_name: str) -> bool:
     out = subprocess.run(
         [vboxmanage, "list", "vms"], capture_output=True, text=True, check=True
@@ -357,6 +465,16 @@ def setup_client_vm(
     vm_base = paths["vm_base"]
     vms_root = paths["vms_root"]
     download_dir = paths["downloads"]
+
+    # Remove any stale client VM registration/files from prior runs before recreating.
+    remove_existing_client_vm(
+        vboxmanage,
+        vm_base,
+        medium_path_for_vbox=wsl_to_windows_path(os.path.join(vm_base, CLIENT_VDI_NAME))
+        if paths["is_wsl"]
+        else os.path.join(vm_base, CLIENT_VDI_NAME),
+    )
+
     os.makedirs(vm_base, exist_ok=True)
     os.makedirs(vms_root, exist_ok=True)
     os.makedirs(download_dir, exist_ok=True)
@@ -445,7 +563,7 @@ def setup_client_vm(
     # NIC1 = LAN leg behind OpenWrt (DHCP from OpenWrt br-lan)
     print(
         f"Networking: NIC1 → internal network {LAN_INTNET_NAME!r} "
-        f"(attach OpenWrt router NIC2 to the same intnet; start router before client DHCP)."
+        f"(OpenWrt router LAN is NIC1 on the same intnet; start router before client DHCP)."
     )
     run_vboxmanage(
         vboxmanage,
@@ -513,7 +631,7 @@ def setup_client_vm(
         "\n"
         "--- If ``ip -4 route show default`` prints nothing ---\n"
         "There is no default IPv4 route (usually DHCP from OpenWrt never ran or failed).\n"
-        "• Start the **OpenWrt** VM **before** this client; both NICs must use intnet ``openwrt-lan`` for LAN.\n"
+        "• Start the **OpenWrt** VM **before** this client; router **LAN (NIC1)** and this client **NIC1** must use intnet ``openwrt-lan``.\n"
         "• In OpenWrt (LuCI): LAN = static or DHCP **server** on br-lan, firewall zone LAN→WAN allowed.\n"
         "• In the client: ``ip -br a`` and ``ip route`` — confirm an address on the LAN interface.\n"
         "• Run ``lab-net-troubleshoot`` first; only then try ``sudo networkctl renew <iface>``.\n"
