@@ -3,7 +3,7 @@
 Overdrive is a Python-based privacy detection suite that runs multiple privacy, fingerprinting,
 network, and environment checks, then summarizes the results as scores.
 
-It is designed for quick local analysis of how your current network/browser/runtime
+It is designed for analysis of how your current network/browser/runtime
 environment looks to remote services (for example: VPN consistency, browser leaks,
 header mismatch signals, and hosting reputation checks).
 
@@ -33,7 +33,11 @@ Special cases in the batch runner:
 
 ### Run Everything
 
+From the **repository root**, using the project virtualenv on **Linux or WSL** (recommended):
+
 ```bash
+cd /path/to/overdrive
+source virtual_env/bin/activate   # optional
 python3 run_all_detections.py
 ```
 
@@ -42,31 +46,56 @@ Outputs:
 - Detailed console output
 - HTML report: `detection_results.html`
 
+#### Where to run (host vs VMs)
+**WSL or native Linux** at repo root 
+
+
+#### OpenWrt lab: two vantage points (WAN vs LAN)
+- **WAN profile** — Run directed router checks from the **host** (or anything on the **same Layer-2 segment as the router’s bridged WAN**), targeting the router’s **WAN IP**. That matches how upstream / “outside the guest” paths see the router.
+- **LAN profile** — Run checks from the **client VM** on internal network `openwrt-lan`, targeting the router’s **LAN IP** (e.g. `192.168.1.1`). The **WSL/Linux host cannot reach intnet** (VirtualBox isolates `openwrt-lan`), so LAN-plane probes must originate inside a guest on that intnet.
+
+Outbound traffic to the internet (e.g. HTTPS to Google) from the **client VM** still exits via **OpenWrt’s WAN** (NAT). What remote collectors see reflects that WAN path. **Management-plane** probes to `192.168.1.x` must still use the **LAN** seat.
+
+The full batch runner may probe **whatever your default gateway is**, which might **not** be OpenWrt. For lab fidelity, run router modules with explicit `--ip` (and the correct profile) as described in [`VM/ROUTER_PLAN.txt`](VM/ROUTER_PLAN.txt). Topology diagrams and example `VBoxManage` / guest output live in [`VM/LAB_TOPOLOGY.md`](VM/LAB_TOPOLOGY.md). To verify only VirtualBox wiring from the host: `python VM/verify_lab_from_host.py`.
 
 ## Important Runtime Notes
+
+
+### Notes
+- `setup_virtual_env.py` sets up the environment and installs all dependencies
+- `run_all_detections.py` runs the full suite of detections
+- `/local/wsl_config.py` turns on mirrored mode for WSL networking
+- `/VM/verify_lab_from_host.py` verifies basic networking is set up correctly on the VMs
+- `/local/*` reports information about your physical environment
 
 ### WSL2 Prerequisite: Mirrored Networking
 If you are running Overdrive inside Windows Subsystem for Linux (WSL2), the default NAT networking isolates your environment, preventing accurate discovery of local routers, mDNS services, and broadcast traffic.
 
 You must enable Mirrored Networking to make WSL a peer to your Windows host.
 
-1. Configure WSL Mode
-Run the included configuration utility from within your Overdrive directory:
+1. Configure WSL mode
+   Run the included configuration utility from within your Overdrive directory:
 
-Bash
-chmod +x wsl_config.py
-./wsl_config.py --enable
+   ```bash
+   chmod +x wsl_config.py
+   ./wsl_config.py --enable
+   ```
+
 2. Restart WSL
-Configuration changes to the WSL VM require a full shutdown to take effect. Run this in a Windows PowerShell terminal:
+   Configuration changes to the WSL VM require a full shutdown to take effect. Run this in a Windows PowerShell terminal:
 
-PowerShell
-wsl --shutdown
+   ```powershell
+   wsl --shutdown
+   ```
+
 3. Verify
-Re-open your WSL terminal and run:
+   Re-open your WSL terminal and run:
 
-Bash
-./wsl_config.py
-It should now report [*] Current WSL Networking Mode: MIRRORED.
+   ```bash
+   ./wsl_config.py
+   ```
+
+   It should now report `[*] Current WSL Networking Mode: MIRRORED.`
 
 
 ### Passwordless sudo (Scapy capture scripts)
@@ -77,43 +106,16 @@ It should now report [*] Current WSL Networking Mode: MIRRORED.
 - `router/TTL.py`
 - `router/NAT_OS.py`
 
-Scapy packet capture usually needs elevated privileges on Linux/WSL. `router/NAT_OS.py` and `router/TTL.py` **re-exec** to `virtual_env/bin/python` when you launch them with `./…`, so the process matches the interpreter you granted **NOPASSWD** or **setcap** on (not whatever `python3` appears first on `PATH`).
+Scapy packet capture usually needs elevated privileges on Linux/WSL.
 
-Running those scripts **without** `sudo` or `setcap` on that venv Python will raise **PermissionError**; the script catches that and prints example `sudo` / `setcap` commands.
+On Linux/WSL, you can grant the virtualenv Python binary raw-socket capabilities so captures work without sudo. For example:
 
-The batch runner never prompts for a password; if your user cannot run those commands **without** a password, those steps fail and show as **Error** in the HTML report.
+```bash
+sudo setcap cap_net_raw,cap_net_admin+eip virtual_env/bin/python
+```
 
-**Configure NOPASSWD for only the venv Python + those scripts** (adjust paths to match your clone; inside WSL, paths are typically under `/home/<you>/...` or `/mnt/c/...`):
+When those capabilities are present, the batch runner may execute the capture scripts without sudo.
 
-1. Resolve the interpreter path you use for Overdrive (for example the project venv):
-
-   ```bash
-   readlink -f virtual_env/bin/python
-   ```
-
-2. Edit sudoers safely:
-
-   ```bash
-   sudo visudo
-   ```
-
-3. Add one line per script (same `python` binary, different script path), replacing `YOURUSER` and the paths:
-
-   ```text
-   YOURUSER ALL=(root) NOPASSWD: /ABS/PATH/virtual_env/bin/python /ABS/PATH/vpn/TCP_stack.py
-   YOURUSER ALL=(root) NOPASSWD: /ABS/PATH/virtual_env/bin/python /ABS/PATH/router/TTL.py
-   YOURUSER ALL=(root) NOPASSWD: /ABS/PATH/virtual_env/bin/python /ABS/PATH/router/NAT_OS.py
-   ```
-
-   Paths must match what `sudo -n` executes (absolute paths; WSL is case-sensitive).
-
-**Alternative (Linux only):** grant capabilities to the venv interpreter so capture works **without** sudo, for example `cap_net_raw` and `cap_net_admin` on `virtual_env/bin/python` (`getcap` / `setcap`). The batch runner checks for those capabilities on the venv Python and, when present, runs **all** capture scripts above **without** sudo (same behavior as for `TCP_stack.py` alone).
-
-### Router probes from WSL2
-
-`router/upnp_discovery.py` often gets **no SSDP** inside WSL2 because multicast does not reach your LAN router; pass **`--ip`** with your **LAN gateway** (e.g. `192.168.1.1`) so M-SEARCH is also sent unicast to port 1900.
-
-`router/banners.py` prints a **short summary** by default; use **`-v`** / **`--verbose`** for every path.
 
 ### TODO-Based Skip Logic
 

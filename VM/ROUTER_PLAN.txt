@@ -64,36 +64,33 @@ Run from the repository root:
 
   python run_all_detections.py
 
-That driver discovers and runs most Overdrive modules (vpn, browser, network, router folders, and root-level scripts). It prints to the console and writes an HTML report file (the project README describes this workflow and scoring).
+That driver discovers and runs most Overdrive modules (vpn, browser, network, router folders,
+ and root-level scripts). It prints to the console and writes an HTML report file (the project README
+  describes this workflow and scoring).
 
-Default PASS goal for typical modules: treat SCORE less than or equal to 3 as acceptable where higher scores mean stronger anomaly, mismatch, or suspicion (see README.md in the repo root for the general scoring idea).
+Default PASS goal for typical modules: treat SCORE less than or equal to 3 as acceptable where higher 
+scores mean stronger anomaly, mismatch, or suspicion (see README.md in the repo root for the general 
+scoring idea).
 
-Important exception: several router-folder heuristics (banners, OUI, UPNP) encode router-likeness. For those, a higher score can mean stronger consumer-gateway-like signals, not more suspicious. Do not apply a blind less-than-or-equal-to-3 rule unless you invert or bucket them explicitly. You need a score-semantics matrix: each script id maps to pass_mode (for example: lte_3 for anomaly-style scripts, gte_min for router-likelihood scripts, skip, or manual review).
+Important exception: several router-folder heuristics (banners, OUI, UPNP) encode router-likeness. 
+For those, a higher score can mean stronger consumer-gateway-like signals, not more suspicious. 
+Do not apply a blind less-than-or-equal-to-3 rule unless you invert or bucket them explicitly.
+ You need a score-semantics matrix: each script id maps to pass_mode (for example: 
+ lte_3 for anomaly-style scripts, gte_min for router-likelihood scripts, skip, or manual review).
 
 4.2 Directed router battery (intended; not shipped as a standalone script yet)
 
-The full suite usually probes whatever your environment’s default gateway is. That may not be OpenWrt. For router VM acceptance you also need probes aimed explicitly at OpenWrt’s WAN IP and LAN IP from the correct vantage point:
+The full suite usually probes whatever your environment’s default gateway is. That may not be OpenWrt.
+ For router VM acceptance you also need probes aimed explicitly at OpenWrt’s WAN IP and LAN IP from
+  the correct vantage point:
 
   From host (or WAN segment): probe OpenWrt WAN address.
-
   From a client VM on openwrt-lan: probe OpenWrt LAN address.
 
-Today that means calling router/banners.py, router/OUI.py, and router/UPNP.py yourself with their --ip argument (and keeping privilege and timing consistent). Backlog item 4 adds a small runner to automate that pair of profiles.
+Today that means calling router/banners.py, router/OUI.py, and router/UPNP.py yourself 
+with their --ip argument (and keeping privilege and timing consistent). Backlog item 4 
+adds a small runner to automate that pair of profiles.
 
-
-5. FILES THAT ALREADY EXIST AND MATTER HERE
---------------------------------------------
-
-  run_all_detections.py       repo root — full detection sweep
-  README.md                   repo root — scoring and sudo/setcap notes
-  VM/create_VM_OpenWrt_router.py — build the two-NIC OpenWrt VM
-  router/banners.py           HTTP/S banner probe (supports --ip)
-  router/OUI.py                 MAC / OUI heuristic (supports --ip)
-  router/UPNP.py              SSDP / UPnP probe (supports --ip)
-  router/TTL.py               TTL capture heuristic (needs capture privileges)
-  router/NAT_OS.py            NAT / OS-jumble heuristic (needs capture privileges)
-  local/my_DNS.py             DNS identification helper (optional context)
-  local/my_router.py          Combined MAC / UPnP-style probe (optional; uses MY_MORE_ROUTER_IP on WSL)
 
 
 BACKLOG — IMPROVE CHECKING FIDELITY AND LAB REALISM
@@ -160,17 +157,6 @@ SECTION D — CALIBRATE DETECTION SCRIPTS
  17  router/banners.py: enrich or normalize fingerprints if you must separate OpenWrt LuCI/uhttpd stacks from OEM firmware under controlled vocabulary.
 
  18  router/UPNP.py: tune SSDP listen times; validate multicast vs unicast behavior on VirtualBox internal networks; prefer unicast targeting when --ip is supplied.
-
-
-SECTION E — VM IMAGE (VirtualBox / create_VM_OpenWrt_router.py)
-
- 19  Set NIC types to Intel 82540EM (VBoxManage nictype1 / nictype2) on both adapters where supported—fewer default “virtio VM” fingerprints.
-
- 20  MAC policy: generate locally administered unicast MACs by default; optional CLI flags for lab-fixed WAN/LAN MACs; avoid well-known hypervisor OUIs that local/my_router.py flags.
-
- 21  Audit VirtualBox paravirtualization provider and remove unnecessary virtual devices (audio, USB) that add forensic surface without lab value.
-
- 22  Keep disk image and VDI paths consistent for WSL invoking Windows VBoxManage (wslpath conversion already relevant on hybrid setups).
 
 
 SECTION F — OPENWRT RUNTIME (ON THE DEVICE)
