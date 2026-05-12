@@ -17,19 +17,17 @@ import os
 import platform
 import socket
 import subprocess
+import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-def is_wsl() -> bool:
-    if platform.system() != "Linux":
-        return False
-    try:
-        with open("/proc/version", encoding="utf-8", errors="replace") as f:
-            return "microsoft" in f.read().lower()
-    except OSError:
-        return False
+from common.common_local import is_wsl_local
 
 
 def wsl_dns() -> str | None:
@@ -294,7 +292,7 @@ def get_dns_info() -> None:
 
     try:
         if system == "Linux":
-            if is_wsl():
+            if is_wsl_local():
                 detection_source = "Windows (Get-DnsClientServerAddress via PowerShell) — WSL2"
                 cmd = [
                     "powershell.exe",
@@ -337,7 +335,7 @@ def get_dns_info() -> None:
 
     print("\nHow this list was built")
     print(f"  Source: {detection_source}")
-    if is_wsl():
+    if is_wsl_local():
         tunnel = wsl_dns()
         if tunnel:
             print(

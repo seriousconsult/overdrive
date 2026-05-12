@@ -28,40 +28,11 @@ import sys
 from typing import Any
 
 import requests
+from common.common_vpn import fetch_ip_api, fetch_ipapi, public_ipv4, public_ipv6
 
-IPV4_URL = "https://api.ipify.org?format=json"
-IPV6_URL = "https://api6.ipify.org?format=json"
 IP_API = "http://ip-api.com/json/{ip}"
 TIMEOUT = 10
 UA = {"User-Agent": "overdrive-ipv6-leak/1.0"}
-
-
-def _fetch_json(url: str) -> dict[str, Any] | None:
-    try:
-        r = requests.get(url, headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except (requests.RequestException, ValueError):
-        return None
-
-
-def public_ipv4() -> str | None:
-    data = _fetch_json(IPV4_URL)
-    if not data:
-        return None
-    ip = data.get("ip")
-    return str(ip).strip() if ip else None
-
-
-def public_ipv6() -> str | None:
-    """Only succeeds when the host can complete HTTPS over IPv6 to api6."""
-    data = _fetch_json(IPV6_URL)
-    if not data:
-        return None
-    ip = data.get("ip")
-    if not ip or ":" not in str(ip):
-        return None
-    return str(ip).strip()
 
 
 def local_global_ipv6_hint() -> bool | None:
@@ -111,12 +82,7 @@ def local_global_ipv6_hint() -> bool | None:
 
 
 def ip_metadata(ip: str) -> dict[str, Any]:
-    try:
-        r = requests.get(IP_API.format(ip=ip), headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except (requests.RequestException, ValueError):
-        return {}
+    return fetch_ip_api(ip)
 
 
 def _norm_org(s: str) -> str:

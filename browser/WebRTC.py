@@ -31,85 +31,14 @@ WebRTC protocol, even if you are using a VPN or Proxy.
 import re
 import traceback
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from common.common_browser import build_driver, ipv4_like_strings, is_private_ipv4, collect_diagnostics_memory
+
 
 URL = "https://browserleaks.com/webrtc"
-
-
-def build_driver():
-    chrome_options = Options()
-
-    # Headless stable flags for WSL
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1280,800")
-
-    # Make media permissions less likely to block WebRTC in headless
-    chrome_options.add_argument("--use-fake-ui-for-media-stream")
-    chrome_options.add_argument("--use-fake-device-for-media-stream")
-
-    # Reduce automation fingerprinting a bit
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-
-    # If Chrome is not on PATH, uncomment and set:
-    # chrome_options.binary_location = "/usr/bin/google-chrome"
-
-    return webdriver.Chrome(options=chrome_options)
-
-
-def ipv4_like_strings(text: str):
-    # Simple IPv4 matcher
-    return re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text or "")
-
-
-def is_private_ipv4(ip: str) -> bool:
-    """
-    Ticket interpretation: "private/local IP" => RFC1918 ranges.
-      - 10.0.0.0/8
-      - 172.16.0.0/12
-      - 192.168.0.0/16
-    """
-    if not ip:
-        return False
-    try:
-        parts = list(map(int, ip.split(".")))
-        if len(parts) != 4:
-            return False
-        a, b = parts[0], parts[1]
-        if a == 10:
-            return True
-        if a == 172 and 16 <= b <= 31:
-            return True
-        if a == 192 and b == 168:
-            return True
-        return False
-    except Exception:
-        return False
-
-
-def collect_diagnostics_memory(driver):
-    """
-    In-memory capture only (no disk). Caller may inspect bytes/str before shutdown.
-    """
-    out = {"screenshot_png": None, "page_source_snippet": None}
-    try:
-        out["screenshot_png"] = driver.get_screenshot_as_png()
-    except Exception:
-        pass
-    try:
-        out["page_source_snippet"] = (driver.page_source or "")[:30000]
-    except Exception:
-        pass
-    return out
 
 
 def compute_webrtc_leak_score(

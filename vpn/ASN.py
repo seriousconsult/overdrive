@@ -19,6 +19,7 @@ import sys
 from typing import Any
 
 import requests
+from common.common_vpn import fetch_ip_api, fetch_ipapi, public_ipv4
 
 IPIFY = "https://api.ipify.org?format=json"
 IP_API_URL = (
@@ -278,41 +279,6 @@ def merge_asn_scores(
         blended,
         f"blended {blended}: ipapi={s_ipapi} ({msg_ipapi}); ip-api={s_ip_api} ({msg_ip_api})",
     )
-
-
-def _public_ip_ipify() -> str | None:
-    try:
-        r = requests.get(IPIFY, headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        ip = r.json().get("ip")
-        if not ip or ":" in str(ip):
-            return None
-        return str(ip).strip()
-    except (requests.RequestException, ValueError, TypeError, KeyError):
-        return None
-
-
-def fetch_ipapi(ip: str | None) -> dict[str, Any] | None:
-    url = IPAPI_URL_IP.format(ip=ip) if ip else IPAPI_URL_AUTO
-    try:
-        r = requests.get(url, headers=UA, timeout=TIMEOUT)
-        if r.status_code == 429:
-            return {"error": True, "reason": "Rate limited (429)"}
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException:
-        return None
-    except ValueError:
-        return None
-
-
-def fetch_ip_api(ip: str) -> dict[str, Any]:
-    try:
-        r = requests.get(IP_API_URL.format(ip=ip), headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except (requests.RequestException, ValueError):
-        return {"status": "fail", "message": "request error"}
 
 
 def resolve_target_ip(arg_ip: str) -> tuple[str | None, str | None]:

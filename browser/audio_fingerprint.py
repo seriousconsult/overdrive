@@ -19,8 +19,10 @@ TODO: Implement actual audio fingerprint detection
     
 """
 
-import subprocess
-import json
+from common.common_browser import (
+    print_browser_detection_header,
+    print_browser_detection_score_footer,
+)
 
 
 def check_audio_fingerprint() -> tuple[int, str]:
@@ -39,16 +41,9 @@ def check_audio_fingerprint() -> tuple[int, str]:
 
 
 def main():
-    print("============================================================")
-    print("Audio Context Fingerprint Detection")
-    print("============================================================\n")
-    
+    print_browser_detection_header("Audio Context Fingerprint Detection")
     score, description = check_audio_fingerprint()
-    
-    print(f"Score: {score}")
-    print(f"  {description}")
-    
-    print("\n============================================================")
+    print_browser_detection_score_footer(score, description)
 
 
 if __name__ == "__main__":

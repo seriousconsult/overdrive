@@ -32,15 +32,24 @@ Environment:
 
 from __future__ import annotations
 
-import ipaddress
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import requests
 
-IPIFY = "https://api.ipify.org?format=json"
+from common.common_network import (
+    fetch_public_ipv4_ipify,
+    ipv4_listed_in_netset,
+    parse_ipv4,
+)
+
 IPV4_ICANHAZIP = "https://ipv4.icanhazip.com/"
 IPV4_IFCONFIGME = "https://ifconfig.me/ip"
 ONIONOO_DETAILS = "https://onionoo.torproject.org/details"
@@ -62,33 +71,18 @@ REFRESH_IF_OLDER_SEC = 6 * 3600
 ONIONOO_LIMITS = ("100", "500")
 
 
-def _parse_ipv4(s: str | None) -> str | None:
-    if not s:
-        return None
-    s = s.strip().split()[0]
-    try:
-        a = ipaddress.ip_address(s)
-    except ValueError:
-        return None
-    if a.version != 4:
-        return None
-    return str(a)
-
-
 def _probe_ipify() -> str | None:
-    try:
-        r = requests.get(IPIFY, headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        return _parse_ipv4(str(r.json().get("ip")) if r.json().get("ip") else None)
-    except (requests.RequestException, ValueError, TypeError, KeyError):
-        return None
+    return fetch_public_ipv4_ipify(
+        user_agent=UA["User-Agent"],
+        timeout=TIMEOUT,
+    )
 
 
 def _probe_plain_ipv4(url: str) -> str | None:
     try:
         r = requests.get(url, headers=UA, timeout=TIMEOUT)
         r.raise_for_status()
-        return _parse_ipv4(r.text)
+        return parse_ipv4(r.text)
     except (requests.RequestException, ValueError, TypeError):
         return None
 
@@ -98,7 +92,7 @@ def resolve_egress_ipv4() -> tuple[str | None, bool, str]:
     Returns ``(ip, strong_consensus, note)``.
     ``strong_consensus`` is True for ``OVERDRIVE_IP`` or when at least two probes return the same IPv4.
     """
-    override = _parse_ipv4(os.environ.get("OVERDRIVE_IP"))
+    override = parse_ipv4(os.environ.get("OVERDRIVE_IP"))
     if override:
         return override, True, ""
 
@@ -235,24 +229,6 @@ def _load_cached_text(url: str, cache_name: str) -> tuple[str | None, str]:
         return None, str(e)
 
 
-def netset_contains(ip: str, body: str) -> bool:
-    """Return True if ``ip`` matches a line in a netset/ipset (IPv4 CIDR or single address)."""
-    addr = ipaddress.ip_address(ip)
-    for line in body.splitlines():
-        raw = line.split("#", 1)[0].strip()
-        if not raw:
-            continue
-        try:
-            if "/" in raw:
-                if addr in ipaddress.ip_network(raw, strict=False):
-                    return True
-            elif addr == ipaddress.ip_address(raw):
-                return True
-        except ValueError:
-            continue
-    return False
-
-
 def _usage_proxy_vpn(usage_type: str) -> bool:
     u = usage_type.lower()
     return "proxy" in u or "vpn" in u or "anonymizing" in u
@@ -327,12 +303,12 @@ def check_tor_proxy_reputation() -> tuple[int, str]:
 
     in_proxy = False
     if proxy_body is not None:
-        in_proxy = netset_contains(ip, proxy_body)
+        in_proxy = ipv4_listed_in_netset(ip, proxy_body)
         if in_proxy:
             positives.append("Listed on FireHOL open-proxy netset")
 
-    in_tor_1d = bool(tor_1d_body is not None and netset_contains(ip, tor_1d_body))
-    in_tor_7d = bool(tor_7d_body is not None and netset_contains(ip, tor_7d_body))
+    in_tor_1d = bool(tor_1d_body is not None and ipv4_listed_in_netset(ip, tor_1d_body))
+    in_tor_7d = bool(tor_7d_body is not None and ipv4_listed_in_netset(ip, tor_7d_body))
     if in_tor_1d:
         positives.append("Listed on FireHOL tor_exits_1d ipset")
     if in_tor_7d:

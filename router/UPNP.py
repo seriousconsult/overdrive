@@ -22,6 +22,15 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from common.common_router import (
+    default_ipv4_gateway,
+    _parse_ssdp_headers,
+    _send_msearch,
+    _collect_ssdp,
+    _fetch_location,
+    _xml_text_fields,
+)
+
 # Multicast SSDP
 SSDP_ADDR = "239.255.255.250"
 SSDP_PORT = 1900
@@ -62,147 +71,6 @@ ROUTER_XML_HINTS = (
     "igd",
     "internetgateway",
 )
-
-
-def default_ipv4_gateway() -> str | None:
-    try:
-        out = subprocess.run(
-            ["ip", "-4", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout:
-            m = re.search(r"default\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", out.stdout)
-            if m:
-                return m.group(1)
-    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return None
-
-
-def _parse_ssdp_headers(raw: str) -> dict[str, str]:
-    lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    hdrs: dict[str, str] = {}
-    for line in lines[1:]:
-        if not line.strip():
-            break
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        hdrs[k.strip().upper()] = v.strip()
-    return hdrs
-
-
-def _send_msearch(sock: socket.socket, payload: bytes, unicast_targets: list[str]) -> None:
-    sock.sendto(payload, (SSDP_ADDR, SSDP_PORT))
-    for ip in unicast_targets:
-        if not ip:
-            continue
-        try:
-            sock.sendto(payload, (ip, SSDP_PORT))
-        except OSError:
-            pass
-
-
-def _collect_ssdp(
-    listen_s: float,
-    unicast_targets: list[str],
-) -> list[tuple[str, dict[str, str], str]]:
-    """Returns list of (remote_ip, headers, raw_snippet)."""
-    out: list[tuple[str, dict[str, str], str]] = []
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
-        except OSError:
-            pass
-        sock.bind(("", 0))
-        sock.settimeout(0.35)
-
-        _send_msearch(sock, MSEARCH_ROOT, unicast_targets)
-        time.sleep(0.05)
-        _send_msearch(sock, MSEARCH_ALL, unicast_targets)
-
-        deadline = time.monotonic() + max(0.5, listen_s)
-        seen: set[tuple[str, str]] = set()
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            sock.settimeout(min(0.45, remaining))
-            try:
-                data, addr = sock.recvfrom(16384)
-            except socket.timeout:
-                continue
-            text = data.decode("utf-8", errors="replace")
-            if not text.upper().startswith("HTTP/"):
-                continue
-            hdrs = _parse_ssdp_headers(text)
-            loc = hdrs.get("LOCATION", "")
-            key = (addr[0], loc)
-            if key in seen:
-                continue
-            seen.add(key)
-            snippet = text[:500].replace("\r\n", " ")
-            out.append((addr[0], hdrs, snippet))
-    finally:
-        sock.close()
-    return out
-
-
-def _fetch_location(url: str, timeout: float, insecure: bool) -> tuple[str | None, str | None]:
-    try:
-        ctx = None
-        if insecure and url.lower().startswith("https"):
-            import ssl
-
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "overdrive-upnp-discovery/1.0"},
-        )
-        kwargs: dict[str, Any] = {"timeout": timeout}
-        if ctx is not None:
-            kwargs["context"] = ctx
-        with urllib.request.urlopen(req, **kwargs) as resp:
-            body = resp.read(256_000).decode("utf-8", errors="replace")
-        return body, None
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as e:
-        return None, str(e)
-
-
-def _xml_text_fields(xml: str) -> dict[str, str]:
-    """Best-effort UPnP device fields without relying on a single namespace."""
-    fields: dict[str, str] = {}
-    for tag in ("friendlyName", "modelName", "modelNumber", "modelDescription", "manufacturer", "serialNumber"):
-        m = re.findall(
-            rf"<(?:[^/>]+:)?{tag}\s*>([^<]*)</(?:[^/>]+:)?{tag}\s*>",
-            xml,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if m:
-            fields[tag] = " / ".join(x.strip() for x in m if x.strip())[:400]
-    if not fields:
-        try:
-            root = ET.fromstring(xml)
-            for el in root.iter():
-                tag = el.tag.split("}")[-1].lower()
-                if tag in (
-                    "friendlyname",
-                    "modelname",
-                    "modelnumber",
-                    "modeldescription",
-                    "manufacturer",
-                    "serialnumber",
-                ) and el.text and el.text.strip():
-                    fields[tag] = el.text.strip()[:400]
-        except ET.ParseError:
-            pass
-    return fields
 
 
 def _status_ident_line(

@@ -19,10 +19,21 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import requests
 from scapy.all import ARP, Ether, srp
+
+from common.common_local import (
+    is_wsl_local,
+    mac_oui_colon_prefix,
+    normalize_mac_colon,
+)
 
 # First 3 octets (lowercase) -> organization. OUI names the *vendor*, not device model.
 KNOWN_OUI: dict[str, str] = {
@@ -35,24 +46,9 @@ KNOWN_OUI: dict[str, str] = {
 }
 
 
-def _mac_oui_key(mac: str) -> str:
-    m = re.sub(r"[:-]", ":", mac.strip().lower())
-    parts = [p for p in m.split(":") if p]
-    if len(parts) < 3:
-        return ""
-    return ":".join(parts[:3])
-
-
-def _normalize_mac_colon(s: str) -> str | None:
-    s = s.strip().lower().replace("-", ":")
-    if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", s):
-        return s
-    return None
-
-
 def vendor_from_mac(mac: str) -> str:
     """Resolve vendor from MAC: built-in OUI hints, then macvendors.com API."""
-    oui = _mac_oui_key(mac)
+    oui = mac_oui_colon_prefix(mac)
     if oui in KNOWN_OUI:
         return KNOWN_OUI[oui]
     try:
@@ -111,7 +107,7 @@ def mac_from_windows(ip: str) -> str | None:
             continue
         line = (out.stdout or "").strip().splitlines()
         raw = line[0].strip() if line else ""
-        mac = _normalize_mac_colon(raw)
+        mac = normalize_mac_colon(raw)
         if mac:
             return mac
     try:
@@ -130,7 +126,7 @@ def mac_from_windows(ip: str) -> str | None:
             re.I,
         )
         if m:
-            return _normalize_mac_colon(m.group(1))
+            return normalize_mac_colon(m.group(1))
     except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return None
@@ -156,7 +152,7 @@ def mac_from_linux_neigh(ip: str, iface: str | None) -> str | None:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         m = re.search(r"lladdr\s+([0-9a-f:]{17})", (out.stdout or ""), re.I)
         if m:
-            return _normalize_mac_colon(m.group(1))
+            return normalize_mac_colon(m.group(1))
     except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
         pass
     try:
@@ -169,7 +165,7 @@ def mac_from_linux_neigh(ip: str, iface: str | None) -> str | None:
                 hw = cols[3]
                 if hw == "00:00:00:00:00:00":
                     continue
-                return _normalize_mac_colon(hw)
+                return normalize_mac_colon(hw)
     except OSError:
         pass
     return None
@@ -233,16 +229,6 @@ def fetch_upnp_device_info(ip: str) -> tuple[str | None, dict[str, str]]:
         if parsed or "<device>" in body.lower() or "root xmlns" in body[:500].lower():
             return body, parsed
     return None, {}
-
-
-def _is_wsl() -> bool:
-    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
-        return True
-    try:
-        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
-            return "microsoft" in f.read().lower()
-    except OSError:
-        return False
 
 
 def _default_route_via_ip() -> tuple[str | None, str | None]:
@@ -428,7 +414,7 @@ def resolve_router_ipv4_and_iface() -> tuple[str, str | None, bool]:
     Returns (ip, iface, used_windows_route). On WSL, ``used_windows_route`` is always True
     when successful; ``iface`` is always None (ARP/HTTP target is off the WSL vEthernet).
     """
-    if _is_wsl():
+    if is_wsl_local():
         win_gw = windows_home_router_ipv4()
         if win_gw:
             return win_gw, None, True
@@ -837,12 +823,12 @@ def _print_upnp_summary(fields: dict[str, str]) -> None:
 def main() -> None:
     target_ip, iface, via_windows = resolve_router_ipv4_and_iface()
     print(f"Using router / gateway IP: {target_ip}" + (f" (iface={iface})" if iface else ""))
-    if _is_wsl() and via_windows:
+    if is_wsl_local() and via_windows:
         print(
             "MAC is read from Windows (Get-NetNeighbor / arp); "
             "WSL cannot ARP your LAN router directly."
         )
-    if _is_wsl() and _is_wsl2_style_nat_gateway(target_ip):
+    if is_wsl_local() and _is_wsl2_style_nat_gateway(target_ip):
         print(
             "Warning: gateway looks like a 172.16–172.31 address (often virtual). "
             "Set MY_MORE_ROUTER_IP if this is not your FiOS / home router.",
@@ -850,7 +836,7 @@ def main() -> None:
         )
 
     mac: str | None = None
-    if _is_wsl():
+    if is_wsl_local():
         mac = mac_from_windows(target_ip)
         if not mac:
             print(
@@ -872,7 +858,7 @@ def main() -> None:
         except Exception as e:
             print(f"ARP scan failed ({e}). Trying kernel neighbor table…", file=sys.stderr)
         if result:
-            mac = _normalize_mac_colon(result[0][1].hwsrc) or str(result[0][1].hwsrc).lower()
+            mac = normalize_mac_colon(result[0][1].hwsrc) or str(result[0][1].hwsrc).lower()
         if not mac:
             mac = mac_from_linux_neigh(target_ip, iface)
         if not mac:

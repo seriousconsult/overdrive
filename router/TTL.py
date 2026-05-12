@@ -21,22 +21,11 @@ import os
 import sys
 from pathlib import Path
 
-
-def _reexec_to_repo_venv_python() -> None:
-    """If this file was started via `env python3`, switch to repo virtual_env/bin/python when it exists."""
-    script = Path(__file__).resolve()
-    vpy = script.parents[1] / "virtual_env" / "bin" / "python"
-    if not vpy.is_file():
-        return
-    try:
-        if Path(sys.executable).resolve() == vpy.resolve():
-            return
-    except OSError:
-        return
-    try:
-        os.execv(str(vpy), [str(vpy), str(script), *sys.argv[1:]])
-    except OSError:
-        pass
+from common.common_router import (
+    _reexec_to_repo_venv_python,
+    _print_sniff_permission_help,
+    _background_probe_loop,
+)
 
 
 _reexec_to_repo_venv_python()
@@ -53,41 +42,11 @@ from scapy.all import sniff, IP, conf
 
 conf.verb = 0  # scapy quiet
 
-def _print_sniff_permission_help() -> None:
-    script = Path(__file__).resolve()
-    repo = script.parents[1]
-    vpy = repo / "virtual_env" / "bin" / "python"
-    print("[!] Packet capture needs raw sockets (Linux: root or cap_net_raw+cap_net_admin on the venv Python).")
-    print("    From repo root, for example:")
-    print(f"        sudo -n {vpy} {script}")
-    print("    Or grant capabilities once (then you can run without sudo):")
-    print(f"        sudo setcap cap_net_raw,cap_net_admin+eip {vpy}")
-    print("    See README: Passwordless sudo / capture scripts.")
-
-
 _PROBE_URLS: tuple[str, ...] = (
     "https://example.com/",
     "http://example.com/",
     "https://one.one.one.one/",
 )
-
-
-def _background_probe_loop(stop: threading.Event, urls: tuple[str, ...], pause_s: float) -> None:
-    n = 0
-    while not stop.is_set():
-        url = urls[n % len(urls)]
-        n += 1
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "overdrive-router-probe/1.0", "Connection": "close"},
-            )
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                resp.read(8192)
-        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-            pass
-        if stop.wait(pause_s):
-            break
 
 
 def compute_suspicion(ttls):

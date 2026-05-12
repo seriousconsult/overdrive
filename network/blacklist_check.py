@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-import socket
-from typing import Any
-import requests
-
-"""
-IP Blacklist Check
+"""IP Blacklist Check — DNSBL / RBL queries and ip-api hosting signal.
 
 Queries public IPv4 against several DNS blocklists (DNSBL / RBL).
 Uses ip-api metadata (hosting/datacenter) as a secondary signal.
@@ -16,11 +10,28 @@ Score (1–5):
   3 — Could not complete checks (no IPv4, DNS failures, or DNSBL Service Blocked)
   2 — Not on queried lists, but ip-api marks IP as hosting/datacenter
   1 — Clean on queried lists and not flagged as hosting
+
+Uses ``common.common_network`` for public IPv4 (ipify) and reverse-DNSBL host construction.
 """
+from __future__ import annotations
+
+import socket
+import sys
+from pathlib import Path
+from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import requests
+
+from common.common_network import (
+    fetch_public_ipv4_ipify,
+    reverse_ipv4_for_dnsbl,
+)
 
 
-
-IPIFY = "https://api.ipify.org?format=json"
 IP_API = "http://ip-api.com/json/{ip}"
 TIMEOUT = 8
 UA = {"User-Agent": "overdrive-blacklist-check/1.0"}
@@ -40,28 +51,7 @@ ZEN_BLOCKED_RESOLVER = "127.255.255.254"
 
 
 def public_ipv4() -> str | None:
-    try:
-        r = requests.get(IPIFY, headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        ip = r.json().get("ip")
-        if not ip or ":" in str(ip):
-            return None
-        return str(ip).strip()
-    except (requests.RequestException, ValueError, KeyError):
-        return None
-
-
-def reverse_ipv4_for_dnsbl(ip: str) -> str | None:
-    parts = ip.split(".")
-    if len(parts) != 4:
-        return None
-    try:
-        nums = [int(p) for p in parts]
-        if any(n < 0 or n > 255 for n in nums):
-            return None
-    except ValueError:
-        return None
-    return ".".join(reversed(parts))
+    return fetch_public_ipv4_ipify(user_agent=UA["User-Agent"], timeout=TIMEOUT)
 
 
 def dnsbl_lookup(ip: str, zone: str) -> tuple[str, str | None]:
@@ -79,7 +69,7 @@ def dnsbl_lookup(ip: str, zone: str) -> tuple[str, str | None]:
     # Check specifically for Spamhaus block codes
     if resolved == ZEN_BLOCKED_RESOLVER:
         return "error", "dns-resolver-blocked-by-spamhaus"
-    
+
     return "listed", resolved
 
 
@@ -133,7 +123,7 @@ def check_ip_blacklist() -> tuple[int, str]:
     if dns_blocked:
         return (
             4,
-            "Spamhaus query blocked: Using a public DNS resolver (e.g. Google/Cloudflare) is not supported for ZEN queries."
+            "Spamhaus query blocked: Using a public DNS resolver (e.g. Google/Cloudflare) is not supported for ZEN queries.",
         )
 
     if errors == len(DNSBL_ZONES):

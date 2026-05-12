@@ -21,6 +21,7 @@ import subprocess
 import sys
 
 import requests
+from common.common_vpn import get_public_ipv4, is_wsl, wsl_windows_host_ip
 
 
 VPN_PORTS: tuple[tuple[int, str, str], ...] = (
@@ -32,71 +33,6 @@ VPN_PORTS: tuple[tuple[int, str, str], ...] = (
     (500, "udp", "IPsec"),
     (4500, "udp", "IPsec NAT-T"),
 )
-
-
-def is_wsl() -> bool:
-    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
-        return True
-    try:
-        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
-            return "microsoft" in f.read().lower()
-    except OSError:
-        return False
-
-
-def wsl_windows_host_ip() -> str | None:
-    """
-    On WSL2, the default IPv4 gateway is typically the Windows host virtual interface.
-    """
-    try:
-        out = subprocess.run(
-            ["ip", "-4", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout:
-            m = re.search(r"default\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", out.stdout)
-            if m:
-                return m.group(1)
-    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    try:
-        with open("/etc/resolv.conf", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] == "nameserver":
-                    ip = parts[1]
-                    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) and not ip.startswith(
-                        "127."
-                    ):
-                        return ip
-    except OSError:
-        pass
-    return None
-
-
-def get_public_ipv4() -> str | None:
-    candidates = (
-        ("https://api4.ipify.org", False),
-        ("https://api.ipify.org?format=json", True),
-        ("http://ip-api.com/json/?fields=query", True),
-    )
-    for url, is_json in candidates:
-        try:
-            r = requests.get(url, timeout=8, headers={"User-Agent": "vpn-ports-audit/1.0"})
-            r.raise_for_status()
-            if is_json:
-                data = r.json()
-                ip = data.get("ip") or data.get("query")
-            else:
-                ip = r.text.strip()
-            if ip and re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip):
-                return ip
-        except (requests.RequestException, ValueError, TypeError, KeyError):
-            continue
-    return None
 
 
 def check_port(ip: str, port: int, protocol: str) -> bool | str:

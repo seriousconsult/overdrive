@@ -35,10 +35,31 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import requests
+
+# Ensure sibling common/ package is importable when running this script from VM/
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from common.common_vm import (
+    is_wsl_environment,
+    wsl_to_windows_path,
+    get_system_paths,
+    find_vboxmanage,
+    get_half_cpus,
+    run_vboxmanage,
+    resolve_vbox_settings_path,
+    vbox_closemedium_disk_delete_best_effort,
+    try_unregistervm_delete,
+    vm_is_registered,
+    get_vm_state,
+)
 
 # Must match ``LAN_INTNET_NAME`` in create_VM_OpenWrt_router.py
 LAN_INTNET_NAME = "openwrt-lan"
@@ -116,161 +137,13 @@ fi
 """
 
 
-def is_wsl_environment() -> bool:
-    return "microsoft" in platform.release().lower() or os.path.exists(
-        "/proc/sys/fs/binfmt_misc/WSLInterop"
-    )
 
 
-def wsl_to_windows_path(path: str) -> str:
-    try:
-        result = subprocess.run(
-            ["wslpath", "-w", path], capture_output=True, text=True, check=True
-        )
-        return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        if path.startswith("/mnt/"):
-            drive, _, rest = path[1:].partition("/")
-            return f"{drive.upper()}:\\{rest.replace('/', '\\')}"
-        return path
 
 
-def get_system_paths() -> dict:
-    linux_home = str(Path.home())
-    if is_wsl_environment():
-        try:
-            proc = subprocess.run(
-                ["cmd.exe", "/c", "echo", "%USERPROFILE%"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            win_profile = proc.stdout.strip()
-        except subprocess.CalledProcessError:
-            win_profile = None
-        vms_root = os.path.join(linux_home, "VirtualBox VMs")
-        return {
-            "is_wsl": True,
-            "linux_home": linux_home,
-            "win_profile": win_profile,
-            "downloads": os.path.join(linux_home, "Downloads"),
-            "vms_root": vms_root,
-            "vm_base": os.path.join(vms_root, VM_NAME),
-        }
-    vms_root = os.path.join(linux_home, "VirtualBox VMs")
-    return {
-        "is_wsl": False,
-        "linux_home": linux_home,
-        "win_profile": None,
-        "downloads": os.path.join(linux_home, "Downloads"),
-        "vms_root": vms_root,
-        "vm_base": os.path.join(vms_root, VM_NAME),
-    }
 
 
-def find_vboxmanage(paths: dict) -> str:
-    if paths["is_wsl"]:
-        windows_path = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
-        if os.path.exists(windows_path):
-            return windows_path
-        return shutil.which("VBoxManage.exe") or shutil.which("VBoxManage") or ""
-    return shutil.which("VBoxManage") or shutil.which("VBoxManage.exe") or ""
 
-
-def get_half_cpus() -> int:
-    total = os.cpu_count() or 2
-    return max(1, total // 2)
-
-
-def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
-    print(f"Executing: {vboxmanage} {' '.join(args)}")
-    subprocess.run([vboxmanage] + args, check=True, **kwargs)
-
-
-def resolve_vbox_settings_path(vm_dir: str, vm_name: str) -> str | None:
-    """
-    Return path to an existing ``.vbox`` file for this VM.
-
-    VirtualBox expects ``<vms_root>/<vm_name>/<vm_name>.vbox``. Older buggy runs of this script
-    used ``--basefolder`` pointing at ``.../<vm_name>``, which created an extra nested folder.
-    """
-    flat = os.path.join(vm_dir, f"{vm_name}.vbox")
-    if os.path.isfile(flat):
-        return flat
-    nested = os.path.join(vm_dir, vm_name, f"{vm_name}.vbox")
-    if os.path.isfile(nested):
-        return nested
-    try:
-        for p in Path(vm_dir).rglob(f"{vm_name}.vbox"):
-            if p.is_file():
-                return str(p)
-    except OSError:
-        pass
-    return None
-
-
-def vbox_closemedium_disk_delete_best_effort(
-    vboxmanage: str,
-    medium_path: str,
-) -> None:
-    """
-    Remove a disk from VirtualBox's media registry and delete the file if present.
-
-    Needed when a previous run deleted files on disk but left a stale UUID in
-    ``VirtualBox.xml`` (UUID mismatch on ``startvm`` / ``storageattach``).
-    """
-    r = subprocess.run(
-        [vboxmanage, "closemedium", "disk", medium_path, "--delete"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        combined = ((r.stderr or "") + (r.stdout or "")).lower()
-        if (
-            "vbox_e_object_not_found" in combined
-            or "could not find" in combined
-            or "does not exist" in combined
-        ):
-            return
-
-
-def try_unregistervm_delete(
-    vboxmanage: str,
-    vm_name: str,
-    *,
-    max_wait_s: int = 120,
-    poll_s: float = 3.0,
-) -> bool:
-    """``unregistervm --delete``, retrying while the session reports the VM as locked."""
-    deadline = time.monotonic() + max_wait_s
-    warned = False
-    while time.monotonic() < deadline:
-        ur = subprocess.run(
-            [vboxmanage, "unregistervm", vm_name, "--delete"],
-            capture_output=True,
-            text=True,
-        )
-        if ur.returncode == 0:
-            return True
-        err = ((ur.stderr or "") + (ur.stdout or "")).lower()
-        if "locked" in err or "invalid_object_state" in err or "0x80bb0007" in err:
-            if not warned:
-                print(
-                    "Waiting for VirtualBox to release the VM lock "
-                    "(close the guest window or Manager details tab if open)…"
-                )
-                warned = True
-            time.sleep(poll_s)
-            continue
-        msg = (ur.stderr or ur.stdout or "").strip()
-        if msg:
-            print(f"[!] unregistervm --delete: {msg}")
-        return False
-    print(
-        f"[!] Timed out after {max_wait_s}s; VM {vm_name!r} is still locked. "
-        "Close VirtualBox UI for that VM, then re-run this script."
-    )
-    return False
 
 
 def remove_existing_client_vm(
@@ -316,28 +189,6 @@ def remove_existing_client_vm(
         print(f"Removing leftover VM directory {vm_base!r}…")
         shutil.rmtree(vm_base, ignore_errors=True)
 
-
-def vm_is_registered(vboxmanage: str, vm_name: str) -> bool:
-    out = subprocess.run(
-        [vboxmanage, "list", "vms"], capture_output=True, text=True, check=True
-    ).stdout
-    return f'"{vm_name}"' in out
-
-
-def get_vm_state(vboxmanage: str, vm_name: str) -> str | None:
-    if not vm_is_registered(vboxmanage, vm_name):
-        return None
-    r = subprocess.run(
-        [vboxmanage, "showvminfo", vm_name, "--machinereadable"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        return None
-    for line in r.stdout.splitlines():
-        if line.startswith("VMState="):
-            return line.split("=", 1)[1].strip().strip('"')
-    return None
 
 
 def prime_client_vdi_for_intnet_lab(
@@ -457,7 +308,7 @@ def setup_client_vm(
     start_vm: bool = True,
     skip_vdi_prime: bool = False,
 ) -> None:
-    paths = get_system_paths()
+    paths = get_system_paths(VM_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
         raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")

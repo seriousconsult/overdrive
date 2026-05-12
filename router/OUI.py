@@ -17,6 +17,15 @@ import subprocess
 import time
 from typing import Any
 
+from common.common_router import (
+    default_ipv4_gateway,
+    normalize_oui,
+    try_ip_neigh,
+    mac_from_proc_net_arp,
+    ping_first,
+    resolve_mac,
+)
+
 DEFAULT_OUI_MAP: dict[str, str] = {
     "C0:56:27": "NETGEAR",
     "14:CC:20": "TP-LINK",
@@ -36,112 +45,6 @@ ROUTER_LIKELY_VENDOR_SUBSTR = (
     "Sagemcom",
     "Cisco",
 )
-
-
-def default_ipv4_gateway() -> str | None:
-    try:
-        out = subprocess.run(
-            ["ip", "-4", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout:
-            m = re.search(r"default\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", out.stdout)
-            if m:
-                return m.group(1)
-    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return None
-
-
-def normalize_oui(mac: str) -> str:
-    mac = mac.strip().upper()
-    mac = mac.replace("-", ":")
-    parts = mac.split(":")
-    if len(parts) < 3:
-        raise ValueError(f"Bad MAC format: {mac!r}")
-    return f"{parts[0]}:{parts[1]}:{parts[2]}"
-
-
-def try_ip_neigh(ip: str, iface: str | None = None) -> str | None:
-    try:
-        cmd = ["ip", "neigh", "show", "to", ip]
-        if iface:
-            cmd.extend(["dev", iface])
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        out = (proc.stdout or "").strip()
-        if not out:
-            return None
-
-        m = re.search(r"lladdr\s+([0-9a-fA-F:]{17})", out)
-        if m:
-            return m.group(1).lower()
-        m2 = re.search(r"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", out)
-        if m2:
-            return out[m2.start() : m2.end()].lower()
-        return None
-    except Exception:
-        return None
-
-
-def mac_from_proc_net_arp(ip: str) -> str | None:
-    """Linux neighbor table as seen by the kernel (no extra packages)."""
-    try:
-        with open("/proc/net/arp", encoding="utf-8", errors="ignore") as f:
-            f.readline()  # header
-            for line in f:
-                cols = line.split()
-                if len(cols) < 4:
-                    continue
-                row_ip, _hwtype, flags, hw_addr = cols[0], cols[1], cols[2], cols[3]
-                if row_ip != ip:
-                    continue
-                if flags == "0x0":
-                    continue
-                if hw_addr == "00:00:00:00:00:00":
-                    continue
-                if re.fullmatch(r"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", hw_addr, re.I):
-                    return hw_addr.lower()
-    except OSError:
-        pass
-    return None
-
-
-def ping_first(ip: str, iface: str | None, count: int, timeout_s: int) -> None:
-    cmd = ["ping", "-c", str(count), "-W", str(timeout_s), ip]
-    if iface:
-        cmd = ["ping", "-I", iface, "-c", str(count), "-W", str(timeout_s), ip]
-    subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-
-def resolve_mac(ip: str, iface: str | None, retries: int, ping_first_user: bool) -> tuple[str | None, list[str]]:
-    """
-    Try ip neigh + /proc/net/arp; optionally ping to populate the neighbor cache between attempts.
-    Returns (mac or None, error strings for diagnostics).
-    """
-    errs: list[str] = []
-    n = max(1, retries)
-    for attempt in range(n):
-        if ping_first_user and attempt == 0:
-            ping_first(ip, iface, 1, 1)
-
-        mac = try_ip_neigh(ip, iface) or mac_from_proc_net_arp(ip)
-        if mac:
-            return mac, errs
-
-        if attempt < n - 1:
-            ping_first(ip, iface, 1, 1)
-            time.sleep(0.3)
-        else:
-            errs.append("No MAC from ip neigh or /proc/net/arp after probes.")
-
-    return None, errs
 
 
 def vendor_to_score(vendor: str | None, mac_found: bool) -> tuple[int, str]:

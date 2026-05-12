@@ -18,15 +18,9 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
+from common.common_vpn import run
 
-
-def run(cmd: list[str]) -> str:
-    try:
-        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return ""
 
 def _is_tunnelish_iface(name: str) -> bool:
     n = (name or "").lower()

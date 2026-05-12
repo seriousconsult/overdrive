@@ -9,6 +9,15 @@ import requests
 import shutil
 import platform 
 import getpass
+import sys
+
+# Ensure sibling common/ package is importable when running this script from VM/
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from common.common_vm import get_active_bridged_interface, get_half_cpus, get_system_paths
 
 # --- 1. Global Variables (Define these first!) ---
 VM_NAME = "Network_Test"
@@ -16,62 +25,9 @@ VBOX = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
 OSBOXES_URL = "https://downloads.sourceforge.net/project/osboxes/v/vb/59-U-u-svr/24.10/64bit.7z"
 
 # --- 2. Dynamic Detection Functions ---
-def get_system_paths():
-    """Returns a dictionary of paths adjusted for WSL or Native Linux."""
-    # Check if we are in WSL
-    is_wsl = "microsoft-standard" in platform.release().lower()
-    
-    if is_wsl:
-        # Use USERPROFILE to find the real folder regardless of username
-        proc = subprocess.run(["cmd.exe", "/c", "echo %USERPROFILE%"], 
-                              capture_output=True, text=True)
-        win_profile = proc.stdout.strip()
-        
-        # Convert 'C:\Users\serio' to '/mnt/c/Users/serio'
-        wsl_user_path = win_profile.replace('C:', '/mnt/c').replace('\\', '/')
-        
-        return {
-            "base_path": wsl_user_path,
-            "is_wsl": True,
-            "win_user": win_profile.split('\\')[-1]
-        }
-    else:
-        return {
-            "base_path": os.path.expanduser("~"),
-            "is_wsl": False,
-            "win_user": getpass.getuser()
-        }
-
-
-def get_active_bridged_interface(vbox_path):
-    try:
-        res = subprocess.run([vbox_path, "list", "-l", "bridgedifs"], 
-                             capture_output=True, text=True, check=True)
-        adapters = res.stdout.strip().split('\n\n')
-        parsed_adapters = []
-        for block in adapters:
-            details = {}
-            for line in block.splitlines():
-                if ":" in line:
-                    key, val = line.split(":", 1)
-                    details[key.strip()] = val.strip()
-            if details: parsed_adapters.append(details)
-
-        for adapter in parsed_adapters:
-            if adapter.get("Status") == "Up":
-                return adapter.get("Name")
-        if parsed_adapters: return parsed_adapters[0].get("Name")
-    except: pass
-    return "Ethernet"
-
-
-def get_half_cpus():
-    total_cpus = os.cpu_count() or 2
-    return max(1, total_cpus // 2)
-
 
 # --- 3. Final Path Resolution ---
-paths = get_system_paths()
+paths = get_system_paths(VM_NAME)
 win_user = paths["win_user"]
 base = paths["base_path"]
 

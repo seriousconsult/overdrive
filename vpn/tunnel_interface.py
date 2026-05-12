@@ -16,8 +16,8 @@ Exit code: **0** always after analysis completes.
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
+from common.common_vpn import run
 
 
 TUNNEL_PATTERNS = [
@@ -33,13 +33,6 @@ TUNNEL_PATTERNS = [
     r"^zt",
     r"^as0t",
 ]
-
-
-def run(cmd: list[str]) -> str:
-    try:
-        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return ""
 
 
 def get_interfaces() -> list[str]:

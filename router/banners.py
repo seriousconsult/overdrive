@@ -21,6 +21,8 @@ import urllib3
 from typing import Any
 import requests
 
+from common.common_router import default_ipv4_gateway, _extract_realm
+
 # --- Header: Server (substring match, lowercase) ---
 # SOHO CPE vendors, firmware names, and tiny HTTP stacks common on routers.
 ROUTER_SERVER_KEYWORDS = [
@@ -313,34 +315,6 @@ DEFAULT_BANNER_PATHS: tuple[str, ...] = (
     "/net/",
     "/wizard",
 )
-
-
-def default_ipv4_gateway() -> str | None:
-    try:
-        out = subprocess.run(
-            ["ip", "-4", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout:
-            m = re.search(r"default\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", out.stdout)
-            if m:
-                return m.group(1)
-    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return None
-
-
-def _extract_realm(www_auth: str) -> str:
-    """Pull realm=\"...\" or realm='...' from WWW-Authenticate."""
-    m = re.search(r'realm\s*=\s*"([^"]*)"', www_auth, re.I)
-    if m:
-        return m.group(1)
-    m = re.search(r"realm\s*=\s*'([^']*)'", www_auth, re.I)
-    if m:
-        return m.group(1)
-    return www_auth[:200]
 
 
 def score_server_banner(server_value: str | None) -> tuple[int, list[str]]:

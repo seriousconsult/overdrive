@@ -24,14 +24,28 @@ Local system evidence (not strictly from traffic, but for internal self-awarenes
 """
 
 import argparse
+import sys
 import time
 import os
 import re
 import socket
 import subprocess
 from collections import Counter
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import requests
 from scapy.all import AsyncSniffer, Ether, IP, TCP  # type: ignore
+
+from common.common_local import (
+    is_wsl_local,
+    mac_to_oui,
+    path_exists,
+    read_text_file,
+)
 
 
 # Common virtualization OUIs (heuristic; expand as needed).
@@ -71,16 +85,6 @@ OUI_VENDOR_MAP = {k: v for k, v in OUI_VENDOR_MAP.items()
                   if isinstance(k, str) and re.fullmatch(r"[0-9a-fA-F]{6}", k)}
 
 
-def mac_to_oui(mac: str) -> str:
-    if not mac:
-        return ""
-    mac = mac.lower().replace("-", ":")
-    parts = mac.split(":")
-    if len(parts) < 3:
-        return ""
-    return (parts[0] + parts[1] + parts[2]).lower()
-
-
 def oui_to_vendor(oui: str):
     if not oui or len(oui) != 6:
         return None
@@ -105,36 +109,21 @@ def get_local_iface_mac(iface: str) -> str:
     return ""
 
 
-def file_exists(path: str) -> bool:
-    try:
-        return os.path.exists(path)
-    except Exception:
-        return False
-
-
-def read_text(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except Exception:
-        return ""
-
-
 def container_evidence():
     evid = []
 
-    if file_exists("/.dockerenv"):
+    if path_exists("/.dockerenv"):
         evid.append("/.dockerenv exists")
 
-    cgroup = read_text("/proc/1/cgroup").lower()
+    cgroup = read_text_file("/proc/1/cgroup").lower()
     if any(x in cgroup for x in ["docker", "kubepods", "containerd", "cri-o", "podman", "lxc"]):
         evid.append("/proc/1/cgroup contains container runtime hints")
 
     for p in ["/run/.containerenv", "/run/containerd", "/var/run/docker.sock"]:
-        if file_exists(p):
+        if path_exists(p):
             evid.append(f"{p} exists")
 
-    ns = read_text("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+    ns = read_text_file("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
     if ns.strip():
         evid.append("Kubernetes serviceaccount namespace present")
 
@@ -144,19 +133,19 @@ def container_evidence():
 def vm_evidence():
     evid = []
 
-    cpuinfo = read_text("/proc/cpuinfo").lower()
+    cpuinfo = read_text_file("/proc/cpuinfo").lower()
     if "hypervisor" in cpuinfo:
         evid.append("CPU flags include 'hypervisor'")
 
-    product = read_text("/sys/class/dmi/id/product_name").lower()
-    board = read_text("/sys/class/dmi/id/board_name").lower()
-    sys_vendor = read_text("/sys/class/dmi/id/sys_vendor").lower()
+    product = read_text_file("/sys/class/dmi/id/product_name").lower()
+    board = read_text_file("/sys/class/dmi/id/board_name").lower()
+    sys_vendor = read_text_file("/sys/class/dmi/id/sys_vendor").lower()
     dmi_blob = " ".join([product, board, sys_vendor]).strip()
 
     if any(x in dmi_blob for x in ["vmware", "virtualbox", "kvm", "qemu", "hyper-v", "xen", "parallels", "bhyve"]):
         evid.append(f"DMI product/board/vendor mentions virtualization: {dmi_blob[:120]}")
 
-    if file_exists("/sys/hypervisor/type"):
+    if path_exists("/sys/hypervisor/type"):
         evid.append("/sys/hypervisor/type exists")
 
     return evid
@@ -183,10 +172,10 @@ def check_wsl_networking_mode():
     }
 
     # 1. Verify we are actually in WSL
-    if not os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+    if not is_wsl_local():
         results["details"] = "Not running inside a WSL environment."
         return results
-    
+
     results["is_wsl"] = True
 
     # 2. Try the modern 'wslinfo' tool (Official method)

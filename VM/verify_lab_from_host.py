@@ -20,54 +20,57 @@ import shutil
 import subprocess
 import sys
 
+# Ensure sibling common/ package is importable when running this script from VM/
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from common.common_vm import (
+    get_system_paths,
+    is_wsl_environment as is_wsl,
+    find_vboxmanage,
+    vm_is_registered as vm_registered,
+    get_vm_state as vm_state,
+)
+
 # Must match create_VM_OpenWrt_router.py / create_VM_client_browser.py
 ROUTER_VM = "OpenWrt_2026_Router"
 CLIENT_VM = "OpenWrt_LAN_Client"
 LAN_INTNET_NAME = "openwrt-lan"
 
 
-def is_wsl() -> bool:
-    return "microsoft" in platform.release().lower() or os.path.exists(
-        "/proc/sys/fs/binfmt_misc/WSLInterop"
-    )
+def check_advanced_nic(info: dict[str, str], vm_name: str) -> list[str]:
+    """Checks for Promiscuous mode and Adapter Type."""
+    errs = []
+    # Check NIC 1 (usually the LAN in your setup)
+    promisc = info.get("promisc1", "deny")
+    adapter_type = info.get("nictype1", "")
+    
+    if promisc == "deny":
+        # Warning only, as it might work without it, but allow-vms is safer for bridges
+        print(f"  [!] {vm_name} NIC1 Promiscuous mode is 'deny'. If bridge fails, set to 'allow-vms'.")
+    
+    if "virtio" not in adapter_type.lower():
+        print(f"  [i] {vm_name} NIC1 uses {adapter_type}. VirtIO is recommended for OpenWrt performance.")
+    
+    return errs
 
 
-def find_vboxmanage() -> str | None:
-    if is_wsl():
-        win_vbox = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
-        if os.path.isfile(win_vbox):
-            return win_vbox
-        return shutil.which("VBoxManage.exe") or shutil.which("VBoxManage")
-    return shutil.which("VBoxManage") or shutil.which("VBoxManage.exe")
-
-
-def vm_registered(vboxmanage: str, name: str) -> bool:
-    r = subprocess.run(
-        [vboxmanage, "list", "vms"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        return False
-    return f'"{name}"' in r.stdout
-
-
-def vm_state(vboxmanage: str, name: str) -> str | None:
-    if not vm_registered(vboxmanage, name):
-        return None
-    r = subprocess.run(
-        [vboxmanage, "showvminfo", name, "--machinereadable"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        return None
-    for line in r.stdout.splitlines():
-        if line.startswith("VMState="):
-            return line.split("=", 1)[1].strip().strip('"')
-    return None
+def check_mac_collisions(vbox: str, vms: list[str]) -> list[str]:
+    """Ensures router and client don't have the same virtual hardware ID."""
+    macs = {}
+    errs = []
+    for vm in vms:
+        info = parse_machinereadable(vbox, vm)
+        # Check NIC 1 and 2
+        for i in ["1", "2"]:
+            mac = info.get(f"macaddress{i}")
+            if mac:
+                if mac in macs:
+                    errs.append(f"MAC Collision: {vm} and {macs[mac]} both use MAC {mac}")
+                macs[mac] = vm
+    return errs
 
 
 def parse_machinereadable(vboxmanage: str, name: str) -> dict[str, str]:
@@ -132,6 +135,67 @@ def check_client(info: dict[str, str], verbose: bool) -> list[str]:
     return errs
 
 
+def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
+    """
+    Performs a deep-dive verification of the Router and Client networking.
+    This is the 'stronger' loop that checks for physical-link issues.
+    """
+    all_errs = []
+    target_vms = [
+        (ROUTER_VM, "router"),
+        (CLIENT_VM, "client")
+    ]
+    
+    # Track MACs to find hidden collisions
+    seen_macs: dict[str, str] = {}
+
+    for vm, label in target_vms:
+        if not vm_registered(vbox, vm):
+            all_errs.append(f"VM {vm!r} is not registered.")
+            print(f"[ ] {vm}: NOT FOUND")
+            continue
+
+        st = vm_state(vbox, vm)
+        print(f"[{'+' if st == 'running' else '·'}] {vm}: state={st!r}")
+
+        info = parse_machinereadable(vbox, vm)
+        if not info:
+            all_errs.append(f"Could not read metadata for {vm}.")
+            continue
+
+        # 1. Physical Link Check (The 'Cable Connected' toggle)
+        # VirtualBox uses 'cableconnected1', 'cableconnected2', etc.
+        for i in range(1, 3):
+            nic_mode = info.get(f"nic{i}")
+            if nic_mode and nic_mode != "none":
+                if info.get(f"cableconnected{i}") == "off":
+                    all_errs.append(f"{vm}: NIC{i} ({nic_mode}) cable is UNPLUGGED in VirtualBox settings.")
+
+        # 2. MAC Address Collision Check
+        for i in range(1, 3):
+            mac = info.get(f"macaddress{i}")
+            if mac:
+                if mac in seen_macs:
+                    all_errs.append(f"CRITICAL: MAC Collision! {vm} and {seen_macs[mac]} both use {mac}.")
+                seen_macs[mac] = vm
+
+        # 3. OpenWrt Bridge Compatibility (Promiscuous Mode)
+        # OpenWrt needs to 'see' traffic for other MACs (like clients) on its LAN port
+        if vm == ROUTER_VM:
+            # Assuming NIC1 is your LAN/Internal Network based on earlier logs
+            promisc = info.get("promisc1", "deny")
+            if promisc == "deny":
+                print(f"  [!] Warning: {vm} LAN is 'deny' promisc. OpenWrt bridges often need 'allow-vms'.")
+
+        # 4. Standard Topology Check (Calls your existing logic)
+        if vm == ROUTER_VM:
+            all_errs.extend(check_router(info, verbose))
+        else:
+            all_errs.extend(check_client(info, verbose))
+
+    return all_errs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Verify OpenWrt lab VM networking from the host (VBoxManage only).",
@@ -140,60 +204,47 @@ def main() -> int:
         "-v",
         "--verbose",
         action="store_true",
-        help="Print parsed NIC fields and VM power state.",
+        help="Print detailed NIC metadata, MAC addresses, and promiscuous modes.",
     )
     ns = ap.parse_args()
 
-    vbox = find_vboxmanage()
+    # 1. Locate the VBoxManage executable
+    paths = get_system_paths(ROUTER_VM)
+    vbox = find_vboxmanage(paths)
     if not vbox:
         print(
-            "[!] VBoxManage not found. Install VirtualBox or use WSL with "
-            "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe",
+            "[!] VBoxManage not found. Ensure VirtualBox is installed.\n"
+            "    If using WSL, ensure it is at: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe",
             file=sys.stderr,
         )
         return 2
 
-    print(f"Using: {vbox}")
-    print(
-        "Note: this does not ping 192.168.1.1 from the host — intnet is guest-only.\n"
-    )
+    print(f"--- Laboratory Verification ---")
+    print(f"Using Hypervisor Tool: {vbox}")
+    print(f"Target LAN Segment:    {LAN_INTNET_NAME}\n")
 
-    all_errs: list[str] = []
+    # 2. Run the 'Stronger' Verification Loop
+    # This checks registration, power state, cables, MACs, and Promisc mode.
+    all_errs = verify_all_vms(vbox, ns.verbose)
 
-    for vm, label in (
-        (ROUTER_VM, "router"),
-        (CLIENT_VM, "client"),
-    ):
-        if not vm_registered(vbox, vm):
-            all_errs.append(f"VM {vm!r} is not registered (create it with the VM/*.py scripts).")
-            print(f"[ ] {vm}: not registered")
-            continue
-        st = vm_state(vbox, vm)
-        print(f"[{'+' if st == 'running' else '·'}] {vm}: state={st!r}")
-        info = parse_machinereadable(vbox, vm)
-        if not info:
-            all_errs.append(f"Could not read machinereadable info for {vm!r}.")
-            continue
-        if vm == ROUTER_VM:
-            all_errs.extend(check_router(info, ns.verbose))
-        else:
-            all_errs.extend(check_client(info, ns.verbose))
-
+    # 3. Handle Results
     if all_errs:
-        print("\nFAIL:")
+        print("\n[!] VERIFICATION FAILED:")
         for e in all_errs:
-            print(f"  - {e}")
-        print(
-            "\nFix: recreate VMs with VM/create_VM_OpenWrt_router.py and "
-            "VM/create_VM_client_browser.py, or adjust NICs in VirtualBox Manager "
-            f"to match LAB_TOPOLOGY.md (intnet name: {LAN_INTNET_NAME!r})."
-        )
+            print(f"    - {e}")
+        
+        print("\nPossible Solutions:")
+        print(f"  1. Run the 'create_VM_*.py' scripts to reset the NICs.")
+        print(f"  2. Open VirtualBox GUI -> Settings -> Network -> Advanced.")
+        print(f"     Ensure 'Cable Connected' is checked and 'Promiscuous Mode' is NOT 'Deny'.")
         return 1
 
-    print("\nOK: VirtualBox NIC wiring matches the documented lab topology.")
-    print("    Confirm DHCP and ping 192.168.1.1 **inside** the client guest.")
+    print("\n[+] SUCCESS: VirtualBox 'Layer 1' wiring is correct.")
+    print("    You can now proceed to test Layer 3 (DHCP/Ping) inside the guests.")
     return 0
 
 
 if __name__ == "__main__":
+    # SystemExit ensures the script returns the correct shell exit code (0 or 1)
+    # This is useful if you later want to chain this in a bash script (e.g., verify && run)
     raise SystemExit(main())

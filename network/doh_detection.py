@@ -8,6 +8,8 @@ Best-effort detection from local configuration (no packet capture):
   - Chrome / Edge: dns_over_https in Local State JSON
   - Linux: cloudflared config with HTTPS DNS upstream (common pattern)
 
+Shared IPv4 / DNSBL helpers for other network probes live in ``common.common_network``.
+
 Score (1–5), higher = stronger evidence of DoH / encrypted DNS in use:
   5 — Clear DoH configuration (OS DoH servers, Firefox TRR-only, Chrome secure, etc.)
   4 — Likely DoH (Firefox TRR race/prefers TRR, Chrome automatic, cloudflared DoH upstream)

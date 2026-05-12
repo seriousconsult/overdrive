@@ -13,10 +13,9 @@ Unified score (see compute_multi_location_score):
 '''
 
 
-import requests
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-DEFAULT_TIMEOUT = 8
+from common.common_browser import DEFAULT_TIMEOUT, fetch_json, normalize_ip_fields
 
 PROVIDERS = [
     {
@@ -32,69 +31,6 @@ PROVIDERS = [
          "url": "https://api.ipapi.is/json/",
     },
 ]
-
-
-def fetch_json(url: str, params: Optional[dict] = None, timeout: int = DEFAULT_TIMEOUT) -> Dict[str, Any]:
-    r = requests.get(url, params=params, timeout=timeout, headers={
-        "User-Agent": "geo-leak-check/1.0"
-    })
-    r.raise_for_status()
-    return r.json()
-
-
-def normalize_ip_fields(provider: str, raw: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize common fields across providers.
-    Missing fields are kept as None so we can compare easily.
-    """
-    # ipapi.is returns asn as an object, country as 2-letter code
-    asn_raw = raw.get("asn")
-    asn_val = None
-    org_from_asn = None
-    if isinstance(asn_raw, dict):
-        asn_val = asn_raw.get("asn")
-        org_from_asn = asn_raw.get("org")
-    
-    # ipapi.is specific field mapping - data is nested under location/company
-    if provider == "ipapi.is":
-        loc = raw.get("location", {})
-        comp = raw.get("company", {})
-        cc = loc.get("country")
-        if isinstance(cc, str):
-            cc = cc.strip().upper() if len(cc) == 2 else None
-        out = {
-            "provider": provider,
-            "ip": raw.get("ip"),
-            "city": loc.get("city"),
-            "region": loc.get("state"),
-            "country": loc.get("country"),
-            "country_code": cc,
-            "timezone": loc.get("timezone"),
-            "lat": loc.get("latitude"),
-            "lon": loc.get("longitude"),
-            "asn": asn_val,
-            "org": comp.get("name") or org_from_asn,
-        }
-    else:
-        cc_raw = raw.get("country_code") or raw.get("countryCode")
-        cc = None
-        if isinstance(cc_raw, str) and len(cc_raw.strip()) == 2:
-            cc = cc_raw.strip().upper()
-        cname = raw.get("country_name") or raw.get("country")
-        out = {
-            "provider": provider,
-            "ip": raw.get("ip") or raw.get("query"),
-            "city": raw.get("city") or raw.get("cityName"),
-            "country": cname,
-            "country_code": cc,
-            "region": raw.get("region") or raw.get("regionName"),
-            "timezone": raw.get("timezone"),
-            "lat": raw.get("latitude") or raw.get("lat"),
-            "lon": raw.get("longitude") or raw.get("lon"),
-            "asn": asn_val or raw.get("as"),
-            "org": raw.get("org") or raw.get("isp") or org_from_asn,
-        }
-    return out
 
 
 def compute_multi_location_score(results: List[Dict[str, Any]]) -> tuple[int, str]:

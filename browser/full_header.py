@@ -34,10 +34,11 @@ from urllib.parse import urlparse
 
 # Selenium (same pattern as WebRTC.py)
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+
+from common.common_browser import build_driver
 
 ECHO_URLS = (
     "https://httpbin.org/get",
@@ -87,19 +88,6 @@ UA_CHROME = re.compile(r"Chrome/(\d+)(?:\.\d+)*", re.I)
 UA_EDG = re.compile(r"Edg/(\d+)(?:\.\d+)*", re.I)
 # Semicolon-delimited "Brand";v="NN" pieces inside Sec-CH-UA
 CH_any_ver = re.compile(r';v="(\d+)"')
-
-
-def build_driver() -> webdriver.Chrome:
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1280,800")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    return webdriver.Chrome(options=opts)
 
 
 def _norm_headers(raw: dict[str, str]) -> dict[str, str]:

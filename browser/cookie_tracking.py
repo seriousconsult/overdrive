@@ -18,8 +18,10 @@ TODO: Implement actual cookie tracking detection
 
 """
 
-import subprocess
-import json
+from common.common_browser import (
+    print_browser_detection_header,
+    print_browser_detection_score_footer,
+)
 
 
 def check_cookie_tracking() -> tuple[int, str]:
@@ -39,16 +41,9 @@ def check_cookie_tracking() -> tuple[int, str]:
 
 
 def main():
-    print("============================================================")
-    print("Cookie Tracking Detection")
-    print("============================================================\n")
-    
+    print_browser_detection_header("Cookie Tracking Detection")
     score, description = check_cookie_tracking()
-    
-    print(f"Score: {score}")
-    print(f"  {description}")
-    
-    print("\n============================================================")
+    print_browser_detection_score_footer(score, description)
 
 
 if __name__ == "__main__":

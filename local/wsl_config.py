@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import subprocess
 import sys
-import argparse
-import socket
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from common.common_local import windows_userprofile_as_wsl_path
 
 '''
 WSL2 operates as a lightweight Virtual Machine (VM) that, by default, uses a NAT-based network topology. This creates an isolation layer
@@ -17,7 +23,7 @@ To switch to Mirrored Mode (for Recon/mDNS):
 python3 this_script.py --enable
 
 To switch back to standard NAT:
-python3 python3 this_script.py --disable
+python3 this_script.py --disable
 '''
 
 
@@ -26,7 +32,7 @@ def get_current_mode():
     try:
         out = subprocess.check_output(
             ["ip", "-o", "-4", "addr", "show", "scope", "global"],
-            text=True
+            text=True,
         )
 
         ips = set()
@@ -54,53 +60,14 @@ def get_current_mode():
         return f"ERROR ({str(e)})"
 
 
-    """Detects mode using Python's native socket library."""
-    try:
-        # Get the hostname of the machine
-        host_name = socket.gethostname()
-        # Get all IP addresses associated with this host
-        ips = socket.gethostbyname_ex(host_name)[2]
-        
-        if not ips:
-            return "UNKNOWN (No IP found)"
-
-        # Check for the 'tell-tale' NAT range
-        for ip in ips:
-            if ip.startswith("172."):
-                return "NAT"
-            if ip.startswith("192.168.1."):
-                return "MIRRORED"
-        
-        return f"UNKNOWN ({ips[0]})"
-    except Exception as e:
-        return f"ERROR ({str(e)})"
-    
-
-def get_windows_user():
-    try:
-        # This gets the full Windows path (e.g., C:\Users\Wo)
-        win_path = subprocess.check_output(["cmd.exe", "/c", "echo %USERPROFILE%"], 
-                                          stderr=subprocess.DEVNULL).decode().strip()
-        
-        # Convert "C:\Users\Name" to "/mnt/c/Users/Name"
-        if win_path and ":" in win_path:
-            parts = win_path.split(":")
-            drive = parts[0].lower() # 'c'
-            path = parts[1].replace("\\", "/") # '/Users/Wo'
-            return f"/mnt/{drive}{path}"
-        return None
-    except:
-        return None
-
 def manage_wsl_mode(enable_mirrored=True):
-    # This now returns the full /mnt/c/Users/Whatever path
-    config_dir = get_windows_user()
+    config_dir = windows_userprofile_as_wsl_path()
     if not config_dir:
         print("[-] Error: Could not identify Windows user profile path.")
         return
 
     config_path = os.path.join(config_dir, ".wslconfig")
-    
+
     # Configuration blocks
     if enable_mirrored:
         content = ["[wsl2]\n", "networkingMode=mirrored\n", "dnsTunneling=true\n", "firewall=true\n"]
@@ -110,15 +77,16 @@ def manage_wsl_mode(enable_mirrored=True):
         mode_label = "NAT"
 
     try:
-        with open(config_path, 'w') as f:
+        with open(config_path, "w") as f:
             f.writelines(content)
         print(f"[+] Successfully updated .wslconfig to {mode_label}.")
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("ACTION REQUIRED: You must restart WSL for changes to take effect.")
         print("Run 'wsl --shutdown' in PowerShell, then restart your terminal.")
-        print("="*50)
+        print("=" * 50)
     except Exception as e:
         print(f"[-] Failed to write config: {e}")
+
 
 if __name__ == "__main__":
     # Check if user provided NO arguments
@@ -132,8 +100,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Toggle WSL2 Networking Mode.")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--enable', action='store_true')
-    group.add_argument('--disable', action='store_true')
-    
+    group.add_argument("--enable", action="store_true")
+    group.add_argument("--disable", action="store_true")
+
     args = parser.parse_args()
     manage_wsl_mode(enable_mirrored=args.enable)

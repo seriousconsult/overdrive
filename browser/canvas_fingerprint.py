@@ -20,8 +20,10 @@ TODO: Implement actual canvas fingerprint detection
 
 """
 
-import subprocess
-import json
+from common.common_browser import (
+    print_browser_detection_header,
+    print_browser_detection_score_footer,
+)
 
 
 def check_canvas_fingerprint() -> tuple[int, str]:
@@ -41,16 +43,9 @@ def check_canvas_fingerprint() -> tuple[int, str]:
 
 
 def main():
-    print("============================================================")
-    print("Canvas Fingerprint Detection")
-    print("============================================================\n")
-    
+    print_browser_detection_header("Canvas Fingerprint Detection")
     score, description = check_canvas_fingerprint()
-    
-    print(f"Score: {score}")
-    print(f"  {description}")
-    
-    print("\n============================================================")
+    print_browser_detection_score_footer(score, description)
 
 
 if __name__ == "__main__":
