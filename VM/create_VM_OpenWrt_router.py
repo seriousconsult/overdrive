@@ -12,9 +12,9 @@ At startup, any **existing VirtualBox VM with the same name** and the matching f
 leftover directory) so the script always builds the same thing from a clean slate.
 """
 
+import argparse
 import gzip
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -29,10 +29,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from common.common_vm import (
-    is_wsl_environment,
     wsl_to_windows_path,
     get_system_paths,
     find_vboxmanage,
+    get_linux_distro_id,
+    get_vboxmanage_install_hint,
     get_active_bridged_interface,
     run_vboxmanage,
     resolve_vbox_settings_path,
@@ -137,11 +138,18 @@ def remove_existing_router_vm(
         shutil.rmtree(vm_base, ignore_errors=True)
 
 
-def setup_openwrt_vm() -> None:
+def setup_openwrt_vm(start_type: str = "gui") -> None:
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
-        raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
+        raise RuntimeError(get_vboxmanage_install_hint())
+
+    distro_id = get_linux_distro_id()
+    if distro_id == "fedora":
+        print(
+            "Detected Fedora host. Using native Linux VirtualBox paths; if startvm fails, "
+            "check that the VirtualBox kernel modules are built for the running kernel."
+        )
 
     img_path = paths["img_path"]
     vm_base = paths["vm_base"]
@@ -235,9 +243,30 @@ def setup_openwrt_vm() -> None:
     run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
     run_vboxmanage(vboxmanage, ["storageattach", VM_NAME, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", dst_path])
 
-    print("Starting VM...")
-    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+    if start_type == "none":
+        print("VM configured. Skipping start because --start-type none was selected.")
+        return
+
+    print(f"Starting VM ({start_type})...")
+    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Create / refresh an OpenWrt router VM in VirtualBox.",
+    )
+    parser.add_argument(
+        "--start-type",
+        choices=("gui", "headless", "separate", "none"),
+        default="gui",
+        help=(
+            "How to start the VM after creation. Fedora servers or SSH sessions "
+            "usually want 'headless' or 'none'. Default: gui."
+        ),
+    )
+    args = parser.parse_args()
+    setup_openwrt_vm(start_type=args.start_type)
 
 
 if __name__ == "__main__":
-    setup_openwrt_vm()
+    main()

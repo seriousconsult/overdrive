@@ -90,6 +90,11 @@ def public_ipv4(timeout: int = DEFAULT_TIMEOUT) -> str | None:
     return str(ip).strip()
 
 
+def get_public_ipv4(timeout: int = DEFAULT_TIMEOUT) -> str | None:
+    """Backward-compatible alias for scripts that used the older helper name."""
+    return public_ipv4(timeout=timeout)
+
+
 def public_ipv6(timeout: int = DEFAULT_TIMEOUT) -> str | None:
     data = fetch_json(IPV6_URL, timeout=timeout, headers=DEFAULT_UA)
     if not data:

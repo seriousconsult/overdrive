@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 import requests
+from requests.exceptions import RequestException
 
 # Ensure sibling common/ package is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -67,14 +68,38 @@ LAN_INTNET_NAME = "openwrt-lan"
 VM_NAME = "OpenWrt_LAN_Client"
 CLIENT_VDI_NAME = "client_browser.vdi"
 
-# Ubuntu 24.10 **Server** from OSBoxes (no GUI until you install one in the guest).
+# Ubuntu 24.04 **Server** from OSBoxes (no GUI until you install one in the guest).
 OSBOXES_URL = (
-    "https://downloads.sourceforge.net/project/osboxes/v/vb/59-U-u-svr/24.10/64bit.7z"
+    "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
 )
-ARCHIVE_NAME = "ubuntu_osboxes_2410.7z"
+ARCHIVE_NAME = "ubuntu_osboxes_2404.7z"
 # Default OSBoxes credentials (verify on the OSBoxes download page for this image).
 OSBOXES_LOGIN_USER = "osboxes"
 OSBOXES_LOGIN_PASSWORD_HINT = "osboxes.org"
+
+
+def download_osboxes_archive(url: str, archive_path: str) -> None:
+    """Download the OSBoxes archive with a useful error when the host has no route."""
+    print(f"Downloading OSBoxes archive to {archive_path}...")
+    try:
+        r = requests.get(url, stream=True, allow_redirects=True, timeout=120)
+        r.raise_for_status()
+    except RequestException as e:
+        raise RuntimeError(
+            "Could not download the OSBoxes archive.\n"
+            f"  URL: {url}\n"
+            f"  Destination: {archive_path}\n"
+            f"  Error: {e}\n\n"
+            "Your shell currently has no working outbound network route, or SourceForge is "
+            "not reachable from it. Download the archive from a machine/network that can "
+            "reach SourceForge, then rerun with:\n"
+            "  ./create_VM_client_browser.py --archive-path /path/to/ubuntu_osboxes_2404.7z"
+        ) from None
+
+    with open(archive_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
 
 # If VDI priming was skipped and the guest somehow has Internet, this still works:
 IN_GUEST_INSTALL_ISC_DHCP_CLIENT = "sudo apt install -y isc-dhcp-client"
@@ -307,6 +332,7 @@ def setup_client_vm(
     force_poweroff_for_vdi: bool = False,
     start_vm: bool = True,
     skip_vdi_prime: bool = False,
+    archive_override: str | None = None,
 ) -> None:
     paths = get_system_paths(VM_NAME)
     vboxmanage = find_vboxmanage(paths)
@@ -316,6 +342,17 @@ def setup_client_vm(
     vm_base = paths["vm_base"]
     vms_root = paths["vms_root"]
     download_dir = paths["downloads"]
+    os.makedirs(download_dir, exist_ok=True)
+
+    archive_path = archive_override or os.path.join(download_dir, ARCHIVE_NAME)
+    if archive_override:
+        archive_path = os.path.abspath(os.path.expanduser(archive_path))
+        if not os.path.isfile(archive_path):
+            raise RuntimeError(f"--archive-path does not exist or is not a file: {archive_path}")
+    elif not os.path.exists(archive_path):
+        download_osboxes_archive(OSBOXES_URL, archive_path)
+    else:
+        print(f"Using OSBoxes archive at {archive_path}")
 
     # Remove any stale client VM registration/files from prior runs before recreating.
     remove_existing_client_vm(
@@ -328,9 +365,7 @@ def setup_client_vm(
 
     os.makedirs(vm_base, exist_ok=True)
     os.makedirs(vms_root, exist_ok=True)
-    os.makedirs(download_dir, exist_ok=True)
 
-    archive_path = os.path.join(download_dir, ARCHIVE_NAME)
     extract_dir = os.path.join(download_dir, "temp_osboxes_client_extract")
     vdi_wsl = os.path.join(vm_base, CLIENT_VDI_NAME)
 
@@ -346,15 +381,6 @@ def setup_client_vm(
     if os.path.exists(vdi_wsl):
         print(f"VDI already exists at {vdi_wsl}; skipping download/extract.")
     else:
-        if not os.path.exists(archive_path):
-            print(f"Downloading OSBoxes archive to {archive_path}...")
-            r = requests.get(OSBOXES_URL, stream=True, allow_redirects=True, timeout=120)
-            r.raise_for_status()
-            with open(archive_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-
         print("Extracting VDI (requires p7zip: sudo apt install p7zip-full)...")
         if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir)
@@ -514,9 +540,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Do not inject DHCP/ping/dig/lab-net-troubleshoot via virt-customize (not recommended).",
     )
+    ap.add_argument(
+        "--archive-path",
+        help=(
+            "Use an already downloaded OSBoxes 24.04 7z archive instead of downloading "
+            f"{ARCHIVE_NAME} into ~/Downloads."
+        ),
+    )
     ns = ap.parse_args()
     setup_client_vm(
         force_poweroff_for_vdi=ns.force_poweroff_for_vdi,
         start_vm=not ns.no_start,
         skip_vdi_prime=ns.skip_vdi_prime,
+        archive_override=ns.archive_path,
     )

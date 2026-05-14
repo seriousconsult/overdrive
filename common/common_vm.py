@@ -12,9 +12,11 @@ from pathlib import Path
 
 __all__ = [
     "is_wsl_environment",
+    "get_linux_distro_id",
     "wsl_to_windows_path",
     "get_system_paths",
     "find_vboxmanage",
+    "get_vboxmanage_install_hint",
     "get_half_cpus",
     "run_vboxmanage",
     "resolve_vbox_settings_path",
@@ -31,6 +33,20 @@ def is_wsl_environment() -> bool:
     return "microsoft" in platform.release().lower() or os.path.exists(
         "/proc/sys/fs/binfmt_misc/WSLInterop"
     )
+
+
+def get_linux_distro_id() -> str | None:
+    """Return the lowercase /etc/os-release distro ID on native Linux hosts."""
+    if is_wsl_environment() or platform.system().lower() != "linux":
+        return None
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("ID="):
+                    return line.split("=", 1)[1].strip().strip('"').lower()
+    except OSError:
+        return None
+    return None
 
 
 def wsl_to_windows_path(path: str | Path) -> str:
@@ -87,12 +103,68 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
 
 def find_vboxmanage(paths: dict[str, str | bool | None]) -> str | None:
     """Return the best available VBoxManage executable path."""
+    env_path = os.environ.get("VBOXMANAGE")
+    if env_path and os.path.exists(env_path):
+        return env_path
     if paths.get("is_wsl"):
         windows_path = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
         if os.path.exists(windows_path):
             return windows_path
         return shutil.which("VBoxManage.exe") or shutil.which("VBoxManage")
-    return shutil.which("VBoxManage") or shutil.which("VBoxManage.exe")
+    for candidate in (
+        shutil.which("VBoxManage"),
+        shutil.which("vboxmanage"),
+        shutil.which("VBoxManage.exe"),
+        "/usr/bin/VBoxManage",
+        "/usr/lib/virtualbox/VBoxManage",
+        "/opt/VirtualBox/VBoxManage",
+    ):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def get_vboxmanage_install_hint() -> str:
+    """Return a host-specific hint for installing or exposing VBoxManage."""
+    if is_wsl_environment():
+        return (
+            "VBoxManage not found. Install VirtualBox on Windows or add it to PATH. "
+            "Expected Windows install path from WSL: "
+            "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
+        )
+
+    distro_id = get_linux_distro_id()
+    if distro_id == "fedora":
+        return (
+            "VBoxManage not found. On Fedora, install VirtualBox from RPM Fusion "
+            "(package: VirtualBox), rebuild/load the kernel modules if prompted, "
+            "then open a new shell so /usr/bin/VBoxManage is on PATH."
+        )
+    if distro_id in {"ubuntu", "debian", "linuxmint", "pop"}:
+        return (
+            "VBoxManage not found. On Ubuntu/Debian, install VirtualBox "
+            "(for example: sudo apt install virtualbox) or add VBoxManage to PATH."
+        )
+    return "VBoxManage not found. Install VirtualBox or add VBoxManage to PATH."
+
+
+def _vboxmanage_error_hint(output: str) -> str | None:
+    lower = output.lower()
+    distro_id = get_linux_distro_id()
+    if distro_id == "fedora" and (
+        "kernel driver not installed" in lower
+        or "vboxdrv" in lower
+        or "vboxnetflt" in lower
+    ):
+        return (
+            "Fedora hint: VirtualBox is installed, but its kernel modules appear "
+            "unavailable. Rebuild/load them for the running kernel (for RPM Fusion "
+            "installs this is usually handled by akmods after kernel-devel is present), "
+            "then retry."
+        )
+    if "permission denied" in lower:
+        return "Permission hint: run from a user allowed to manage VirtualBox VMs."
+    return None
 
 
 def get_half_cpus() -> int:
@@ -103,7 +175,23 @@ def get_half_cpus() -> int:
 def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
     """Run VBoxManage with the provided arguments."""
     print(f"Executing: {vboxmanage} {' '.join(args)}")
-    subprocess.run([vboxmanage] + args, check=True, **kwargs)
+    capture_output = kwargs.pop("capture_output", True)
+    text = kwargs.pop("text", True)
+    result = subprocess.run(
+        [vboxmanage] + args,
+        capture_output=capture_output,
+        text=text,
+        **kwargs,
+    )
+    if result.returncode == 0:
+        return
+
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    hint = _vboxmanage_error_hint(output)
+    if hint:
+        raise RuntimeError(f"VBoxManage failed: {output}\n\n{hint}") from None
+    detail = output or f"exit status {result.returncode}"
+    raise RuntimeError(f"VBoxManage failed: {detail}") from None
 
 
 def resolve_vbox_settings_path(vm_dir: str, vm_name: str) -> str | None:

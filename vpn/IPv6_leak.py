@@ -28,6 +28,12 @@ import sys
 from typing import Any
 
 import requests
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 from common.common_vpn import fetch_ip_api, fetch_ipapi, public_ipv4, public_ipv6
 
 IP_API = "http://ip-api.com/json/{ip}"

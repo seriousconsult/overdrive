@@ -21,6 +21,12 @@ import subprocess
 import sys
 
 import requests
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 from common.common_vpn import get_public_ipv4, is_wsl, wsl_windows_host_ip
 
 

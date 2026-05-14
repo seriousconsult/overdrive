@@ -22,7 +22,7 @@ from common.common_vm import get_active_bridged_interface, get_half_cpus, get_sy
 # --- 1. Global Variables (Define these first!) ---
 VM_NAME = "Network_Test"
 VBOX = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
-OSBOXES_URL = "https://downloads.sourceforge.net/project/osboxes/v/vb/59-U-u-svr/24.10/64bit.7z"
+OSBOXES_URL = "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
 
 # --- 2. Dynamic Detection Functions ---
 
@@ -33,7 +33,7 @@ base = paths["base_path"]
 
 
 DOWNLOAD_DIR = f"{base}/Downloads"
-ARCHIVE_PATH = os.path.join(DOWNLOAD_DIR, "ubuntu_osboxes.7z")
+ARCHIVE_PATH = os.path.join(DOWNLOAD_DIR, "ubuntu_osboxes_2404.7z")
 EXTRACT_DIR = os.path.join(DOWNLOAD_DIR, "temp_extraction")
 VM_BASE_WSL = f"{base}/VirtualBox VMs/{VM_NAME}"
 INTERFACE = get_active_bridged_interface(VBOX)

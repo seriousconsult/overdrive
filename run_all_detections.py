@@ -21,6 +21,7 @@ If you don't want a password to be a blocker, either:
 """
 
 import html
+import os
 import re
 import subprocess
 import sys
@@ -195,7 +196,17 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
 
     timeout = SUDO_SCRIPT_TIMEOUT_SEC if use_sudo else 120
     try:
-        script_str = str(script_path)
+        wsl_prefix = _wsl_invocation_prefix()
+        env = os.environ.copy()
+        repo_pythonpath = _to_wsl_posix(BASE_DIR) if wsl_prefix else str(BASE_DIR)
+        existing_pythonpath = env.get("PYTHONPATH")
+        pythonpath_sep = ":" if wsl_prefix else os.pathsep
+        env["PYTHONPATH"] = (
+            repo_pythonpath
+            if not existing_pythonpath
+            else repo_pythonpath + pythonpath_sep + existing_pythonpath
+        )
+        script_str = _to_wsl_posix(script_path) if wsl_prefix else str(script_path)
         linux_venv = BASE_DIR / "virtual_env" / "bin" / "python"
 
         if use_sudo:
@@ -210,7 +221,6 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
                     -1,
                 )
 
-            wsl_prefix = _wsl_invocation_prefix()
             if wsl_prefix:
                 # Same distro as normal runs: sudo -n must be passwordless in that distro
                 cmd = wsl_prefix + ["-e", "sudo", "-n", wsl_venv, wsl_script]
@@ -227,6 +237,7 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
             text=True,
             timeout=timeout,
             cwd=str(BASE_DIR),
+            env=env,
         )
         output = (result.stdout or "") + (result.stderr or "")
         err = ""

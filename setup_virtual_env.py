@@ -145,7 +145,7 @@ def install_system_deps():
         else:
             print("nmap is already installed.")
     except:
-        print("dependancies failed to install.")
+        print("Dependancies failed to install.")
 
 
 # --- Main Logic ---
@@ -181,7 +181,7 @@ if sys.platform != "win32" and os.path.isfile(python_exe) and sys.prefix == sys.
     )
     apply_network_capabilities(python_exe)
 
-# 6. Drop into shell (string form: recommended when shell=True)
+# 6. Go to shell (string form: recommended when shell=True)
 print("Entering virtual environment... (Type 'exit' to leave)")
 subprocess.call(
     f"bash --rcfile <(echo 'source {venv_dir}/bin/activate')",
