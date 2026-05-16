@@ -14,7 +14,7 @@ Networking (lab):
 
 The client often has **no path to the Internet** until OpenWrt DHCP works, so **this script** (on the
 **WSL host**, which does have Internet) runs ``virt-customize`` to pre-install ``isc-dhcp-client``,
-``ping``, ``dig``, and a ``lab-net-troubleshoot`` helper **into the VDI before first lab boot**. Use
+    ``dig``, and a ``lab-net-troubleshoot`` helper **into the VDI before first lab boot**. Use
 ``--skip-vdi-prime`` only if you know what you are doing.
 
 This VM is **not** bridged to your Windows/WSL LAN. WSL **mirrored** mode only affects the Linux
@@ -118,6 +118,31 @@ def download_osboxes_archive(url: str, archive_path: str) -> None:
         for chunk in r.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
+
+
+def validate_7z_archive(archive_path: str) -> None:
+    """Verify the archive is a valid 7z container before extraction."""
+    if not os.path.isfile(archive_path):
+        raise RuntimeError(f"OSBoxes archive does not exist: {archive_path}")
+    try:
+        subprocess.run(
+            ["7z", "t", archive_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "7z is required to validate/extract the OSBoxes archive. "
+            "Install it with: sudo apt install p7zip-full"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "OSBoxes archive appears to be invalid or corrupt.\n"
+            f"  Archive: {archive_path}\n"
+            "Remove it and re-run this script, or provide a valid archive with "
+            "--archive-path."
+        ) from exc
 
 # If VDI priming was skipped and the guest somehow has Internet, this still works:
 IN_GUEST_INSTALL_ISC_DHCP_CLIENT = "sudo apt install -y isc-dhcp-client"
@@ -255,13 +280,6 @@ def configure_serial_named_pipe(vboxmanage: str, pipe_name: str) -> None:
 
 
 
-
-
-
-
-
-
-
 def remove_existing_client_vm(
     vboxmanage: str,
     vm_base: str,
@@ -328,6 +346,13 @@ def prime_client_vdi_for_intnet_lab(
         )
         return False
 
+    if is_wsl_environment():
+        print(
+            "[!] Running under WSL: skipping host-side virt-customize/libguestfs VDI priming."
+            " libguestfs/supermin is unreliable on WSL — re-run without WSL or use --skip-vdi-prime"
+        )
+        return False
+
     vc = shutil.which("virt-customize")
     if not vc:
         print(
@@ -347,54 +372,6 @@ def prime_client_vdi_for_intnet_lab(
     script_host = work_root / "lab_net_troubleshoot.sh"
     script_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8")
     script_host.chmod(0o644)
-
-    print(
-        "Priming VDI on **host** (virt-customize): isc-dhcp-client, ping, dig, lab-net-troubleshoot…"
-    )
-    try:
-        subprocess.run(
-            [
-                vc,
-                "-a",
-                vdi_linux,
-                "--update",
-                "--run-command",
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-                "isc-dhcp-client iputils-ping dnsutils",
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [
-                vc,
-                "-a",
-                vdi_linux,
-                "--copy-in",
-                f"{script_host.resolve()}:/usr/local/bin/lab-net-troubleshoot",
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [
-                vc,
-                "-a",
-                vdi_linux,
-                "--chmod",
-                "0755:/usr/local/bin/lab-net-troubleshoot",
-            ],
-            check=True,
-        )
-        for command in guest_serial_console_commands():
-            subprocess.run([vc, "-a", vdi_linux, "--run-command", command], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[!] VDI priming failed ({e}). Fix WSL networking/apt, then re-run with VM off.")
-        return False
-
-    print(
-        "[+] VDI primed: guest has dhclient/ping/dig, ``lab-net-troubleshoot``, "
-        "and a ttyS0 serial login."
-    )
-    return True
 
 
 def _poweroff_vm_for_vdi_edit(
@@ -477,10 +454,20 @@ def setup_client_vm(
         print(f"VDI already exists at {vdi_wsl}; skipping download/extract.")
     else:
         print("Extracting VDI (requires p7zip: sudo apt install p7zip-full)...")
+        validate_7z_archive(archive_path)
         if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir)
         os.makedirs(extract_dir, exist_ok=True)
-        subprocess.run(["7z", "x", archive_path, f"-o{extract_dir}", "-y"], check=True)
+        try:
+            subprocess.run(["7z", "x", archive_path, f"-o{extract_dir}", "-y"], check=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "Failed to extract the OSBoxes archive. The archive may be corrupt or "
+                "incomplete, or the file is not a valid 7z archive.\n"
+                f"  Archive: {archive_path}\n"
+                "Remove it and re-run the script, or pass a valid archive with "
+                "--archive-path."
+            ) from exc
 
         found_vdi: str | None = None
         for root, _, files in os.walk(extract_dir):
@@ -596,7 +583,7 @@ def setup_client_vm(
         f"\nDone. Start the OpenWrt VM first, then start {VM_NAME}.\n"
         "\n"
         "--- Lab networking (no guest Internet required) ---\n"
-        "This script should have **pre-installed** dhclient/ping/dig on the **disk from WSL**.\n"
+        "This script should have **pre-installed** dhclient/dig on the **disk from WSL**.\n"
         "After login run:   lab-net-troubleshoot\n"
         "That script renews DHCP and prints static-IP fallback commands if OpenWrt has no DHCP.\n"
         "Only if the guest **does** have Internet and tools are missing:\n"
