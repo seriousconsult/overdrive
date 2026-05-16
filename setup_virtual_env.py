@@ -32,6 +32,8 @@ def get_linux_info():
             "pcap": "libpcap-devel",
             "7zip": "p7zip p7zip-plugins",
             "chrome_cmd": "google-chrome",
+            "socat": "socat",
+            "minicom": "minicom",
         }
     elif shutil.which("apt"):
         return {
@@ -39,6 +41,8 @@ def get_linux_info():
             "pcap": "libpcap-dev",
             "7zip": "p7zip-full",
             "chrome_cmd": "google-chrome-stable",
+            "socat": "socat",
+            "minicom": "minicom",
         }
     return None
 
@@ -91,7 +95,7 @@ def apply_network_capabilities(interpreter_path: str) -> None:
 def install_system_deps():
     info = get_linux_info()
     if not info:
-        print("⚠️ Unknown OS: Please install dependencies manually.")
+        print("⚠️ Unknown OS: install dependencies manually.")
         return
 
     mgr = info["mgr"]
@@ -144,6 +148,22 @@ def install_system_deps():
             subprocess.run(["sudo", mgr, "install", "-y", "nmap"], check=True)
         else:
             print("nmap is already installed.")
+
+
+        # 5. Install minicom
+        if not shutil.which("minicom"):
+            print("Installing minicom...")
+            subprocess.run(["sudo", mgr, "install", "-y", "minicom"], check=True)
+        else:
+            print("minicom is already installed.")
+
+        # 6. Install socat
+        if not shutil.which("socat"):
+            print("Installing socat...")
+            subprocess.run(["sudo", mgr, "install", "-y", "socat"], check=True)
+        else:
+            print("socat is already installed.")
+            
     except:
         print("Dependancies failed to install.")
 
