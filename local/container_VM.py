@@ -257,6 +257,10 @@ def compute_vm_container_score(
     # 3. Local info (returned separately)
     local_info = check_wsl_networking_mode()
     if local_info.get("is_wsl"):
+        score = max(score, 5)
+        network_notes.append(
+            "Local: Running inside WSL, which is a virtualized environment."
+        )
         local_note = f"Local Info: WSL {local_info['mode']} Mode ({local_info['details']})."
     else:
         local_note = f"Local Info: {local_info['details']}"
