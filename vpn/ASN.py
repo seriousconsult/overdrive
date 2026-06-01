@@ -301,7 +301,7 @@ def resolve_target_ip(arg_ip: str) -> tuple[str | None, str | None]:
         if pip and ":" not in str(pip):
             return str(pip).strip(), None
 
-    pip = _public_ip_ipify()
+    pip = public_ipv4()
     if pip:
         return pip, None
     return None, "Could not determine public IPv4 (ipapi/ipify failed)"

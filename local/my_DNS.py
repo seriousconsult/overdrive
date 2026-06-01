@@ -333,19 +333,18 @@ def get_dns_info() -> None:
         print(f"STATUS: Error detecting DNS: {e}")
         return
 
-    print("\nHow this list was built")
-    print(f"  Source: {detection_source}")
+    print(f"Source: {detection_source}")
     if is_wsl_local():
         tunnel = wsl_dns()
         if tunnel:
             print(
-                f"  WSL ``/etc/resolv.conf`` first nameserver (DNS tunnel / stub): {tunnel}\n"
-                "    (Queries from the distro often go here first; Windows may still be the "
+                f"WSL ``/etc/resolv.conf`` first nameserver (DNS tunnel / stub): {tunnel}\n"
+                "(Queries from the distro often go here first; Windows may still be the "
                 "resolver that talks to your router or the Internet.)"
             )
         search = _resolv_search_domains()
         if search:
-            print(f"  Search domains from resolv.conf: {', '.join(search)}")
+            print(f"Search domains from resolv.conf: {', '.join(search)}")
 
     if not dns_ips:
         print("\nNo IPv4 DNS server addresses found.")

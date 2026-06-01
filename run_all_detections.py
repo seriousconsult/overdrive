@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -317,9 +318,11 @@ def _badge_class(score: str) -> str:
     return "badge na"
 
 
-def generate_html_report(results: dict, folder_order: list[str]) -> str:
+def generate_html_report(results: dict, folder_order: list[str], elapsed_time: float = 0) -> str:
     """Generate compact HTML report (tables, escaped text)."""
     ts = html.escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    minutes, seconds = divmod(int(elapsed_time), 60)
+    time_str = f"{minutes}m {seconds}s" if elapsed_time > 0 else ""
     parts = [
         """<!DOCTYPE html>
 <html lang="en">
@@ -430,9 +433,13 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <body>
 <header>
   <h1>Overdrive detection results</h1>
-  <span class="timestamp">""",
+  <div style="display: flex; gap: 1rem; align-items: baseline;">
+    <span class="timestamp">""",
         ts,
-        """</span>
+        """</span>""",
+        f"    <span class=\"timestamp\">({time_str})</span>" if time_str else "",
+        """
+  </div>
 </header>
 <main>
 """,
@@ -470,6 +477,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 
 
 def main():
+    start_time = time.time()
     print("=" * 60)
     print("OVERDRIVE DETECTION SUITE")
     print("=" * 60)
@@ -538,11 +546,15 @@ def main():
             tail = f" — {comment[:60]}…" if comment and len(comment) > 60 else (f" — {comment}" if comment else "")
             print(f"  {script_name}: {score}{tail}")
 
-    html_content = generate_html_report(results, folder_order)
+    elapsed_time = time.time() - start_time
+    html_content = generate_html_report(results, folder_order, elapsed_time)
     html_path = BASE_DIR / "detection_results.html"
     html_path.write_text(html_content, encoding="utf-8")
 
+    minutes, seconds = divmod(int(elapsed_time), 60)
     print(f"\nHTML report: {html_path}")
+    print("=" * 60)
+    print(f"Total execution time: {minutes}m {seconds}s")
     print("=" * 60)
 
 
