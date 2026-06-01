@@ -26,8 +26,63 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import requests
-from scapy.all import ARP, Ether, srp
+
+def _repo_venv_python() -> Path | None:
+    """Return this repo's virtualenv interpreter if it exists."""
+    candidates = (
+        _REPO_ROOT / "virtual_env" / "bin" / "python",
+        _REPO_ROOT / "virtual_env" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _reexec_with_repo_venv(missing_module: str) -> None:
+    """
+    Let ``./my_router.py`` work even when /usr/bin/env python3 is not the repo venv.
+
+    Scapy's socket permissions may still require sudo/setcap, but Python dependencies
+    should come from the project-local virtualenv when it is present.
+    """
+    if os.environ.get("OVERDRIVE_NO_VENV_REEXEC"):
+        return
+    venv_python = _repo_venv_python()
+    if not venv_python:
+        return
+    try:
+        current = Path(sys.executable).resolve()
+        target = venv_python.resolve()
+    except OSError:
+        current = Path(sys.executable)
+        target = venv_python
+    if current == target:
+        return
+    print(
+        f"[*] Missing Python module '{missing_module}' in {sys.executable}; "
+        f"re-running with {target}.",
+        file=sys.stderr,
+    )
+    os.execv(str(target), [str(target), *sys.argv])
+
+
+try:
+    import requests
+except ModuleNotFoundError as exc:
+    if exc.name != "requests":
+        raise
+    _reexec_with_repo_venv("requests")
+    raise
+
+
+try:
+    from scapy.all import ARP, Ether, srp
+except ModuleNotFoundError as exc:
+    if (exc.name or "").split(".")[0] != "scapy":
+        raise
+    _reexec_with_repo_venv("scapy")
+    raise
 
 from common.common_local import (
     is_wsl_local,

@@ -1,136 +1,354 @@
 #!/usr/bin/env python3
-"""
-Canvas Fingerprint Detection
+"""Canvas Home-Browser Plausibility Check.
 
-Detects canvas fingerprinting - a common browser tracking method where
-the browser is asked to draw a hidden image, and the resulting hash
-is used as a unique identifier.
+Checks whether the canvas/browser surface looks like a normal residential
+browser setup. Canvas fingerprintability is expected for ordinary home browsers;
+this script flags blocked, noised, headless, automated, or otherwise unusual
+canvas/browser profiles.
+
+Measured canvas attributes:
+- Canvas API presence: HTMLCanvasElement, getContext(), and toDataURL().
+- 2D rendering availability: successful creation of a 2D drawing context.
+- Readback availability: PNG data URL from toDataURL() and pixel data from
+  getImageData().
+- Render stability: two identical draw/read cycles should produce identical
+  data URL and pixel-prefix values.
+- Fingerprint value: SHA-256 over the PNG data URL plus sampled pixel prefix.
+
+Measured surrounding browser attributes:
+- User-Agent family, headless marker, navigator.webdriver, navigator.vendor.
+- navigator.languages, plugin count, MIME type count.
+- hardwareConcurrency, deviceMemory, maxTouchPoints, cookieEnabled.
+- screen size, color depth, pixel depth, devicePixelRatio, and window geometry.
 
 Score: 1-5
-5 = Canvas fingerprinting detected (high tracking risk)
-4 = Canvas fingerprinting not detected but APIs available (potential risk)
-3 = Canvas fingerprinting not detected and APIs not available (unknown risk)
-2 = Canvas fingerprinting not detected and APIs not available (reduced attack surface)
-1 = No canvas fingerprinting detected
-
-TODO: Implement actual canvas fingerprint detection
-- Use Selenium to access a test page that performs canvas fingerprinting
-- Check if canvas readback is possible
-- Detect canvas fingerprinting scripts
-
+1 = Strongly home-like browser/canvas profile
+2 = Mostly home-like with minor anomalies
+3 = Inconclusive or mixed browser/canvas profile
+4 = Unusual for a home setup
+5 = Strongly non-home-like automation/headless profile
 """
 
+from __future__ import annotations
+
 import sys
-import time
-import hashlib
-import urllib.parse
 from pathlib import Path
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from common.common_browser import (
-    print_browser_detection_header,
-    print_browser_detection_score_footer,
-)
+
+DEFAULT_TIMEOUT = 8
+DEFAULT_REPORT_WIDTH = 60
 
 
-def _make_test_page() -> str:
-    # Minimal ThumbmarkJS-like drawing that produces a repeatable dataURL
-    html = """<!doctype html>
-<html><head><meta charset='utf-8'></head><body>
-<canvas id='c' width='300' height='150'></canvas>
-<script>
-function hex(buffer){const v=new Uint8Array(buffer);let s='';for(let i=0;i<v.length;i++){s+=('00'+v[i].toString(16)).slice(-2);}return s}
-(async function(){
-  try{
-    const c=document.getElementById('c');
-    const ctx=c.getContext('2d');
-    ctx.fillStyle='#f2f2f2';ctx.fillRect(0,0,300,150);
-    ctx.textBaseline='top';ctx.font='16px Arial';ctx.fillStyle='rgb(255,0,0)';
-    ctx.fillText('ThumbmarkJS test — 測試',2,2);
-    ctx.fillStyle='rgba(0,0,255,0.7)';ctx.fillRect(10,30,80,50);
-    ctx.beginPath();ctx.arc(200,75,30,0,Math.PI*2);ctx.fillStyle='green';ctx.fill();
-    const data=c.toDataURL();
-    if(!data){ document.title='NO_DATA'; return; }
-    if(window.crypto && crypto.subtle && crypto.subtle.digest){
-      const enc=new TextEncoder();
-      const hash=await crypto.subtle.digest('SHA-256', enc.encode(data));
-      const hexh=hex(hash); document.title='FP:'+hexh; return;
+CANVAS_PROBE_JS = r"""
+const done = arguments[arguments.length - 1];
+
+function hex(buffer) {
+  const view = new Uint8Array(buffer);
+  let out = "";
+  for (let i = 0; i < view.length; i++) {
+    out += ("00" + view[i].toString(16)).slice(-2);
+  }
+  return out;
+}
+
+function drawCanvas() {
+  // Canvas attributes measured here:
+  // - 2D context availability
+  // - deterministic text/shape/raster rendering
+  // - toDataURL("image/png") readback
+  // - getImageData() pixel readback from a fixed region
+  const canvas = document.createElement("canvas");
+  canvas.width = 300;
+  canvas.height = 150;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("2D canvas context unavailable");
+  }
+
+  ctx.fillStyle = "#f2f2f2";
+  ctx.fillRect(0, 0, 300, 150);
+  ctx.textBaseline = "top";
+  ctx.font = "16px Arial";
+  ctx.fillStyle = "rgb(255,0,0)";
+  ctx.fillText("ThumbmarkJS canvas probe - test", 2, 2);
+  ctx.fillStyle = "rgba(0,0,255,0.7)";
+  ctx.fillRect(10, 30, 80, 50);
+  ctx.beginPath();
+  ctx.arc(200, 75, 30, 0, Math.PI * 2);
+  ctx.fillStyle = "green";
+  ctx.fill();
+
+  const dataUrl = canvas.toDataURL("image/png");
+  let imageDataPrefix = "";
+  try {
+    const imageData = ctx.getImageData(0, 0, 32, 32).data;
+    imageDataPrefix = Array.from(imageData.slice(0, 64)).join(",");
+  } catch (e) {
+    imageDataPrefix = "getImageData-error:" + String(e && e.message ? e.message : e);
+  }
+
+  return { dataUrl, imageDataPrefix };
+}
+
+(async () => {
+  try {
+    const apis = {
+      // API presence is expected for an ordinary residential browser.
+      htmlCanvas: typeof HTMLCanvasElement !== "undefined",
+      canvasToDataURL:
+        typeof HTMLCanvasElement !== "undefined" &&
+        typeof HTMLCanvasElement.prototype.toDataURL === "function",
+      canvasGetContext:
+        typeof HTMLCanvasElement !== "undefined" &&
+        typeof HTMLCanvasElement.prototype.getContext === "function",
+      cryptoDigest: Boolean(window.crypto && crypto.subtle && crypto.subtle.digest),
+    };
+    const profile = {
+      // Surrounding browser attributes help distinguish a normal home browser
+      // from headless automation or an unusually hardened/noised profile.
+      userAgent: navigator.userAgent || "",
+      appVersion: navigator.appVersion || "",
+      vendor: navigator.vendor || "",
+      platform: navigator.platform || "",
+      languages: Array.from(navigator.languages || []),
+      language: navigator.language || "",
+      webdriver: navigator.webdriver === true,
+      pluginsLength: navigator.plugins ? navigator.plugins.length : null,
+      mimeTypesLength: navigator.mimeTypes ? navigator.mimeTypes.length : null,
+      hardwareConcurrency: navigator.hardwareConcurrency || null,
+      deviceMemory: navigator.deviceMemory || null,
+      maxTouchPoints: navigator.maxTouchPoints || 0,
+      cookieEnabled: navigator.cookieEnabled,
+      hasChromeObject: Boolean(window.chrome),
+      screenWidth: screen.width || null,
+      screenHeight: screen.height || null,
+      colorDepth: screen.colorDepth || null,
+      pixelDepth: screen.pixelDepth || null,
+      devicePixelRatio: window.devicePixelRatio || null,
+      innerWidth: window.innerWidth || null,
+      innerHeight: window.innerHeight || null,
+      outerWidth: window.outerWidth || null,
+      outerHeight: window.outerHeight || null,
+    };
+
+    if (!apis.htmlCanvas || !apis.canvasToDataURL || !apis.canvasGetContext) {
+      done({
+        ok: true,
+        apis,
+        profile,
+        readback: false,
+        reason: "required canvas APIs unavailable",
+      });
+      return;
     }
-    document.title='HAS_DATA';
-  }catch(e){ document.title='ERROR:'+String(e); }
+
+    const first = drawCanvas();
+    const second = drawCanvas();
+    if (!first.dataUrl || first.dataUrl === "data:,") {
+      done({
+        ok: true,
+        apis,
+        profile,
+        readback: false,
+        reason: "toDataURL returned no image data",
+      });
+      return;
+    }
+
+    const stable = first.dataUrl === second.dataUrl &&
+      first.imageDataPrefix === second.imageDataPrefix;
+    const payload = first.dataUrl + "|" + first.imageDataPrefix;
+    let hash = null;
+    if (apis.cryptoDigest) {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+      hash = hex(digest);
+    }
+
+    done({
+      ok: true,
+      apis,
+      profile,
+      readback: true,
+      stable,
+      dataUrlLength: first.dataUrl.length,
+      hash,
+    });
+  } catch (e) {
+    done({ ok: false, error: String(e && e.message ? e.message : e) });
+  }
 })();
-</script></body></html>"""
-    return html
+"""
 
 
-def _try_selenium_canvas_check(timeout: int = 15) -> tuple[int, str]:
-    """Attempt to run a headless browser, draw the test canvas and read back a fingerprint.
-
-    Returns (score, description).
-    """
+def _build_driver_with_fallback():
+    """Create the shared Chrome driver, falling back to headless Firefox."""
     try:
         from selenium import webdriver
-        from selenium.webdriver.common.by import By
         from selenium.webdriver.chrome.options import Options as ChromeOptions
-        from selenium.common.exceptions import WebDriverException
-    except Exception:
-        return 3, "Selenium not available; cannot perform dynamic canvas test."
 
-    html = _make_test_page()
-    data_uri = "data:text/html;charset=utf-8," + urllib.parse.quote(html)
-
-    # Try Chrome/Chromium first
-    options = ChromeOptions()
-    # newer Chrome supports 'headless=new', but fall back gracefully
-    try:
+        options = ChromeOptions()
         options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1280,800")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        return webdriver.Chrome(options=options)
+    except Exception as chrome_error:
+        chrome_msg = str(chrome_error)
+
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.firefox.options import Options as FirefoxOptions
+
+        options = FirefoxOptions()
+        options.add_argument("-headless")
+        return webdriver.Firefox(options=options)
+    except Exception as firefox_error:
+        raise RuntimeError(
+            "No suitable webdriver found. "
+            f"Chrome error: {chrome_msg}; Firefox error: {firefox_error}"
+        ) from firefox_error
+
+
+def print_browser_detection_header(
+    title: str, *, width: int = DEFAULT_REPORT_WIDTH
+) -> None:
+    """Print the standard browser detection banner."""
+    bar = "=" * width
+    print(bar)
+    print(title)
+    print(bar)
+    print()
+
+
+def print_browser_detection_score_footer(
+    score: int, description: str, *, width: int = DEFAULT_REPORT_WIDTH
+) -> None:
+    """Print the standard score footer parsed by the suite."""
+    print(f"Score: {score}")
+    print(f"  {description}")
+    print()
+    print("=" * width)
+
+
+def _browser_profile_issues(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return ``(strong_issues, soft_issues)`` for browser-profile coherence."""
+    strong: list[str] = []
+    soft: list[str] = []
+
+    ua = str(profile.get("userAgent") or "")
+    vendor = str(profile.get("vendor") or "")
+    languages = profile.get("languages") or []
+    plugins_len = profile.get("pluginsLength")
+    color_depth = profile.get("colorDepth")
+    width = profile.get("screenWidth")
+    height = profile.get("screenHeight")
+    outer_width = profile.get("outerWidth")
+    outer_height = profile.get("outerHeight")
+
+    ua_lower = ua.lower()
+    is_chrome = "chrome/" in ua_lower or "chromium/" in ua_lower or "edg/" in ua_lower
+    is_firefox = "firefox/" in ua_lower
+    is_safari = "safari/" in ua_lower and "chrome/" not in ua_lower
+
+    if profile.get("webdriver"):
+        strong.append("navigator.webdriver is true")
+    if "headless" in ua_lower:
+        strong.append("User-Agent exposes headless browser")
+    if not any((is_chrome, is_firefox, is_safari)):
+        strong.append("User-Agent does not look like a common residential browser")
+
+    if is_chrome and "google inc" not in vendor.lower() and "microsoft" not in vendor.lower():
+        soft.append("Chrome-like UA has an unusual navigator.vendor")
+    if not languages:
+        soft.append("navigator.languages is empty")
+    if plugins_len == 0 and (is_chrome or is_firefox):
+        soft.append("navigator.plugins is empty")
+    if color_depth not in (24, 30, 32, None):
+        soft.append(f"unusual screen color depth {color_depth}")
+    if isinstance(width, int) and isinstance(height, int) and (width < 800 or height < 600):
+        soft.append(f"unusually small screen size {width}x{height}")
+    if outer_width == 0 or outer_height == 0:
+        soft.append("window.outerWidth/outerHeight are zero")
+
+    return strong, soft
+
+
+def _score_canvas_result(result: dict[str, Any]) -> tuple[int, str]:
+    if not result.get("ok"):
+        return 3, f"Inconclusive: canvas/home-profile probe failed: {result.get('error', 'unknown error')}"
+
+    apis = result.get("apis") or {}
+    profile = result.get("profile") or {}
+    strong_issues, soft_issues = _browser_profile_issues(profile)
+    issue_text = "; ".join(strong_issues + soft_issues)
+
+    if not apis.get("htmlCanvas"):
+        return 4, "Unusual for a home setup: Canvas API is unavailable."
+    if not (apis.get("canvasToDataURL") and apis.get("canvasGetContext")):
+        return 4, "Unusual for a home setup: canvas readback APIs are unavailable or blocked."
+    if not result.get("readback"):
+        reason = result.get("reason", "no image data returned")
+        return 4, f"Unusual for a home setup: canvas readback blocked or empty ({reason})."
+
+    fp = result.get("hash") or "digest unavailable"
+    size = result.get("dataUrlLength") or "unknown"
+    if not result.get("stable"):
+        suffix = f" Profile issues: {issue_text}." if issue_text else ""
+        return 4, f"Unusual for a home setup: canvas output changed between identical renders.{suffix}"
+
+    if strong_issues:
+        return 5, (
+            "Strongly non-home-like profile: stable canvas is present, but browser signals indicate automation: "
+            f"{'; '.join(strong_issues)}. hash={fp}, dataURL bytes={size}."
+        )
+    if len(soft_issues) >= 2:
+        return 3, (
+            "Mixed home-profile confidence: canvas is stable, but browser signals are atypical: "
+            f"{'; '.join(soft_issues)}. hash={fp}, dataURL bytes={size}."
+        )
+    if soft_issues:
+        return 2, (
+            "Mostly home-like: stable fingerprintable canvas with one minor browser anomaly: "
+            f"{'; '.join(soft_issues)}. hash={fp}, dataURL bytes={size}."
+        )
+
+    return 1, (
+        "Strongly home-like: stable fingerprintable canvas and coherent ordinary browser signals. "
+        f"hash={fp}, dataURL bytes={size}."
+    )
+
+
+def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
+    """Run an in-browser canvas probe and return ``(score, description)``."""
+    try:
+        import selenium  # noqa: F401
     except Exception:
-        options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+        return 3, "Inconclusive: Selenium is unavailable, so the home-browser canvas profile could not be probed."
 
     driver = None
     try:
-        driver = webdriver.Chrome(options=options)
-    except Exception:
-        # Try Firefox fallback
-        try:
-            from selenium.webdriver.firefox.options import Options as FxOptions
-            fx_opts = FxOptions()
-            fx_opts.add_argument("-headless")
-            driver = webdriver.Firefox(options=fx_opts)
-        except Exception as e:
-            return 3, f"No suitable webdriver found to run dynamic test: {e}"
+        driver = _build_driver_with_fallback()
+    except Exception as e:
+        return 3, str(e)
 
     try:
         driver.set_page_load_timeout(timeout)
-        driver.get(data_uri)
-
-        # Wait up to `timeout` seconds for a title change indicating result
-        waited = 0
-        title = driver.title or ""
-        while waited < timeout and not (title.startswith("FP:") or title.startswith("ERROR:") or title in ("HAS_DATA", "NO_DATA")):
-            time.sleep(0.5)
-            waited += 0.5
-            title = driver.title or ""
-
-        if title.startswith("FP:"):
-            fp = title.split("FP:", 1)[1]
-            return 5, f"Canvas readback allowed; fingerprint SHA256: {fp}"
-        if title == "HAS_DATA":
-            return 4, "Canvas readback produced image data (APIs available), but digest not computed in-page."
-        if title == "NO_DATA":
-            return 2, "Canvas produced no dataURL (readback failed or returned empty)."
-        if title.startswith("ERROR:"):
-            return 2, f"In-page error when drawing/reading canvas: {title[6:]}"
-
-        # Timeout / unknown
-        return 3, "Timed out waiting for in-page canvas result; API availability unknown."
+        driver.set_script_timeout(timeout)
+        driver.get("about:blank")
+        result = driver.execute_async_script(CANVAS_PROBE_JS)
+        if not isinstance(result, dict):
+            return 3, f"Canvas probe returned an unexpected result: {result!r}"
+        return _score_canvas_result(result)
     except Exception as e:
-        return 3, f"Browser test failed: {e}"
+        return 3, f"Browser canvas probe failed: {e}"
     finally:
         try:
             if driver:
@@ -140,18 +358,14 @@ def _try_selenium_canvas_check(timeout: int = 15) -> tuple[int, str]:
 
 
 def check_canvas_fingerprint() -> tuple[int, str]:
-    """
-    Check for canvas fingerprinting support/behavior.
-    Preference: run a dynamic in-browser test via Selenium; otherwise return an informational score.
-    """
-    # Try dynamic Selenium-backed test first
-    score, desc = _try_selenium_canvas_check()
-    return score, desc
+    """Check whether the canvas/browser profile looks home-like."""
+    return _try_selenium_canvas_check()
 
 
-def main():
-    print_browser_detection_header("Canvas Fingerprint Detection")
+def main() -> None:
+    print_browser_detection_header("Canvas Home-Browser Plausibility Check")
     score, description = check_canvas_fingerprint()
+    print(f"STATUS: {description}")
     print_browser_detection_score_footer(score, description)
 
 
