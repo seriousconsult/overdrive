@@ -184,11 +184,26 @@ function drawCanvas() {
 """
 
 
+<<<<<<< Updated upstream
 def _build_driver_with_fallback():
     """Create the shared Chrome driver, falling back to headless Firefox."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options as ChromeOptions
+=======
+def _get_canvas_fingerprint(timeout: int = 15) -> tuple[str | None, str]:
+    """
+    Generate a canvas fingerprint by running a headless browser.
+    Returns (hash_or_none, error_msg).
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options as ChromeOptions
+    except ImportError as e:
+        return None, f"Selenium import failed: {e}"
+    except Exception as e:
+        return None, f"Selenium error: {e}"
+>>>>>>> Stashed changes
 
         options = ChromeOptions()
         options.add_argument("--headless=new")
@@ -335,6 +350,7 @@ def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str
 
     driver = None
     try:
+<<<<<<< Updated upstream
         driver = _build_driver_with_fallback()
     except Exception as e:
         return 3, str(e)
@@ -349,6 +365,37 @@ def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str
         return _score_canvas_result(result)
     except Exception as e:
         return 3, f"Browser canvas probe failed: {e}"
+=======
+        driver = webdriver.Chrome(options=options)
+    except Exception:
+        # Try Firefox fallback
+        try:
+            from selenium.webdriver.firefox.options import Options as FxOptions
+            fx_opts = FxOptions()
+            fx_opts.add_argument("-headless")
+            driver = webdriver.Firefox(options=fx_opts)
+        except Exception as e:
+            return None, f"No webdriver found: {e}"
+
+    try:
+        driver.set_page_load_timeout(timeout)
+        driver.get(data_uri)
+
+        # Wait up to `timeout` seconds for a title change indicating result
+        waited = 0
+        title = driver.title or ""
+        while waited < timeout and not (title.startswith("FP:") or title.startswith("ERROR:") or title == "NO_FP"):
+            time.sleep(0.5)
+            waited += 0.5
+            title = driver.title or ""
+
+        if title.startswith("FP:"):
+            return title.split("FP:", 1)[1]
+        
+        return None, "Canvas readback timed out"
+    except Exception as e:
+        return None, f"Canvas test failed: {e}"
+>>>>>>> Stashed changes
     finally:
         try:
             if driver:
@@ -358,8 +405,23 @@ def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str
 
 
 def check_canvas_fingerprint() -> tuple[int, str]:
+<<<<<<< Updated upstream
     """Check whether the canvas/browser profile looks home-like."""
     return _try_selenium_canvas_check()
+=======
+    """
+    Generate a canvas fingerprint and score its typicality.
+    Always succeeds in generating a fingerprint (or returns neutral score if unable).
+    Scores based on how typical the fingerprint is for a residential browser.
+    """
+    fingerprint, err_msg = _get_canvas_fingerprint()
+    
+    if not fingerprint:
+        return 3, "Could not generate canvas fingerprint: Selenium/webdriver not available or canvas API not accessible"
+    
+    score, description = _score_fingerprint_typicality(fingerprint)
+    return score, f"{description} (FP: {fingerprint[:16]}...)"
+>>>>>>> Stashed changes
 
 
 def main() -> None:
