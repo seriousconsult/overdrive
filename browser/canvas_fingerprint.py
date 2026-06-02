@@ -331,7 +331,7 @@ def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str
     try:
         import selenium  # noqa: F401
     except Exception:
-        return 3, "Inconclusive: Selenium is unavailable, so the home-browser canvas profile could not be probed."
+        return 4, "Inconclusive: Selenium is unavailable, so the home-browser canvas profile could not be probed."
 
     driver = None
     try:
@@ -363,10 +363,8 @@ def check_canvas_fingerprint() -> tuple[int, str]:
 
 
 def main() -> None:
-    print_browser_detection_header("Canvas Home-Browser Plausibility Check")
     score, description = check_canvas_fingerprint()
-    print(f"STATUS: {description}")
-    print_browser_detection_score_footer(score, description)
+    print(f"Score: {score} — STATUS: {description}")
 
 
 if __name__ == "__main__":
