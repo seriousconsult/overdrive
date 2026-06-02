@@ -104,7 +104,7 @@ def compute_multi_location_score(results: List[Dict[str, Any]]) -> tuple[int, st
         score = 3
         note = (
             "Single country but several different city labels — naming or database noise; "
-            "mostly one country, slight ambiguity."
+            "mostly one country, some ambiguity."
         )
     elif distinct_cities == 3:
         score = 3
