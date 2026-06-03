@@ -177,21 +177,38 @@ def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
     print(f"Executing: {vboxmanage} {' '.join(args)}")
     capture_output = kwargs.pop("capture_output", True)
     text = kwargs.pop("text", True)
-    result = subprocess.run(
-        [vboxmanage] + args,
-        capture_output=capture_output,
-        text=text,
-        **kwargs,
-    )
-    if result.returncode == 0:
-        return
+    lock_retries = int(kwargs.pop("lock_retries", 12))
+    lock_retry_s = float(kwargs.pop("lock_retry_s", 1.0))
 
-    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-    hint = _vboxmanage_error_hint(output)
-    if hint:
-        raise RuntimeError(f"VBoxManage failed: {output}\n\n{hint}") from None
-    detail = output or f"exit status {result.returncode}"
-    raise RuntimeError(f"VBoxManage failed: {detail}") from None
+    for attempt in range(lock_retries + 1):
+        result = subprocess.run(
+            [vboxmanage] + args,
+            capture_output=capture_output,
+            text=text,
+            **kwargs,
+        )
+        if result.returncode == 0:
+            return
+
+        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        lower = output.lower()
+        locked = (
+            "already locked for a session" in lower
+            or "being unlocked" in lower
+            or "vbox_e_invalid_object_state" in lower
+            or "0x80bb0007" in lower
+        )
+        if locked and attempt < lock_retries:
+            if attempt == 0:
+                print("VirtualBox still has a machine lock; waiting and retrying...")
+            time.sleep(lock_retry_s)
+            continue
+
+        hint = _vboxmanage_error_hint(output)
+        if hint:
+            raise RuntimeError(f"VBoxManage failed: {output}\n\n{hint}") from None
+        detail = output or f"exit status {result.returncode}"
+        raise RuntimeError(f"VBoxManage failed: {detail}") from None
 
 
 def resolve_vbox_settings_path(vm_dir: str, vm_name: str) -> str | None:

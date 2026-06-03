@@ -10,7 +10,9 @@ header mismatch signals, and hosting reputation checks).
 ## What You Get
 
 - Individual detection scripts grouped by topic (`vpn`, `browser`, `network`, `router`, and root checks)
-- A batch runner (`run_all_detections.py`) that discovers scripts automatically
+- A full runner (`run/run_all.py`) that can run VM setup/verification and then detections
+- A detection-only runner (`run/run_all_detections.py`) that discovers probe scripts automatically
+- A VM lab runner (`run/run_VMs.py`) that runs `VM/create_VM_*.py` setup scripts and then `VM/verify_lab_from_host.py`
 - Console output plus an HTML report at `detection_results.html`
 - Script-level scoring on a `1-5` scale
 
@@ -38,13 +40,61 @@ From the **repository root**, using the project virtualenv on **Linux or WSL** (
 ```bash
 cd /path/to/overdrive
 source virtual_env/bin/activate   # optional
-python3 run_all_detections.py
+python3 run/run_all.py
 ```
 
 Outputs:
 
 - Detailed console output
 - HTML report: `detection_results.html`
+
+`run/run_all.py` runs VM setup/verification first and then runs detections. Useful options:
+
+```bash
+python3 run/run_all.py --dry-run
+python3 run/run_all.py --skip-vms
+python3 run/run_all.py --skip-detections
+python3 run/run_all.py --keep-going
+python3 run/run_all.py --vm-arg=--skip-verify
+```
+
+You can also run it from the `run/` directory:
+
+```bash
+cd /path/to/overdrive/run
+python3 run_all.py
+```
+
+### Run Detections Only
+
+If the VM lab is already configured, or you do not want the runner to touch VirtualBox:
+
+```bash
+cd /path/to/overdrive
+python3 run/run_all_detections.py
+```
+
+The detection runner skips support/tooling folders and scripts, including `common/`, `run/`, `VM/create_VM_*.py`, and `VM/verify_lab_from_host.py`.
+
+### Run VM Setup Only
+
+To create/refresh the OpenWrt lab VMs and verify host-side VirtualBox wiring:
+
+```bash
+cd /path/to/overdrive
+python3 run/run_VMs.py
+```
+
+Useful options:
+
+```bash
+python3 run/run_VMs.py --dry-run
+python3 run/run_VMs.py --skip-verify
+python3 run/run_VMs.py --keep-going
+python3 run/run_VMs.py --include-todo
+```
+
+By default, `run/run_VMs.py` skips `create_VM_*.py` scripts whose source contains `TODO`.
 
 #### Where to run (host vs VMs)
 **WSL or native Linux** at repo root 
@@ -56,14 +106,16 @@ Outputs:
 
 Outbound traffic to the internet (e.g. HTTPS to Google) from the **client VM** still exits via **OpenWrt’s WAN** (NAT). What remote collectors see reflects that WAN path. **Management-plane** probes to `192.168.1.x` must still use the **LAN** seat.
 
-The full batch runner may probe **whatever your default gateway is**, which might **not** be OpenWrt. For lab fidelity, run router modules with explicit `--ip` (and the correct profile) as described in [`VM/ROUTER_PLAN.txt`](VM/ROUTER_PLAN.txt). Topology diagrams and example `VBoxManage` / guest output live in [`VM/LAB_TOPOLOGY.md`](VM/LAB_TOPOLOGY.md). To verify only VirtualBox wiring from the host: `python VM/verify_lab_from_host.py`.
+The full batch runner may probe **whatever your default gateway is**, which might **not** be OpenWrt. For lab fidelity, run router modules with explicit `--ip` (and the correct profile) as described in [`VM/ROUTER_PLAN.txt`](VM/ROUTER_PLAN.txt). Topology diagrams and example `VBoxManage` / guest output live in [`VM/LAB_TOPOLOGY.md`](VM/LAB_TOPOLOGY.md). To verify only VirtualBox wiring from the host: `python3 VM/verify_lab_from_host.py`.
 
 ## Important Runtime Notes
 
 
 ### Notes
 - `setup_virtual_env.py` sets up the environment and installs all dependencies
-- `run_all_detections.py` runs the full suite of detections
+- `run/run_all.py` runs VM setup/verification and then the full detection suite
+- `run/run_all_detections.py` runs the detection suite only
+- `run/run_VMs.py` runs VM setup scripts and then `VM/verify_lab_from_host.py`
 - `/local/wsl_config.py` turns on mirrored mode for WSL networking
 - `/VM/verify_lab_from_host.py` verifies basic networking is set up correctly on the VMs
 - `/local/*` reports information about your physical environment
@@ -100,7 +152,7 @@ You must enable Mirrored Networking to make WSL a peer to your Windows host.
 
 ### Passwordless sudo (Scapy capture scripts)
 
-`run_all_detections.py` runs these scripts with **`sudo -n`** (non-interactive sudo, no password prompt):
+`run/run_all_detections.py` runs these scripts with **`sudo -n`** (non-interactive sudo, no password prompt):
 
 - `vpn/TCP_stack.py`
 - `router/TTL.py`

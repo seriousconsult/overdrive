@@ -32,13 +32,22 @@ from pathlib import Path
 # Longer capture + scapy startup
 SUDO_SCRIPT_TIMEOUT_SEC = 180
 
-# Base directory
-BASE_DIR = Path(__file__).parent
+# Repository root. This file lives under ``run/``.
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Python files to skip globally (runner / tooling / package markers, not detection modules)
 EXCLUDE_SCRIPT_NAMES = frozenset(
-    {"run_all_detections.py", "setup_virtual_env.py", "__init__.py"}
+    {
+        "run_all_detections.py",
+        "setup_virtual_env.py",
+        "verify_lab_from_host.py",
+        "__init__.py",
+    }
 )
+
+# Filename prefixes to skip globally. VM creation scripts provision or mutate
+# VirtualBox state and should be run manually, not as score-producing checks.
+EXCLUDE_SCRIPT_PREFIXES = ("create_VM_",)
 
 # Subdirectories under BASE_DIR to skip when auto-discovering.
 # ``common`` contains shared helpers, not standalone detection scripts.
@@ -50,6 +59,7 @@ SKIP_SUBDIRS = frozenset(
         "__pycache__",
         ".venv",
         "node_modules",
+        "run",
         ".idea",
         ".vscode",
     }
@@ -67,11 +77,14 @@ def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
     """
     scripts: dict[str, list[str]] = {}
 
-    root_py = sorted(
-        p.name
-        for p in BASE_DIR.glob("*.py")
-        if p.is_file() and p.name not in EXCLUDE_SCRIPT_NAMES
-    )
+    def is_detection_script(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        if path.name in EXCLUDE_SCRIPT_NAMES:
+            return False
+        return not path.name.startswith(EXCLUDE_SCRIPT_PREFIXES)
+
+    root_py = sorted(p.name for p in BASE_DIR.glob("*.py") if is_detection_script(p))
     scripts["root"] = root_py
 
     for child in sorted(BASE_DIR.iterdir(), key=lambda x: x.name.lower()):
@@ -79,11 +92,7 @@ def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
             continue
         if child.name.startswith(".") or child.name in SKIP_SUBDIRS:
             continue
-        py_files = sorted(
-            p.name
-            for p in child.glob("*.py")
-            if p.is_file() and p.name not in EXCLUDE_SCRIPT_NAMES
-        )
+        py_files = sorted(p.name for p in child.glob("*.py") if is_detection_script(p))
         if not py_files:
             continue
         scripts[child.name] = py_files

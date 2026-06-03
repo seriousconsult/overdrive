@@ -108,7 +108,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <header>
   <h1>Overdrive detection results</h1>
   <div style="display: flex; gap: 1rem; align-items: baseline;">
-    <span class="timestamp">2026-06-03 16:08:36</span>    <span class="timestamp">(9m 34s)</span>
+    <span class="timestamp">2026-06-03 17:44:03</span>    <span class="timestamp">(8m 48s)</span>
   </div>
 </header>
 <main>
@@ -120,22 +120,11 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <tr><td class="script">HTTP3_QUIC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: HeadlessChrome observed with HTTP/2 fallback and no QUIC transport-parameter evidence (strong automation/non-standard client signal).</td></tr>
 <tr><td class="script">WebRTC.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Structured WebRTC fields expose an IPv4 candidate (public or path-visible).</td></tr>
 <tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
-<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like profile: stable canvas is present, but browser signals indicate automation: User-Agent exposes headless browser. hash=digest unavailable, dataURL bytes=9766.</td></tr>
+<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">============================================================</td></tr>
 <tr><td class="script">cookie_tracking.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">font_enumeration.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">full_header.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Request headers and Client Hints look internally consistent for the detected family. | echo=https://httpbin.org/get</td></tr>
 <tr><td class="script">screen_capture.py</td><td><span class="badge badge n5">5</span></td><td class="comment">Screen capture detection returned unexpected data.</td></tr>
-</tbody></table>
-</section>
-<section>
-<h2>Common</h2>
-<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">common_browser.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
-<tr><td class="script">common_local.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
-<tr><td class="script">common_network.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
-<tr><td class="script">common_router.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
-<tr><td class="script">common_vm.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
-<tr><td class="script">common_vpn.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
 </tbody></table>
 </section>
 <section>
@@ -172,9 +161,9 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <h2>Vm</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">create_VM_OpenWrt_router.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
-<tr><td class="script">create_VM_client_browser_pipe.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
+<tr><td class="script">create_VM_client_browser_pipe.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Non-zero exit | VBoxManage.exe: error: Context: &quot;LaunchVMProcess(a-&gt;session, sessionType.raw(), ComSafeArrayAsInParam(aBstrEnv), progress.asOutParam())&quot; at line 921 of file VBoxManageMisc.cpp</td></tr>
 <tr><td class="script">create_VM_linux.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
-<tr><td class="script">verify_lab_from_host.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
+<tr><td class="script">verify_lab_from_host.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Non-zero exit |      VBoxManage.exe controlvm OpenWrt_LAN_Client changeuartmode1 server \\.\pipe\OpenWrt_LAN_Client_serial</td></tr>
 </tbody></table>
 </section>
 <section>
@@ -188,7 +177,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: UNCERTAIN: Mixed or incomplete fingerprint signals. Breakdown: Declared script UA; TLS is not a catalogued library hash (custom stack or rare build).</td></tr>
 <tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
 <tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
-<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 257.24 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 280.01 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
 <tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No tunnel name patterns matched, but many interfaces (5) — possible VM/container or complex routing.</td></tr>
 <tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target.</td></tr>
 </tbody></table>

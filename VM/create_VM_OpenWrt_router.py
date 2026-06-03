@@ -87,9 +87,32 @@ def try_remove_vbox_storage_controller(vboxmanage: str, vm_name: str, ctl_name: 
         f"VBoxManage storagectl --remove {ctl_name!r} failed unexpectedly: {msg}"
     )
 
-
-
-
+def try_remove_vbox_storage_controller_with_retry(
+    vboxmanage: str,
+    vm_name: str,
+    ctl_name: str,
+    *,
+    retries: int = 12,
+    delay_s: float = 1.0,
+) -> None:
+    """Remove a storage controller, retrying transient VirtualBox machine locks."""
+    for attempt in range(retries + 1):
+        try:
+            try_remove_vbox_storage_controller(vboxmanage, vm_name, ctl_name)
+            return
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            locked = (
+                "already locked for a session" in msg
+                or "being unlocked" in msg
+                or "vbox_e_invalid_object_state" in msg
+                or "0x80bb0007" in msg
+            )
+            if not locked or attempt >= retries:
+                raise
+            if attempt == 0:
+                print("VirtualBox still has a machine lock; waiting before storage cleanup...")
+            time.sleep(delay_s)
 
 
 def remove_existing_router_vm(
@@ -238,7 +261,7 @@ def setup_openwrt_vm(start_type: str = "gui") -> None:
         ],
     )
 
-    try_remove_vbox_storage_controller(vboxmanage, VM_NAME, "IDE")
+    try_remove_vbox_storage_controller_with_retry(vboxmanage, VM_NAME, "IDE")
 
     run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
     run_vboxmanage(vboxmanage, ["storageattach", VM_NAME, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", dst_path])
