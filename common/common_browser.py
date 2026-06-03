@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from typing import Any
 
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -17,7 +20,9 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "DEFAULT_REPORT_WIDTH",
     "build_driver",
+    "build_driver_with_fallback",
     "fetch_json",
+    "fetch_browser_json",
     "normalize_ip_fields",
     "ipv4_like_strings",
     "is_private_ipv4",
@@ -45,6 +50,30 @@ def build_driver() -> webdriver.Chrome:
     return webdriver.Chrome(options=opts)
 
 
+def build_driver_with_fallback() -> webdriver.Remote:
+    """
+    Build the standard Chrome WebDriver, falling back to headless Firefox.
+
+    Most browser probes prefer Chrome/Chromium because Client Hints and
+    automation signals are richer there, but a Firefox fallback lets simpler
+    DOM/canvas probes still run on machines without ChromeDriver.
+    """
+    try:
+        return build_driver()
+    except Exception as chrome_error:
+        chrome_msg = str(chrome_error)
+
+    try:
+        opts = FirefoxOptions()
+        opts.add_argument("-headless")
+        return webdriver.Firefox(options=opts)
+    except Exception as firefox_error:
+        raise RuntimeError(
+            "No suitable webdriver found. "
+            f"Chrome error: {chrome_msg}; Firefox error: {firefox_error}"
+        ) from firefox_error
+
+
 def fetch_json(
     url: str,
     params: dict[str, Any] | None = None,
@@ -59,6 +88,46 @@ def fetch_json(
     )
     r.raise_for_status()
     return r.json()
+
+
+def fetch_browser_json(
+    url: str,
+    *,
+    timeout: int = 25,
+    cache_bust: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Load a JSON-rendering page through the shared browser and parse the body/pre text.
+
+    Returns ``(data, error)``. This is useful for probes that need the browser's
+    real transport/header behavior rather than ``requests``.
+    """
+    driver = None
+    try:
+        driver = build_driver()
+        target = url
+        if cache_bust:
+            sep = "&" if "?" in url else "?"
+            target = f"{url}{sep}t={int(time.time())}"
+        driver.get(target)
+        raw = extract_json_text_from_page(driver, timeout=timeout)
+        if not raw:
+            return None, "Could not parse JSON from browser probe page."
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            return None, f"JSON parse error: {type(e).__name__}: {e}"
+        if isinstance(data, dict):
+            return data, None
+        return None, "Probe response was JSON but not an object."
+    except Exception as e:
+        return None, f"Browser probe failed: {type(e).__name__}: {e}"
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
 def normalize_ip_fields(provider: str, raw: dict[str, Any]) -> dict[str, Any]:

@@ -40,9 +40,19 @@ EXCLUDE_SCRIPT_NAMES = frozenset(
     {"run_all_detections.py", "setup_virtual_env.py", "__init__.py"}
 )
 
-# Subdirectories under BASE_DIR to skip when auto-discovering
+# Subdirectories under BASE_DIR to skip when auto-discovering.
+# ``common`` contains shared helpers, not standalone detection scripts.
 SKIP_SUBDIRS = frozenset(
-    {"virtual_env", ".git", "__pycache__", ".venv", "node_modules", ".idea", ".vscode"}
+    {
+        "common",
+        "virtual_env",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "node_modules",
+        ".idea",
+        ".vscode",
+    }
 )
 
 # Scripts that need sudo (run with elevated privileges; Scapy capture on Linux/WSL)

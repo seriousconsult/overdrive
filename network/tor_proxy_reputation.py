@@ -45,13 +45,10 @@ if str(_REPO_ROOT) not in sys.path:
 import requests
 
 from common.common_network import (
-    fetch_public_ipv4_ipify,
     ipv4_listed_in_netset,
-    parse_ipv4,
+    resolve_egress_ipv4 as resolve_egress_ipv4_common,
 )
 
-IPV4_ICANHAZIP = "https://ipv4.icanhazip.com/"
-IPV4_IFCONFIGME = "https://ifconfig.me/ip"
 ONIONOO_DETAILS = "https://onionoo.torproject.org/details"
 FIREHOL_PROXIES = (
     "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_proxies.netset"
@@ -71,54 +68,13 @@ REFRESH_IF_OLDER_SEC = 6 * 3600
 ONIONOO_LIMITS = ("100", "500")
 
 
-def _probe_ipify() -> str | None:
-    return fetch_public_ipv4_ipify(
+def resolve_egress_ipv4() -> tuple[str | None, bool, str]:
+    """Compatibility wrapper for existing call sites/tests in this module."""
+    return resolve_egress_ipv4_common(
         user_agent=UA["User-Agent"],
         timeout=TIMEOUT,
+        override_env="OVERDRIVE_IP",
     )
-
-
-def _probe_plain_ipv4(url: str) -> str | None:
-    try:
-        r = requests.get(url, headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        return parse_ipv4(r.text)
-    except (requests.RequestException, ValueError, TypeError):
-        return None
-
-
-def resolve_egress_ipv4() -> tuple[str | None, bool, str]:
-    """
-    Returns ``(ip, strong_consensus, note)``.
-    ``strong_consensus`` is True for ``OVERDRIVE_IP`` or when at least two probes return the same IPv4.
-    """
-    override = parse_ipv4(os.environ.get("OVERDRIVE_IP"))
-    if override:
-        return override, True, ""
-
-    probes: list[tuple[str, str | None]] = [
-        ("ipify", _probe_ipify()),
-        ("icanhazip", _probe_plain_ipv4(IPV4_ICANHAZIP)),
-        ("ifconfig.me", _probe_plain_ipv4(IPV4_IFCONFIGME)),
-    ]
-    successes = [(name, ip) for name, ip in probes if ip]
-    if not successes:
-        return None, False, "all IPv4 probes failed"
-
-    by_ip: dict[str, list[str]] = {}
-    for name, ip in successes:
-        by_ip.setdefault(ip, []).append(name)
-
-    if len(by_ip) > 1:
-        parts = [f"{ip} ({', '.join(names)})" for ip, names in sorted(by_ip.items())]
-        return None, False, "IPv4 probes disagree: " + "; ".join(parts)
-
-    ip = next(iter(by_ip))
-    if len(successes) >= 2:
-        return ip, True, ""
-
-    lone = successes[0][0]
-    return ip, False, f"only one IPv4 probe succeeded ({lone}); need 2+ agreeing for strong consensus"
 
 
 def _or_address_host(or_addr: str) -> str:

@@ -15,9 +15,7 @@ A standard Chrome browser on Windows has one specific pattern of these settings.
 
 from __future__ import annotations
 
-import json
 import re
-import time
 from typing import Any
 
 import sys
@@ -26,36 +24,14 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from common.common_browser import build_driver, extract_json_text_from_page
+from common.common_browser import fetch_browser_json
 
 API_URL = "https://tls.peet.ws/api/all"
 TIMEOUT = 25
 
 
 def fetch_browser_observation() -> tuple[dict[str, Any] | None, str | None]:
-    driver = None
-    try:
-        driver = build_driver()
-        url = f"{API_URL}?src=browser&t={int(time.time())}"
-        driver.get(url)
-        raw = extract_json_text_from_page(driver)
-        if not raw:
-            return None, "Could not parse JSON from browser probe page."
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                return data, None
-            return None, "Probe response was JSON but not an object."
-        except Exception as e:
-            return None, f"JSON parse error: {type(e).__name__}: {e}"
-    except Exception as e:
-        return None, f"Browser probe failed: {type(e).__name__}: {e}"
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+    return fetch_browser_json(f"{API_URL}?src=browser", timeout=TIMEOUT, cache_bust=True)
 
 
 def _walk_key_values(obj: Any, prefix: str = "") -> list[tuple[str, Any]]:

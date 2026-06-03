@@ -39,8 +39,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-DEFAULT_TIMEOUT = 8
-DEFAULT_REPORT_WIDTH = 60
+from common.common_browser import (
+    DEFAULT_TIMEOUT,
+    build_driver_with_fallback,
+    print_browser_detection_header,
+    print_browser_detection_score_footer,
+)
 
 
 CANVAS_PROBE_JS = r"""
@@ -184,60 +188,6 @@ function drawCanvas() {
 """
 
 
-def _build_driver_with_fallback():
-    """Create the shared Chrome driver, falling back to headless Firefox."""
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options as ChromeOptions
-
-        options = ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1280,800")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        return webdriver.Chrome(options=options)
-    except Exception as chrome_error:
-        chrome_msg = str(chrome_error)
-
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.firefox.options import Options as FirefoxOptions
-
-        options = FirefoxOptions()
-        options.add_argument("-headless")
-        return webdriver.Firefox(options=options)
-    except Exception as firefox_error:
-        raise RuntimeError(
-            "No suitable webdriver found. "
-            f"Chrome error: {chrome_msg}; Firefox error: {firefox_error}"
-        ) from firefox_error
-
-
-def print_browser_detection_header(
-    title: str, *, width: int = DEFAULT_REPORT_WIDTH
-) -> None:
-    """Print the standard browser detection banner."""
-    bar = "=" * width
-    print(bar)
-    print(title)
-    print(bar)
-    print()
-
-
-def print_browser_detection_score_footer(
-    score: int, description: str, *, width: int = DEFAULT_REPORT_WIDTH
-) -> None:
-    """Print the standard score footer parsed by the suite."""
-    print(f"Score: {score}")
-    print(f"  {description}")
-    print()
-    print("=" * width)
-
-
 def _browser_profile_issues(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return ``(strong_issues, soft_issues)`` for browser-profile coherence."""
     strong: list[str] = []
@@ -335,7 +285,7 @@ def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str
 
     driver = None
     try:
-        driver = _build_driver_with_fallback()
+        driver = build_driver_with_fallback()
     except Exception as e:
         return 3, str(e)
 
@@ -364,7 +314,8 @@ def check_canvas_fingerprint() -> tuple[int, str]:
 
 def main() -> None:
     score, description = check_canvas_fingerprint()
-    print(f"SCORE: {score}")
+    print_browser_detection_header("Canvas Home-Browser Plausibility Check")
+    print_browser_detection_score_footer(score, description)
     print(f"STATUS: {description}")
 
 

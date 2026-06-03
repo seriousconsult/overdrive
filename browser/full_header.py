@@ -27,16 +27,9 @@ Echo URLs (tried in order):
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 from urllib.parse import urlparse
-
-# Selenium (same pattern as WebRTC.py)
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
 
 import sys
 from pathlib import Path
@@ -44,7 +37,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from common.common_browser import build_driver
+from common.common_browser import fetch_browser_json
 
 ECHO_URLS = (
     "https://httpbin.org/get",
@@ -556,30 +549,15 @@ def analyze_headers(
 def fetch_headers_via_browser() -> tuple[dict[str, str] | None, str | None, str | None]:
     last_err: str | None = None
     for url in ECHO_URLS:
-        driver = None
-        try:
-            driver = build_driver()
-            driver.get(url)
-            wait = WebDriverWait(driver, TIMEOUT)
-            pre = wait.until(EC.presence_of_element_located((By.TAG_NAME, "pre")))
-            text = pre.text
-            data = json.loads(text)
-            hdrs: dict[str, str] = {}
-            if "headers" in data:
-                hdrs = {str(k): str(v) for k, v in data["headers"].items()}
-            else:
-                last_err = f"{url}: no 'headers' in JSON"
-                continue
-            return hdrs, None, url
-        except Exception as e:
-            last_err = f"{url}: {type(e).__name__}: {e}"
+        data, err = fetch_browser_json(url, timeout=TIMEOUT)
+        if not data:
+            last_err = f"{url}: {err or 'no JSON data'}"
             continue
-        finally:
-            if driver is not None:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+        if "headers" not in data:
+            last_err = f"{url}: no 'headers' in JSON"
+            continue
+        hdrs = {str(k): str(v) for k, v in data["headers"].items()}
+        return hdrs, None, url
     return None, last_err, None
 
 
