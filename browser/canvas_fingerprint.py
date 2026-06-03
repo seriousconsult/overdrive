@@ -364,7 +364,8 @@ def check_canvas_fingerprint() -> tuple[int, str]:
 
 def main() -> None:
     score, description = check_canvas_fingerprint()
-    print(f"Score: {score} — STATUS: {description}")
+    print(f"SCORE: {score}")
+    print(f"STATUS: {description}")
 
 
 if __name__ == "__main__":

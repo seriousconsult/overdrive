@@ -3,10 +3,7 @@ r"""
 Create a Linux VM in VirtualBox for use **behind** the OpenWrt router from
 ``create_VM_OpenWrt_router.py``.
 
-The default OSBoxes image is **Ubuntu Server** (URL contains ``svr``): first boot ends at a **text
-console** (``osboxes login:``), not a full desktop. A black screen with green ``[ OK ]`` lines is
-normal—it is **not** frozen. Click the VM window, press **Enter**, log in, then optionally install a
-desktop (see printed hints). Confirm current password on https://www.osboxes.org/
+Confirm current password on https://www.osboxes.org/
 
 Networking (lab):
   * **NIC1** — VirtualBox **internal network** ``openwrt-lan`` (same name as the router’s LAN leg).
@@ -23,23 +20,53 @@ through OpenWrt, use RDP/guest tools or a second setup—this script targets the
 router LAN” topology.
 
 
-Serial console named pipe:
-  1. The VM serial port is the "hole in the wall": a small text-only COM port that is separate
-     from Internet, Wi-Fi, DHCP, and graphics.
-  2. The VirtualBox named pipe / host socket is the "plastic tube" attached to that serial port.
-     One end is connected to the VM; the other end appears on the Linux host as a Unix socket such
-     as ``/tmp/OpenWrt_LAN_Client_serial.sock``. If WSL is controlling Windows VirtualBox through
-     ``VBoxManage.exe``, the host end is instead the Windows pipe
-     ``\\.\pipe\OpenWrt_LAN_Client_serial``.
-  3. ``socat`` + ``screen`` is the "walkie-talkie" on Linux/WSL. Connect ``socat`` to the Unix
-     socket, have it create a temporary PTY, then attach ``screen`` at ``115200`` baud. Anything
-     typed there goes into the VM serial login; anything the VM writes to the serial console comes
-     back to your terminal.
+Serial console pipe/socket:
+  The VM has COM1 wired to the guest's ``ttyS0`` login console at 115200 baud. This is useful when
+  DHCP, graphics, SSH, or the browser environment is broken because it is a tiny text-only backdoor
+  into the guest.
+
+  Which pipe you connect to depends on the **host VirtualBox is actually running on**:
+
+  * Windows host / Windows VirtualBox:
+      VirtualBox exposes ``\\.\pipe\OpenWrt_LAN_Client_serial``. Start the VM first, then connect
+      from Windows with PuTTY:
+        Connection type: Serial
+        Serial line:     \\.\pipe\OpenWrt_LAN_Client_serial
+        Speed:           115200
+
+  * WSL shell controlling Windows VirtualBox through ``VBoxManage.exe``:
+      This is still a **Windows VirtualBox** pipe, not a WSL Unix socket. Do not expect
+      ``/tmp/OpenWrt_LAN_Client_serial.sock`` to exist in WSL in this mode.
+
+      The most direct interactive option is to connect from the Windows side with PuTTY using:
+        Connection type: Serial
+        Serial line:     \\.\pipe\OpenWrt_LAN_Client_serial
+        Speed:           115200
+
+      From a WSL shell you can still prove or script pipe access by launching a Windows client.
+      This command connects to the Windows named pipe from WSL and prints ``CONNECTED_FROM_WSL: True``
+      when the pipe is accepting clients:
+        powershell.exe -NoProfile -Command \
+          '$c=[IO.Pipes.NamedPipeClientStream]::new(".","OpenWrt_LAN_Client_serial",[IO.Pipes.PipeDirection]::InOut); try{$c.Connect(5000); "CONNECTED_FROM_WSL: $($c.IsConnected)"} finally{$c.Dispose()}'
+
+      If the pipe exists but clients hang, time out, or report "All pipe instances are busy", reset
+      just the VM serial backend without rebuilding the VM:
+        VBoxManage.exe controlvm OpenWrt_LAN_Client changeuartmode1 disconnected
+        VBoxManage.exe controlvm OpenWrt_LAN_Client changeuartmode1 server \\.\pipe\OpenWrt_LAN_Client_serial
+
+      For a real WSL terminal, install a Windows named-pipe bridge such as ``npiperelay.exe`` and
+      connect it to WSL ``socat``/``screen``; otherwise use PuTTY on Windows.
+
+  * Native Linux host / Linux VirtualBox:
+      VirtualBox exposes the Unix socket ``/tmp/OpenWrt_LAN_Client_serial.sock``. After the VM
+      starts, run ``socat`` in one terminal to create a PTY, then attach ``screen`` in another:
+        rm -f /tmp/OpenWrt_LAN_Client_serial.pty
+        socat -d -d UNIX-CONNECT:/tmp/OpenWrt_LAN_Client_serial.sock PTY,link=/tmp/OpenWrt_LAN_Client_serial.pty,raw,echo=0
+        screen /tmp/OpenWrt_LAN_Client_serial.pty 115200
+
+      Detach/close screen with Ctrl-a then k.
 
 
-Requires: ``VBoxManage``, ``7z``. **Strongly recommended:** ``virt-customize``
-(``sudo apt install libguestfs-tools`` on WSL) so the guest gets DHCP tools without in-guest ``apt``.
-Network on the **host** for OSBoxes download + ``virt-customize`` package installs into the VDI.
 """
 
 from __future__ import annotations
@@ -239,16 +266,23 @@ def serial_console_instructions(vboxmanage: str, pipe_name: str) -> str:
         return (
             "--- Serial console named pipe ---\n"
             f"VirtualBox exposes COM1 as: {pipe_name}\n"
-            "Because this is Windows VirtualBox, connect with PuTTY on Windows:\n"
+            "Because this is Windows VirtualBox, this is a Windows named pipe, not a WSL /tmp socket.\n"
+            "Interactive connection from Windows/PuTTY:\n"
             "  Connection type: Serial\n"
             f"  Serial line:     {pipe_name}\n"
             f"  Speed:           {SERIAL_BAUD}\n"
+            "Quick connection proof from WSL, by launching a Windows pipe client:\n"
+            "  powershell.exe -NoProfile -Command '$c=[IO.Pipes.NamedPipeClientStream]::new(\".\",\"OpenWrt_LAN_Client_serial\",[IO.Pipes.PipeDirection]::InOut); try{$c.Connect(5000); \"CONNECTED_FROM_WSL: $($c.IsConnected)\"} finally{$c.Dispose()}'\n"
+            "If the pipe is present but busy/stuck, refresh only the live UART backend:\n"
+            f"  VBoxManage.exe controlvm {VM_NAME} changeuartmode1 disconnected\n"
+            f"  VBoxManage.exe controlvm {VM_NAME} changeuartmode1 server {pipe_name}\n"
+            "For an interactive WSL terminal, bridge the Windows named pipe with npiperelay.exe plus socat/screen.\n"
             "Start the VM first, then connect PuTTY to the pipe. The guest should show a ttyS0 login.\n"
         )
     return (
         "--- Serial console host socket ---\n"
         f"VirtualBox exposes COM1 as: {pipe_name}\n"
-        "On Linux/WSL, attach with socat plus screen:\n"
+        "Because this is native Linux VirtualBox, attach with socat plus screen:\n"
         f"  rm -f {SERIAL_PTY_LINK_PATH}\n"
         f"  socat -d -d UNIX-CONNECT:{pipe_name} PTY,link={SERIAL_PTY_LINK_PATH},raw,echo=0\n"
         f"  screen {SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}\n"

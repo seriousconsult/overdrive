@@ -2,8 +2,8 @@
 """
 Parent script that runs all detection scripts and outputs scores.
 
-Discovers scripts dynamically: root-level *.py (except this runner and
-virtual_env_setup.py) plus *.py in each immediate subfolder (skipping
+Discovers scripts dynamically: root-level *.py (except this runner,
+virtual_env_setup.py, and package initializers) plus *.py in each immediate subfolder (skipping
 virtual_env, .git, etc.), including **router/** (banner/OUI/TTL/NAT probes).
 Section order: Root first, then subfolders A–Z.
 
@@ -35,8 +35,10 @@ SUDO_SCRIPT_TIMEOUT_SEC = 180
 # Base directory
 BASE_DIR = Path(__file__).parent
 
-# Root-level .py files to skip (runner / tooling, not detection modules)
-EXCLUDE_ROOT_SCRIPTS = frozenset({"run_all_detections.py", "setup_virtual_env.py"})
+# Python files to skip globally (runner / tooling / package markers, not detection modules)
+EXCLUDE_SCRIPT_NAMES = frozenset(
+    {"run_all_detections.py", "setup_virtual_env.py", "__init__.py"}
+)
 
 # Subdirectories under BASE_DIR to skip when auto-discovering
 SKIP_SUBDIRS = frozenset(
@@ -50,15 +52,15 @@ SUDO_SCRIPTS = frozenset({"TCP_stack.py", "TTL.py", "NAT_OS.py"})
 def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
     """
     Build folder -> sorted list of *.py script names from disk.
-    Root = BASE_DIR/*.py (excluding EXCLUDE_ROOT_SCRIPTS).
-    Other folders = immediate subdirs (except SKIP_SUBDIRS) that contain at least one *.py.
+    Root = BASE_DIR/*.py (excluding EXCLUDE_SCRIPT_NAMES).
+    Other folders = immediate subdirs (except SKIP_SUBDIRS) that contain at least one detection *.py.
     """
     scripts: dict[str, list[str]] = {}
 
     root_py = sorted(
         p.name
         for p in BASE_DIR.glob("*.py")
-        if p.is_file() and p.name not in EXCLUDE_ROOT_SCRIPTS
+        if p.is_file() and p.name not in EXCLUDE_SCRIPT_NAMES
     )
     scripts["root"] = root_py
 
@@ -67,7 +69,11 @@ def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
             continue
         if child.name.startswith(".") or child.name in SKIP_SUBDIRS:
             continue
-        py_files = sorted(p.name for p in child.glob("*.py") if p.is_file())
+        py_files = sorted(
+            p.name
+            for p in child.glob("*.py")
+            if p.is_file() and p.name not in EXCLUDE_SCRIPT_NAMES
+        )
         if not py_files:
             continue
         scripts[child.name] = py_files

@@ -108,7 +108,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <header>
   <h1>Overdrive detection results</h1>
   <div style="display: flex; gap: 1rem; align-items: baseline;">
-    <span class="timestamp">2026-06-01 22:41:13</span>    <span class="timestamp">(6m 59s)</span>
+    <span class="timestamp">2026-06-03 16:08:36</span>    <span class="timestamp">(9m 34s)</span>
   </div>
 </header>
 <main>
@@ -116,11 +116,11 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <h2>Browser</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: All providers agree on one country name — not multiple countries.</td></tr>
-<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile. (Observed UA names python-httpx/httpx (library client); HTTP/2 SETTINGS look library-like (Akamai heuristic); JA3 matches catalogued Python HTTP stacks …)</td></tr>
+<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile. (Observed UA names python-httpx/httpx (library client); HTTP/2 SETTINGS look library-like (Akamai heuristic); SETTINGS header table size 4096 is small (library-like))</td></tr>
 <tr><td class="script">HTTP3_QUIC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: HeadlessChrome observed with HTTP/2 fallback and no QUIC transport-parameter evidence (strong automation/non-standard client signal).</td></tr>
 <tr><td class="script">WebRTC.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Structured WebRTC fields expose an IPv4 candidate (public or path-visible).</td></tr>
 <tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
-<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">============================================================</td></tr>
+<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like profile: stable canvas is present, but browser signals indicate automation: User-Agent exposes headless browser. hash=digest unavailable, dataURL bytes=9766.</td></tr>
 <tr><td class="script">cookie_tracking.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">font_enumeration.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">full_header.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Request headers and Client Hints look internally consistent for the detected family. | echo=https://httpbin.org/get</td></tr>
@@ -130,7 +130,6 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <section>
 <h2>Common</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">__init__.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
 <tr><td class="script">common_browser.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
 <tr><td class="script">common_local.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
 <tr><td class="script">common_network.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
@@ -143,7 +142,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <h2>Local Host</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">container_VM.py</td><td><span class="badge badge n5">5</span></td><td class="comment">Likely Virtualized: Network: No virt-OUIs or TTL anomalies detected. Local: Running inside WSL, which is a virtualized environment.</td></tr>
-<tr><td class="script">my_DNS.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Private resolver(s) with **ISP-style PTR** (reverse DNS gave a hostname on your LAN or ISP edge). That hostname often encodes the router **model family** (e.g. G3100), not a full SKU. Summary: 192.168.1.1 (ISP/Internal (G3100.mynetworksettings.com))</td></tr>
+<tr><td class="script">my_DNS.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Private resolver(s) with **ISP-style PTR** (reverse DNS gave a hostname on your LAN or ISP edge). That hostname often encodes the router **model family** (e.g. G3100), not a full SKU. Summary: 192.168.1.1 (ISP/Internal (_gateway))</td></tr>
 <tr><td class="script">my_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: At least one listener is bound to a network-facing address; services may be reachable from the LAN.</td></tr>
 <tr><td class="script">my_router.py</td><td><span class="badge badge err">Error</span></td><td class="comment">Timeout</td></tr>
 <tr><td class="script">wsl_config.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
@@ -163,7 +162,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
 <tr><td class="script">NAT_OS.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: No source showed both Linux- and Windows-range TTLs.</td></tr>
 <tr><td class="script">OUI.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: MAC present; OUI not in heuristic map.</td></tr>
-<tr><td class="script">TTL.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Strongest suspect 192.168.1.163: Possible Linux/mac/IoT-ish stack (heuristic TTL)</td></tr>
+<tr><td class="script">TTL.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Strongest suspect 192.168.1.164: Possible Linux/mac/IoT-ish stack (heuristic TTL)</td></tr>
 <tr><td class="script">UPNP.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Verizon | G3100 | G3100 | G3100 | G401119081362912</td></tr>
 <tr><td class="script">banners.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: https://192.168.1.1/login.html</td></tr>
 <tr><td class="script">mDNS_mesh.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: Score and status not implemented</td></tr>
@@ -186,12 +185,11 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <tr><td class="script">IPv6_leak.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: IPv4/IPv6 agree (US); ISP metadata similar — no obvious split exit.</td></tr>
 <tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">Measured via: ip -o link show (local link MTU; not path MTU to a remote host)</td></tr>
 <tr><td class="script">TCP_stack.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: MATCH: Captured TCP SYN stack matches this OS family (low suspicion).</td></tr>
-<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: AUTOMATION / BOT / VPN-CLIENT LIKELY: Script stack or browser UA with library fingerprints. Breakdown: Declared script/library UA matches known automation TLS fingerprints (JA3/PeetPrint/JA4).</td></tr>
-<tr><td class="script">__init__.py</td><td><span class="badge badge na">N/A</span></td><td class="comment">—</td></tr>
+<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: UNCERTAIN: Mixed or incomplete fingerprint signals. Breakdown: Declared script UA; TLS is not a catalogued library hash (custom stack or rare build).</td></tr>
 <tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
 <tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
-<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 221.95 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
-<tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No tunnel name patterns matched, but many interfaces (6) — possible VM/container or complex routing.</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 257.24 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
+<tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No tunnel name patterns matched, but many interfaces (5) — possible VM/container or complex routing.</td></tr>
 <tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target.</td></tr>
 </tbody></table>
 </section>

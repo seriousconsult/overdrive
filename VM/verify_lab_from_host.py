@@ -38,6 +38,121 @@ from common.common_vm import (
 ROUTER_VM = "OpenWrt_2026_Router"
 CLIENT_VM = "OpenWrt_LAN_Client"
 LAN_INTNET_NAME = "openwrt-lan"
+SERIAL_WINDOWS_PIPE_NAME = r"\\.\pipe\OpenWrt_LAN_Client_serial"
+SERIAL_WINDOWS_PIPE_BASENAME = "OpenWrt_LAN_Client_serial"
+SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_LAN_Client_serial.sock"
+
+
+def vboxmanage_targets_windows(vboxmanage: str) -> bool:
+    """True when this shell is controlling Windows VirtualBox through VBoxManage.exe."""
+    return os.path.basename(vboxmanage).lower().endswith(".exe")
+
+
+def expected_serial_pipe(vboxmanage: str) -> str:
+    """Return the host-side serial endpoint expected for this VirtualBox host."""
+    if vboxmanage_targets_windows(vboxmanage):
+        return SERIAL_WINDOWS_PIPE_NAME
+    return SERIAL_UNIX_SOCKET_PATH
+
+
+def find_vboxmanage_for_verify(paths: dict[str, str | bool | None]) -> str | None:
+    """Find VBoxManage, including common Windows install paths when running from PowerShell."""
+    found = find_vboxmanage(paths)
+    if found:
+        return found
+    for candidate in (
+        r"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe",
+        r"C:\Program Files\VirtualBox\VBoxManage.exe",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def find_windows_powershell() -> str | None:
+    """Find Windows PowerShell from Windows or WSL."""
+    candidates = [
+        shutil.which("powershell.exe"),
+        "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe",
+        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def probe_windows_named_pipe(pipe_basename: str, timeout_ms: int = 5000) -> tuple[bool, str]:
+    """Connect to a Windows named pipe using a bounded PowerShell client."""
+    powershell = find_windows_powershell()
+    if not powershell:
+        return False, "Windows PowerShell not found; cannot probe Windows named pipe from this shell."
+
+    ps_script = f"""
+$ErrorActionPreference = 'Stop'
+$client = [System.IO.Pipes.NamedPipeClientStream]::new('.', '{pipe_basename}', [System.IO.Pipes.PipeDirection]::InOut)
+try {{
+  $client.Connect({timeout_ms})
+  if ($client.IsConnected) {{
+    Write-Output 'CONNECTED'
+  }} else {{
+    Write-Output 'NOT_CONNECTED'
+  }}
+}} catch {{
+  Write-Output ('FAILED: ' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' '))
+}} finally {{
+  $client.Dispose()
+}}
+"""
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=(timeout_ms / 1000) + 5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"PowerShell pipe probe did not complete: {exc}"
+
+    combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    return "CONNECTED" in result.stdout.splitlines(), combined or f"PowerShell exited {result.returncode}"
+
+
+def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool) -> list[str]:
+    """Verify the client VM serial console endpoint is configured and accepts a host connection."""
+    errs: list[str] = []
+    expected_pipe = expected_serial_pipe(vbox)
+    uart1 = info.get("uart1", "")
+    uartmode1 = info.get("uartmode1", "")
+
+    if uart1 in ("", "off"):
+        errs.append(f"client serial: expected COM1 enabled, got uart1={uart1!r}")
+    if uartmode1 != f"server,{expected_pipe}":
+        errs.append(
+            f"client serial: expected uartmode1='server,{expected_pipe}', got {uartmode1!r}"
+        )
+        return errs
+
+    if vboxmanage_targets_windows(vbox):
+        ok, detail = probe_windows_named_pipe(SERIAL_WINDOWS_PIPE_BASENAME)
+        if ok:
+            print(f"  [+] {CLIENT_VM} serial pipe accepts a Windows named-pipe client: {expected_pipe}")
+        else:
+            errs.append(
+                "client serial pipe did not accept a Windows named-pipe client. "
+                f"Probe output: {detail}"
+            )
+            print(f"  [!] {CLIENT_VM} serial pipe probe failed: {detail}")
+    else:
+        if os.path.exists(expected_pipe):
+            print(f"  [+] {CLIENT_VM} serial socket exists: {expected_pipe}")
+        else:
+            errs.append(f"client serial socket does not exist: {expected_pipe}")
+
+    if verbose:
+        print(f"  [{CLIENT_VM}] uart1={uart1!r} uartmode1={uartmode1!r}")
+    return errs
 
 
 def check_advanced_nic(info: dict[str, str], vm_name: str) -> list[str]:
@@ -192,13 +307,14 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
             all_errs.extend(check_router(info, verbose))
         else:
             all_errs.extend(check_client(info, verbose))
+            all_errs.extend(check_client_serial_pipe(vbox, info, verbose))
 
     return all_errs
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Verify OpenWrt lab VM networking from the host (VBoxManage only).",
+        description="Verify OpenWrt lab VM networking and client serial pipe from the host.",
     )
     ap.add_argument(
         "-v",
@@ -210,7 +326,7 @@ def main() -> int:
 
     # 1. Locate the VBoxManage executable
     paths = get_system_paths(ROUTER_VM)
-    vbox = find_vboxmanage(paths)
+    vbox = find_vboxmanage_for_verify(paths)
     if not vbox:
         print(
             "[!] VBoxManage not found. Ensure VirtualBox is installed.\n"
@@ -237,6 +353,9 @@ def main() -> int:
         print(f"  1. Run the 'create_VM_*.py' scripts to reset the NICs.")
         print(f"  2. Open VirtualBox GUI -> Settings -> Network -> Advanced.")
         print(f"     Ensure 'Cable Connected' is checked and 'Promiscuous Mode' is NOT 'Deny'.")
+        print(f"  3. If only the serial pipe is busy/stuck, refresh the live UART backend:")
+        print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 disconnected")
+        print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 server {SERIAL_WINDOWS_PIPE_NAME}")
         return 1
 
     print("\n[+] SUCCESS: VirtualBox 'Layer 1' wiring is correct.")
