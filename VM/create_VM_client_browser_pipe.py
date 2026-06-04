@@ -20,42 +20,27 @@ through OpenWrt, use RDP/guest tools or a second setup—this script targets the
 router LAN” topology.
 
 
-Serial console pipe/socket:
+Serial console endpoint:
   The VM has COM1 wired to the guest's ``ttyS0`` login console at 115200 baud. This is useful when
   DHCP, graphics, SSH, or the browser environment is broken because it is a tiny text-only backdoor
   into the guest.
 
-  Which pipe you connect to depends on the **host VirtualBox is actually running on**:
+  Which endpoint you connect to depends on the **host VirtualBox is actually running on**:
 
   * Windows host / Windows VirtualBox:
-      VirtualBox exposes ``\\.\pipe\OpenWrt_LAN_Client_serial``. Start the VM first, then connect
-      from Windows with PuTTY:
-        Connection type: Serial
-        Serial line:     \\.\pipe\OpenWrt_LAN_Client_serial
-        Speed:           115200
+      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2323``. The script starts the VM headless
+      and attaches from WSL using a native Python socket terminal.
 
   * WSL shell controlling Windows VirtualBox through ``VBoxManage.exe``:
-      This is still a **Windows VirtualBox** pipe, not a WSL Unix socket. Do not expect
-      ``/tmp/OpenWrt_LAN_Client_serial.sock`` to exist in WSL in this mode.
+      This is still **Windows VirtualBox**, so this script uses TCP instead of Windows named pipes.
+      To attach to an already-running VM:
+        ./create_VM_client_browser_pipe.py --serial-only
 
-      The most direct interactive option is to connect from the Windows side with PuTTY using:
-        Connection type: Serial
-        Serial line:     \\.\pipe\OpenWrt_LAN_Client_serial
-        Speed:           115200
+      By default, this script starts the VM headless and then attaches this terminal. Use
+      ``--no-connect-serial`` when you only want to create/start the VM and return to the shell.
 
-      From a WSL shell you can still prove or script pipe access by launching a Windows client.
-      This command connects to the Windows named pipe from WSL and prints ``CONNECTED_FROM_WSL: True``
-      when the pipe is accepting clients:
-        powershell.exe -NoProfile -Command \
-          '$c=[IO.Pipes.NamedPipeClientStream]::new(".","OpenWrt_LAN_Client_serial",[IO.Pipes.PipeDirection]::InOut); try{$c.Connect(5000); "CONNECTED_FROM_WSL: $($c.IsConnected)"} finally{$c.Dispose()}'
-
-      If the pipe exists but clients hang, time out, or report "All pipe instances are busy", reset
-      just the VM serial backend without rebuilding the VM:
-        VBoxManage.exe controlvm OpenWrt_LAN_Client changeuartmode1 disconnected
-        VBoxManage.exe controlvm OpenWrt_LAN_Client changeuartmode1 server \\.\pipe\OpenWrt_LAN_Client_serial
-
-      For a real WSL terminal, install a Windows named-pipe bridge such as ``npiperelay.exe`` and
-      connect it to WSL ``socat``/``screen``; otherwise use PuTTY on Windows.
+      The built-in WSL bridge uses raw terminal input, maps Enter to serial carriage return, and
+      disconnects with Ctrl-].
 
   * Native Linux host / Linux VirtualBox:
       VirtualBox exposes the Unix socket ``/tmp/OpenWrt_LAN_Client_serial.sock``. After the VM
@@ -72,16 +57,16 @@ Serial console pipe/socket:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import platform
 import shutil
+import select
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
-
-import requests
-from requests.exceptions import RequestException
 
 # Ensure sibling common/ package is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -108,12 +93,13 @@ LAN_INTNET_NAME = "openwrt-lan"
 
 VM_NAME = "OpenWrt_LAN_Client"
 CLIENT_VDI_NAME = "client_browser.vdi"
-SERIAL_WINDOWS_PIPE_NAME = r"\\.\pipe\OpenWrt_LAN_Client_serial"
+SERIAL_TCP_HOST = "127.0.0.1"
+SERIAL_TCP_PORT = 2323
 SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_LAN_Client_serial.sock"
 SERIAL_PTY_LINK_PATH = "/tmp/OpenWrt_LAN_Client_serial.pty"
 SERIAL_BAUD = "115200"
 
-# Ubuntu 24.04 **Server** from OSBoxes (no GUI until you install one in the guest).
+# Ubuntu 24.04 **Server** from OSBoxes.
 OSBOXES_URL = (
     "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
 )
@@ -125,6 +111,15 @@ OSBOXES_LOGIN_PASSWORD_HINT = "osboxes.org"
 
 def download_osboxes_archive(url: str, archive_path: str) -> None:
     """Download the OSBoxes archive with a useful error when the host has no route."""
+    try:
+        import requests
+        from requests.exceptions import RequestException
+    except ImportError as exc:
+        raise RuntimeError(
+            "The Python 'requests' package is required only when downloading the OSBoxes archive.\n"
+            "Install it in this environment, or pass --archive-path with an existing archive."
+        ) from exc
+
     print(f"Downloading OSBoxes archive to {archive_path}...")
     try:
         r = requests.get(url, stream=True, allow_redirects=True, timeout=120)
@@ -235,14 +230,24 @@ fi
 def guest_serial_console_commands() -> list[str]:
     """Commands run inside the guest image so ttyS0 has a login prompt."""
     return [
-        f"systemctl enable serial-getty@ttyS0.service",
+        (
+            "mkdir -p /etc/systemd/system/getty.target.wants && "
+            "if [ -e /lib/systemd/system/serial-getty@.service ]; then "
+            "ln -sf /lib/systemd/system/serial-getty@.service "
+            "/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service; "
+            "elif [ -e /usr/lib/systemd/system/serial-getty@.service ]; then "
+            "ln -sf /usr/lib/systemd/system/serial-getty@.service "
+            "/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service; "
+            "else echo 'serial-getty template not found' >&2; exit 1; fi"
+        ),
         (
             "if [ -f /etc/default/grub ]; then "
-            "sed -i "
-            "'s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"console=tty0 console=ttyS0,"
-            f"{SERIAL_BAUD}n8\"/' "
-            "/etc/default/grub; "
-            "update-grub || true; "
+            "if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then "
+            "sed -i 's#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\"console=tty0 console=ttyS0,"
+            f"{SERIAL_BAUD}n8\"#' /etc/default/grub; "
+            "else echo 'GRUB_CMDLINE_LINUX=\"console=tty0 console=ttyS0,"
+            f"{SERIAL_BAUD}n8\"' >> /etc/default/grub; fi; "
+            "update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true; "
             "fi"
         ),
     ]
@@ -253,50 +258,50 @@ def vboxmanage_targets_windows(vboxmanage: str) -> bool:
     return Path(vboxmanage).name.lower().endswith(".exe")
 
 
-def serial_pipe_name_for_vbox(vboxmanage: str) -> str:
-    """Return the host-side pipe/socket path VirtualBox should expose."""
+def serial_endpoint_for_vbox(vboxmanage: str) -> str:
+    """Return the host-side serial endpoint VirtualBox should expose."""
     if vboxmanage_targets_windows(vboxmanage):
-        return SERIAL_WINDOWS_PIPE_NAME
+        return str(SERIAL_TCP_PORT)
     return SERIAL_UNIX_SOCKET_PATH
 
 
-def serial_console_instructions(vboxmanage: str, pipe_name: str) -> str:
+def serial_console_instructions(vboxmanage: str, endpoint: str) -> str:
     """Host-specific commands for attaching to the VM serial console."""
     if vboxmanage_targets_windows(vboxmanage):
         return (
-            "--- Serial console named pipe ---\n"
-            f"VirtualBox exposes COM1 as: {pipe_name}\n"
-            "Because this is Windows VirtualBox, this is a Windows named pipe, not a WSL /tmp socket.\n"
-            "Interactive connection from Windows/PuTTY:\n"
-            "  Connection type: Serial\n"
-            f"  Serial line:     {pipe_name}\n"
-            f"  Speed:           {SERIAL_BAUD}\n"
-            "Quick connection proof from WSL, by launching a Windows pipe client:\n"
-            "  powershell.exe -NoProfile -Command '$c=[IO.Pipes.NamedPipeClientStream]::new(\".\",\"OpenWrt_LAN_Client_serial\",[IO.Pipes.PipeDirection]::InOut); try{$c.Connect(5000); \"CONNECTED_FROM_WSL: $($c.IsConnected)\"} finally{$c.Dispose()}'\n"
-            "If the pipe is present but busy/stuck, refresh only the live UART backend:\n"
+            "--- Serial console TCP endpoint ---\n"
+            f"VirtualBox exposes COM1 as TCP {SERIAL_TCP_HOST}:{endpoint}\n"
+            "This avoids Windows named-pipe stdin issues when attaching from WSL.\n"
+            "If the endpoint is busy/stuck, refresh only the live UART backend:\n"
             f"  VBoxManage.exe controlvm {VM_NAME} changeuartmode1 disconnected\n"
-            f"  VBoxManage.exe controlvm {VM_NAME} changeuartmode1 server {pipe_name}\n"
-            "For an interactive WSL terminal, bridge the Windows named pipe with npiperelay.exe plus socat/screen.\n"
-            "Start the VM first, then connect PuTTY to the pipe. The guest should show a ttyS0 login.\n"
+            f"  VBoxManage.exe controlvm {VM_NAME} changeuartmode1 tcpserver {endpoint}\n"
+            "This script attaches to the serial console automatically after starting the VM.\n"
+            "To attach to an already-running VM from WSL:\n"
+            f"  ./{Path(__file__).name} --serial-only\n"
+            "To create/start without attaching:\n"
+            f"  ./{Path(__file__).name} --no-connect-serial\n"
+            "The guest should show a ttyS0 login; press Enter once if the console is blank.\n"
         )
     return (
         "--- Serial console host socket ---\n"
-        f"VirtualBox exposes COM1 as: {pipe_name}\n"
+        f"VirtualBox exposes COM1 as: {endpoint}\n"
         "Because this is native Linux VirtualBox, attach with socat plus screen:\n"
         f"  rm -f {SERIAL_PTY_LINK_PATH}\n"
-        f"  socat -d -d UNIX-CONNECT:{pipe_name} PTY,link={SERIAL_PTY_LINK_PATH},raw,echo=0\n"
+        f"  socat -d -d UNIX-CONNECT:{endpoint} PTY,link={SERIAL_PTY_LINK_PATH},raw,echo=0\n"
         f"  screen {SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}\n"
         "Run the socat command in one terminal after the VM starts, then screen from another terminal.\n"
         "Detach screen with Ctrl-a then k. The guest should show a ttyS0 login.\n"
     )
 
 
-def configure_serial_named_pipe(vboxmanage: str, pipe_name: str) -> None:
+def configure_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
     """Expose COM1 as a host pipe/socket that a terminal program can attach to."""
-    print(
-        f"Serial console: COM1 -> host pipe/socket {pipe_name} "
-        f"({SERIAL_BAUD} baud; VirtualBox is the pipe server)."
-    )
+    if vboxmanage_targets_windows(vboxmanage):
+        uart_mode = "tcpserver"
+        print(f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} ({SERIAL_BAUD} baud).")
+    else:
+        uart_mode = "server"
+        print(f"Serial console: COM1 -> host socket {endpoint} ({SERIAL_BAUD} baud).")
     run_vboxmanage(
         vboxmanage,
         [
@@ -306,9 +311,128 @@ def configure_serial_named_pipe(vboxmanage: str, pipe_name: str) -> None:
             "0x3F8",
             "4",
             "--uartmode1",
-            "server",
-            pipe_name,
+            uart_mode,
+            endpoint,
         ],
+    )
+
+
+def refresh_live_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
+    """Refresh COM1's serial backend for an already-running VM."""
+    if vboxmanage_targets_windows(vboxmanage):
+        uart_mode = "tcpserver"
+        print(f"Refreshing live serial TCP backend for {VM_NAME}: {SERIAL_TCP_HOST}:{endpoint}")
+    else:
+        uart_mode = "server"
+        print(f"Refreshing live serial socket backend for {VM_NAME}: {endpoint}")
+    run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", "disconnected"])
+    run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", uart_mode, endpoint])
+
+
+@contextlib.contextmanager
+def _raw_stdin_for_serial():
+    """Put a WSL/Linux TTY into raw mode while a child bridge owns stdio."""
+    if platform.system().lower() != "linux" or not sys.stdin.isatty():
+        yield
+        return
+    try:
+        import termios
+        import tty
+    except ImportError:
+        yield
+        return
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+
+def connect_tcp_serial_console(host: str, port: int, *, timeout_s: float = 20.0) -> None:
+    """Attach this WSL/Linux terminal to a VirtualBox TCP serial endpoint."""
+    host_candidates = [host]
+    if is_wsl_environment():
+        try:
+            with open("/etc/resolv.conf", encoding="utf-8") as resolv:
+                for line in resolv:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] == "nameserver" and parts[1] not in host_candidates:
+                        host_candidates.append(parts[1])
+                        break
+        except OSError:
+            pass
+
+    print(
+        f"Connecting WSL terminal to serial TCP port {port} "
+        f"({SERIAL_BAUD} baud equivalent)."
+    )
+    print("Press Enter once for a login prompt. Disconnect with Ctrl-].")
+    deadline = time.monotonic() + timeout_s
+    last_error: OSError | None = None
+    sock: socket.socket | None = None
+    while time.monotonic() < deadline:
+        for candidate in host_candidates:
+            try:
+                sock = socket.create_connection((candidate, port), timeout=1.0)
+                print(f"CONNECTED_TO_SERIAL_TCP: {candidate}:{port}")
+                break
+            except OSError as exc:
+                last_error = exc
+        if sock is not None:
+            break
+        time.sleep(0.25)
+    if sock is None:
+        tried = ", ".join(f"{candidate}:{port}" for candidate in host_candidates)
+        raise RuntimeError(f"Could not connect to serial TCP endpoint; tried {tried}: {last_error}")
+
+    with sock:
+        sock.setblocking(False)
+        with _raw_stdin_for_serial():
+            while True:
+                readable, _, _ = select.select([sys.stdin, sock], [], [])
+                if sock in readable:
+                    try:
+                        data = sock.recv(4096)
+                    except BlockingIOError:
+                        data = b""
+                    if not data:
+                        print("\n[serial disconnected]")
+                        return
+                    os.write(sys.stdout.fileno(), data)
+                if sys.stdin in readable:
+                    data = os.read(sys.stdin.fileno(), 1024)
+                    if not data:
+                        return
+                    if b"\x1d" in data:
+                        before, _, _ = data.partition(b"\x1d")
+                        if before:
+                            sock.sendall(before.replace(b"\n", b"\r"))
+                        print("\n[serial detached]")
+                        return
+                    sock.sendall(data.replace(b"\n", b"\r"))
+
+
+def connect_serial_console(vboxmanage: str, endpoint: str, *, timeout_ms: int = 15000) -> None:
+    """Attach the current terminal to the VM serial console."""
+    if vboxmanage_targets_windows(vboxmanage):
+        connect_tcp_serial_console(SERIAL_TCP_HOST, int(endpoint), timeout_s=timeout_ms / 1000)
+        return
+
+    socat = shutil.which("socat")
+    screen = shutil.which("screen")
+    if not socat or not screen:
+        raise RuntimeError(
+            "Native Linux serial attach requires socat and screen. Install them with:\n"
+            "  sudo apt install -y socat screen"
+        )
+    print(
+        "Native Linux VirtualBox uses a Unix socket. Run these in two terminals:\n"
+        f"  rm -f {SERIAL_PTY_LINK_PATH}\n"
+        f"  socat -d -d UNIX-CONNECT:{endpoint} PTY,link={SERIAL_PTY_LINK_PATH},raw,echo=0\n"
+        f"  screen {SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}"
     )
 
 
@@ -376,16 +500,15 @@ def prime_client_vdi_for_intnet_lab(
     if skip_prime:
         print(
             "[!] --skip-vdi-prime: skipping offline lab network tools. "
-            "The guest may have no dhclient until you fix networking another way."
+            "The guest may have no dhclient and no ttyS0 login until you fix it another way."
         )
         return False
 
     if is_wsl_environment():
         print(
-            "[!] Running under WSL: skipping host-side virt-customize/libguestfs VDI priming."
+            "[!] Running under WSL: attempting host-side virt-customize/libguestfs VDI priming."
             " libguestfs/supermin is unreliable on WSL — re-run without WSL or use --skip-vdi-prime"
         )
-        return False
 
     vc = shutil.which("virt-customize")
     if not vc:
@@ -398,6 +521,9 @@ def prime_client_vdi_for_intnet_lab(
             "Re-run this script after installing libguestfs-tools (VM powered off).\n" + "*" * 62 + "\n"
         )
         return False
+    virt_env = os.environ.copy()
+    if is_wsl_environment():
+        virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
 
     if not _poweroff_vm_for_vdi_edit(vboxmanage, vm_name, force_poweroff=force_poweroff):
         print("[!] VDI priming skipped (VM running). Power off or use --force-poweroff-for-vdi.")
@@ -406,6 +532,66 @@ def prime_client_vdi_for_intnet_lab(
     script_host = work_root / "lab_net_troubleshoot.sh"
     script_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8")
     script_host.chmod(0o644)
+
+    print("Enabling guest ttyS0 serial login in the VDI...")
+    try:
+        result = subprocess.run(
+            [vc, "-a", vdi_linux]
+            + [
+                item
+                for command in guest_serial_console_commands()
+                for item in ("--run-command", command)
+            ],
+            capture_output=True,
+            text=True,
+            env=virt_env,
+        )
+        if result.returncode != 0:
+            detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+            if detail:
+                print(detail)
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+    except subprocess.CalledProcessError:
+        print(
+            "[!] Could not enable serial-getty in the guest image. The serial endpoint may open, "
+            "but commands will not work until ttyS0 has a login service."
+        )
+        return False
+
+    print("Injecting lab network troubleshoot helper and optional network packages...")
+    try:
+        result = subprocess.run(
+            [
+                vc,
+                "-a",
+                vdi_linux,
+                "--install",
+                "isc-dhcp-client,dnsutils,iputils-ping",
+                "--copy-in",
+                f"{script_host}:/usr/local/sbin",
+                "--run-command",
+                (
+                    "mv /usr/local/sbin/lab_net_troubleshoot.sh "
+                    "/usr/local/sbin/lab-net-troubleshoot && "
+                    "chmod 0755 /usr/local/sbin/lab-net-troubleshoot"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            env=virt_env,
+        )
+        if result.returncode != 0:
+            detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+            if detail:
+                print(detail)
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+    except subprocess.CalledProcessError:
+        print(
+            "[!] Optional lab package/helper injection failed, but ttyS0 serial login was enabled."
+        )
+        return True
+
+    return True
 
 
 def _poweroff_vm_for_vdi_edit(
@@ -436,6 +622,8 @@ def setup_client_vm(
     *,
     force_poweroff_for_vdi: bool = False,
     start_vm: bool = True,
+    connect_serial: bool = True,
+    recreate: bool = False,
     skip_vdi_prime: bool = False,
     archive_override: str | None = None,
 ) -> None:
@@ -448,32 +636,24 @@ def setup_client_vm(
     vms_root = paths["vms_root"]
     download_dir = paths["downloads"]
     os.makedirs(download_dir, exist_ok=True)
-    serial_pipe_name = serial_pipe_name_for_vbox(vboxmanage)
+    serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
+    vdi_wsl = os.path.join(vm_base, CLIENT_VDI_NAME)
 
-    archive_path = archive_override or os.path.join(download_dir, ARCHIVE_NAME)
-    if archive_override:
-        archive_path = os.path.abspath(os.path.expanduser(archive_path))
-        if not os.path.isfile(archive_path):
-            raise RuntimeError(f"--archive-path does not exist or is not a file: {archive_path}")
-    elif not os.path.exists(archive_path):
-        download_osboxes_archive(OSBOXES_URL, archive_path)
-    else:
-        print(f"Using OSBoxes archive at {archive_path}")
-
-    # Remove any stale client VM registration/files from prior runs before recreating.
-    remove_existing_client_vm(
-        vboxmanage,
-        vm_base,
-        medium_path_for_vbox=wsl_to_windows_path(os.path.join(vm_base, CLIENT_VDI_NAME))
-        if paths["is_wsl"]
-        else os.path.join(vm_base, CLIENT_VDI_NAME),
-    )
+    if recreate:
+        print(f"--recreate: removing existing {VM_NAME!r} registration and disk before rebuild.")
+        remove_existing_client_vm(
+            vboxmanage,
+            vm_base,
+            medium_path_for_vbox=wsl_to_windows_path(vdi_wsl)
+            if paths["is_wsl"]
+            else vdi_wsl,
+        )
+    existing_registered_vm = vm_is_registered(vboxmanage, VM_NAME)
 
     os.makedirs(vm_base, exist_ok=True)
     os.makedirs(vms_root, exist_ok=True)
 
     extract_dir = os.path.join(download_dir, "temp_osboxes_client_extract")
-    vdi_wsl = os.path.join(vm_base, CLIENT_VDI_NAME)
 
     # Paths passed to Windows VBoxManage must be Windows-style when running from WSL.
     # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir, not ``.../<VM_NAME>``.
@@ -484,9 +664,24 @@ def setup_client_vm(
         vdi_for_vbox = vdi_wsl
         vms_root_for_vbox = vms_root
 
-    if os.path.exists(vdi_wsl):
+    if existing_registered_vm and not os.path.exists(vdi_wsl):
+        print(
+            f"{VM_NAME} is already registered; no VDI found at {vdi_wsl}. "
+            "Reusing the registered VM without downloading or extracting a new disk."
+        )
+    elif os.path.exists(vdi_wsl):
         print(f"VDI already exists at {vdi_wsl}; skipping download/extract.")
     else:
+        archive_path = archive_override or os.path.join(download_dir, ARCHIVE_NAME)
+        if archive_override:
+            archive_path = os.path.abspath(os.path.expanduser(archive_path))
+            if not os.path.isfile(archive_path):
+                raise RuntimeError(f"--archive-path does not exist or is not a file: {archive_path}")
+        elif not os.path.exists(archive_path):
+            download_osboxes_archive(OSBOXES_URL, archive_path)
+        else:
+            print(f"Using OSBoxes archive at {archive_path}")
+
         print("Extracting VDI (requires p7zip: sudo apt install p7zip-full)...")
         validate_7z_archive(archive_path)
         if os.path.exists(extract_dir):
@@ -519,14 +714,18 @@ def setup_client_vm(
 
     work_root = Path(download_dir)
 
-    prime_client_vdi_for_intnet_lab(
-        vdi_wsl,
-        vboxmanage,
-        VM_NAME,
-        work_root,
-        force_poweroff=force_poweroff_for_vdi,
-        skip_prime=skip_vdi_prime,
-    )
+    if os.path.exists(vdi_wsl):
+        serial_console_ready = prime_client_vdi_for_intnet_lab(
+            vdi_wsl,
+            vboxmanage,
+            VM_NAME,
+            work_root,
+            force_poweroff=force_poweroff_for_vdi,
+            skip_prime=skip_vdi_prime,
+        )
+    else:
+        serial_console_ready = False
+        print("[!] Skipping VDI priming because this run is reusing a registered VM disk.")
 
     if not vm_is_registered(vboxmanage, VM_NAME):
         existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
@@ -553,6 +752,14 @@ def setup_client_vm(
                 ],
             )
 
+    if get_vm_state(vboxmanage, VM_NAME) == "running":
+        print(f"{VM_NAME} is already running; reusing it without recreating or applying offline edits.")
+        refresh_live_serial_endpoint(vboxmanage, serial_endpoint)
+        print(serial_console_instructions(vboxmanage, serial_endpoint))
+        if connect_serial:
+            connect_serial_console(vboxmanage, serial_endpoint)
+        return
+
     # NIC1 = LAN leg behind OpenWrt (DHCP from OpenWrt br-lan)
     print(
         f"Networking: NIC1 → internal network {LAN_INTNET_NAME!r} "
@@ -567,51 +774,55 @@ def setup_client_vm(
             "4096",
             "--cpus",
             str(get_half_cpus()),
-            "--graphicscontroller",
-            "vmsvga",
-            "--vram",
-            "128",
             "--nic1",
             "intnet",
             "--intnet1",
             LAN_INTNET_NAME,
         ],
     )
-    configure_serial_named_pipe(vboxmanage, serial_pipe_name)
+    configure_serial_endpoint(vboxmanage, serial_endpoint)
 
-    # SATA controller + disk (ignore error if controller already exists)
-    try:
-        run_vboxmanage(
-            vboxmanage,
-            ["storagectl", VM_NAME, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci"],
-        )
-    except subprocess.CalledProcessError:
-        pass
+    if existing_registered_vm:
+        print(f"{VM_NAME} is already registered; keeping existing storage attachment.")
+    else:
+        # SATA controller + disk (ignore error if controller already exists)
+        try:
+            run_vboxmanage(
+                vboxmanage,
+                ["storagectl", VM_NAME, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci"],
+            )
+        except RuntimeError as exc:
+            if "already exists" in str(exc).lower():
+                pass
+            else:
+                raise
 
-    run_vboxmanage(
-        vboxmanage,
-        [
-            "storageattach",
-            VM_NAME,
-            "--storagectl",
-            "SATA",
-            "--port",
-            "0",
-            "--device",
-            "0",
-            "--type",
-            "hdd",
-            "--medium",
-            vdi_for_vbox,
-        ],
-    )
-
-    # Left Ctrl as host key (same as prior script)
-    print("Setting host key to Left CTRL...")
-    run_vboxmanage(
-        vboxmanage,
-        ["setextradata", VM_NAME, "GUI/Input/HostKeyCombination", "16777249"],
-    )
+        try:
+            run_vboxmanage(
+                vboxmanage,
+                [
+                    "storageattach",
+                    VM_NAME,
+                    "--storagectl",
+                    "SATA",
+                    "--port",
+                    "0",
+                    "--device",
+                    "0",
+                    "--type",
+                    "hdd",
+                    "--medium",
+                    vdi_for_vbox,
+                ],
+            )
+        except RuntimeError as exc:
+            if (
+                "already attached" in str(exc).lower()
+                or "vbox_e_invalid_object_state" in str(exc).lower()
+            ):
+                print("Disk is already attached; keeping existing storage attachment.")
+            else:
+                raise
 
     print(
         f"\nDone. Start the OpenWrt VM first, then start {VM_NAME}.\n"
@@ -632,16 +843,31 @@ def setup_client_vm(
         "• Manual test route: ``sudo ip route add default via 192.168.1.1 dev <iface>`` (use your OpenWrt LAN IP).\n"
         "\n"
     )
-    print(serial_console_instructions(vboxmanage, serial_pipe_name))
+    print(serial_console_instructions(vboxmanage, serial_endpoint))
+    if connect_serial and not serial_console_ready:
+        print(
+            "[!] Could not confirm guest ttyS0 setup. Attaching anyway because this script's "
+            "job is serial bash; if commands still do not work, fix virt-customize/libguestfs "
+            "or enable serial-getty@ttyS0 inside the guest."
+        )
     if start_vm:
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+        state = get_vm_state(vboxmanage, VM_NAME)
+        if state == "running":
+            print(f"{VM_NAME} is already running; reusing it.")
+        else:
+            run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "headless"])
+        if connect_serial:
+            time.sleep(2)
+            connect_serial_console(vboxmanage, serial_endpoint)
     else:
         print("Not starting VM (--no-start).")
+        if connect_serial:
+            connect_serial_console(vboxmanage, serial_endpoint)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="Create / refresh OpenWrt LAN client VM (VirtualBox).",
+        description="Create or reuse OpenWrt LAN client VM for headless serial bash.",
     )
     ap.add_argument(
         "--force-poweroff-for-vdi",
@@ -652,6 +878,11 @@ if __name__ == "__main__":
         "--no-start",
         action="store_true",
         help="Configure the VM but do not start it.",
+    )
+    ap.add_argument(
+        "--recreate",
+        action="store_true",
+        help="Delete and rebuild the client VM/disk. By default existing VMs are reused.",
     )
     ap.add_argument(
         "--skip-vdi-prime",
@@ -665,10 +896,35 @@ if __name__ == "__main__":
             f"{ARCHIVE_NAME} into ~/Downloads."
         ),
     )
+    ap.add_argument(
+        "--connect-serial",
+        action="store_true",
+        help="Attach this terminal to the serial console after starting the VM (default).",
+    )
+    ap.add_argument(
+        "--no-connect-serial",
+        action="store_true",
+        help="Create/start the VM but do not attach this terminal to the serial console.",
+    )
+    ap.add_argument(
+        "--serial-only",
+        action="store_true",
+        help="Do not create or modify the VM; just attach to the existing serial console.",
+    )
     ns = ap.parse_args()
+    if ns.serial_only:
+        paths = get_system_paths(VM_NAME)
+        vboxmanage = find_vboxmanage(paths)
+        if not vboxmanage:
+            raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
+        connect_serial_console(vboxmanage, serial_endpoint_for_vbox(vboxmanage))
+        raise SystemExit(0)
+
     setup_client_vm(
         force_poweroff_for_vdi=ns.force_poweroff_for_vdi,
         start_vm=not ns.no_start,
+        connect_serial=ns.connect_serial or (not ns.no_start and not ns.no_connect_serial),
+        recreate=ns.recreate,
         skip_vdi_prime=ns.skip_vdi_prime,
         archive_override=ns.archive_path,
     )

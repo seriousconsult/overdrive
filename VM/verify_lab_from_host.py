@@ -17,6 +17,7 @@ import argparse
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 
@@ -40,6 +41,8 @@ CLIENT_VM = "OpenWrt_LAN_Client"
 LAN_INTNET_NAME = "openwrt-lan"
 SERIAL_WINDOWS_PIPE_NAME = r"\\.\pipe\OpenWrt_LAN_Client_serial"
 SERIAL_WINDOWS_PIPE_BASENAME = "OpenWrt_LAN_Client_serial"
+SERIAL_TCP_HOST = "127.0.0.1"
+SERIAL_TCP_PORT = 2323
 SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_LAN_Client_serial.sock"
 
 
@@ -48,11 +51,11 @@ def vboxmanage_targets_windows(vboxmanage: str) -> bool:
     return os.path.basename(vboxmanage).lower().endswith(".exe")
 
 
-def expected_serial_pipe(vboxmanage: str) -> str:
+def expected_serial_endpoint(vboxmanage: str) -> tuple[str, str]:
     """Return the host-side serial endpoint expected for this VirtualBox host."""
     if vboxmanage_targets_windows(vboxmanage):
-        return SERIAL_WINDOWS_PIPE_NAME
-    return SERIAL_UNIX_SOCKET_PATH
+        return "tcpserver", str(SERIAL_TCP_PORT)
+    return "server", SERIAL_UNIX_SOCKET_PATH
 
 
 def find_vboxmanage_for_verify(paths: dict[str, str | bool | None]) -> str | None:
@@ -119,36 +122,45 @@ try {{
     return "CONNECTED" in result.stdout.splitlines(), combined or f"PowerShell exited {result.returncode}"
 
 
+def probe_tcp_serial(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool, str]:
+    """Connect to the VirtualBox TCP serial endpoint without sending bytes."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True, "CONNECTED"
+    except OSError as exc:
+        return False, str(exc)
+
+
 def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool) -> list[str]:
     """Verify the client VM serial console endpoint is configured and accepts a host connection."""
     errs: list[str] = []
-    expected_pipe = expected_serial_pipe(vbox)
+    expected_mode, expected_endpoint = expected_serial_endpoint(vbox)
     uart1 = info.get("uart1", "")
     uartmode1 = info.get("uartmode1", "")
 
     if uart1 in ("", "off"):
         errs.append(f"client serial: expected COM1 enabled, got uart1={uart1!r}")
-    if uartmode1 != f"server,{expected_pipe}":
+    if uartmode1 != f"{expected_mode},{expected_endpoint}":
         errs.append(
-            f"client serial: expected uartmode1='server,{expected_pipe}', got {uartmode1!r}"
+            f"client serial: expected uartmode1='{expected_mode},{expected_endpoint}', got {uartmode1!r}"
         )
         return errs
 
     if vboxmanage_targets_windows(vbox):
-        ok, detail = probe_windows_named_pipe(SERIAL_WINDOWS_PIPE_BASENAME)
+        ok, detail = probe_tcp_serial(SERIAL_TCP_HOST, SERIAL_TCP_PORT)
         if ok:
-            print(f"  [+] {CLIENT_VM} serial pipe accepts a Windows named-pipe client: {expected_pipe}")
+            print(f"  [+] {CLIENT_VM} serial TCP endpoint accepts a client: {SERIAL_TCP_HOST}:{SERIAL_TCP_PORT}")
         else:
             errs.append(
-                "client serial pipe did not accept a Windows named-pipe client. "
+                "client serial TCP endpoint did not accept a client. "
                 f"Probe output: {detail}"
             )
-            print(f"  [!] {CLIENT_VM} serial pipe probe failed: {detail}")
+            print(f"  [!] {CLIENT_VM} serial TCP probe failed: {detail}")
     else:
-        if os.path.exists(expected_pipe):
-            print(f"  [+] {CLIENT_VM} serial socket exists: {expected_pipe}")
+        if os.path.exists(expected_endpoint):
+            print(f"  [+] {CLIENT_VM} serial socket exists: {expected_endpoint}")
         else:
-            errs.append(f"client serial socket does not exist: {expected_pipe}")
+            errs.append(f"client serial socket does not exist: {expected_endpoint}")
 
     if verbose:
         print(f"  [{CLIENT_VM}] uart1={uart1!r} uartmode1={uartmode1!r}")
@@ -353,9 +365,9 @@ def main() -> int:
         print(f"  1. Run the 'create_VM_*.py' scripts to reset the NICs.")
         print(f"  2. Open VirtualBox GUI -> Settings -> Network -> Advanced.")
         print(f"     Ensure 'Cable Connected' is checked and 'Promiscuous Mode' is NOT 'Deny'.")
-        print(f"  3. If only the serial pipe is busy/stuck, refresh the live UART backend:")
+        print(f"  3. If only the serial endpoint is busy/stuck, refresh the live UART backend:")
         print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 disconnected")
-        print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 server {SERIAL_WINDOWS_PIPE_NAME}")
+        print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 tcpserver {SERIAL_TCP_PORT}")
         return 1
 
     print("\n[+] SUCCESS: VirtualBox 'Layer 1' wiring is correct.")
