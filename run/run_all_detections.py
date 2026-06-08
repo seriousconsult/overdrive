@@ -284,6 +284,10 @@ def extract_score(output: str) -> tuple[str, str]:
     comment = ""
     lines = output.splitlines()
 
+    def is_separator_line(text: str) -> bool:
+        stripped = text.strip()
+        return len(stripped) >= 5 and len(set(stripped)) == 1 and stripped[0] in "=-_*#"
+
     matches: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
         m = re.search(r"\bSCORE:\s*(\d+)", line, re.I)
@@ -296,18 +300,23 @@ def extract_score(output: str) -> tuple[str, str]:
 
     if matches:
         last_idx, score = matches[-1]
-        for j in range(last_idx + 1, min(last_idx + 5, len(lines))):
-            t = lines[j].strip()
-            if not t:
-                continue
+        candidate_lines = [
+            lines[j].strip()
+            for j in range(last_idx + 1, min(last_idx + 6, len(lines)))
+            if lines[j].strip() and not is_separator_line(lines[j])
+        ]
+        for t in candidate_lines:
+            if any(k in t for k in ("STATUS:", "Status:", "Verdict:", "RESULT:")):
+                comment = t
+                break
+        for t in candidate_lines:
+            if comment:
+                break
             if t.startswith("- ") and len(t) < 220:
                 comment = t[2:].strip()
                 break
             if t.startswith("(") and t.endswith(")") and len(t) < 220:
                 comment = t.strip("() ")
-                break
-            if any(k in t for k in ("STATUS:", "Status:", "Verdict:", "RESULT:")):
-                comment = t
                 break
             if len(t) < 180 and not t.startswith("---"):
                 comment = t
@@ -336,6 +345,25 @@ def _badge_class(score: str) -> str:
         n = int(score)
         return f"badge n{n}"
     return "badge na"
+
+
+def _mean_score(rows: list[tuple[str, str, str]]) -> float | None:
+    scores = [
+        int(score)
+        for _, score, _ in rows
+        if str(score).isdigit() and 1 <= int(score) <= 5
+    ]
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
+def _format_mean_score(mean: float | None) -> str:
+    if mean is None:
+        return "N/A"
+    if mean.is_integer():
+        return str(int(mean))
+    return f"{mean:.2f}".rstrip("0").rstrip(".")
 
 
 def generate_html_report(results: dict, folder_order: list[str], elapsed_time: float = 0) -> str:
@@ -561,7 +589,8 @@ def main():
     for folder in folder_order:
         if folder not in results or not results[folder]:
             continue
-        print(f"\n{folder.upper()}:")
+        mean_score = _format_mean_score(_mean_score(results[folder]))
+        print(f"\n{folder.upper()}: {mean_score}")
         for script_name, score, comment in results[folder]:
             tail = f" — {comment[:60]}…" if comment and len(comment) > 60 else (f" — {comment}" if comment else "")
             print(f"  {script_name}: {score}{tail}")
