@@ -2,9 +2,8 @@
 """
 Parent script that runs all detection scripts and outputs scores.
 
-Discovers scripts dynamically: root-level *.py (except this runner,
-virtual_env_setup.py, and package initializers) plus *.py in each immediate subfolder (skipping
-virtual_env, .git, etc.), including **router/** (banner/OUI/TTL/NAT probes).
+Discovers scripts dynamically under ``detections/``. Shared helpers live in
+``detections/common`` and are skipped.
 Section order: Root first, then subfolders A–Z.
 
 Outputs to console and generates a compact HTML report.
@@ -12,7 +11,8 @@ Outputs to console and generates a compact HTML report.
 Scripts whose source contains a TODO marker (word TODO) are not executed;
 they are reported as score 0 with comment "TODO:".
 
-Scapy capture scripts (`vpn/TCP_stack.py`, `router/TTL.py`, `router/NAT_OS.py`) run via ``sudo -n`` (non-interactive) so the suite can finish unattended.
+Scapy capture scripts (`detections/vpn/TCP_stack.py`, `detections/router/TTL.py`,
+`detections/router/NAT_OS.py`) run via ``sudo -n`` (non-interactive) so the suite can finish unattended.
 If you don't want a password to be a blocker, either:
 
 - Grant **passwordless sudo** (NOPASSWD) for *only* the venv python + those scripts (see README), or
@@ -29,11 +29,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from detections.common.common_runner import file_matches_pattern
+
 # Longer capture + scapy startup
 SUDO_SCRIPT_TIMEOUT_SEC = 180
 
 # Repository root. This file lives under ``run/``.
 BASE_DIR = Path(__file__).resolve().parent.parent
+DETECTIONS_DIR = BASE_DIR / "detections"
 
 # Python files to skip globally (runner / tooling / package markers, not detection modules)
 EXCLUDE_SCRIPT_NAMES = frozenset(
@@ -49,19 +55,12 @@ EXCLUDE_SCRIPT_NAMES = frozenset(
 # VirtualBox state and should be run manually, not as score-producing checks.
 EXCLUDE_SCRIPT_PREFIXES = ("create_VM_",)
 
-# Subdirectories under BASE_DIR to skip when auto-discovering.
+# Subdirectories under DETECTIONS_DIR to skip when auto-discovering.
 # ``common`` contains shared helpers, not standalone detection scripts.
 SKIP_SUBDIRS = frozenset(
     {
         "common",
-        "virtual_env",
-        ".git",
         "__pycache__",
-        ".venv",
-        "node_modules",
-        "run",
-        ".idea",
-        ".vscode",
     }
 )
 
@@ -71,9 +70,9 @@ SUDO_SCRIPTS = frozenset({"TCP_stack.py", "TTL.py", "NAT_OS.py"})
 
 def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
     """
-    Build folder -> sorted list of *.py script names from disk.
-    Root = BASE_DIR/*.py (excluding EXCLUDE_SCRIPT_NAMES).
-    Other folders = immediate subdirs (except SKIP_SUBDIRS) that contain at least one detection *.py.
+    Build folder -> sorted list of *.py script names from ``detections/``.
+    Root = DETECTIONS_DIR/*.py (excluding EXCLUDE_SCRIPT_NAMES).
+    Other folders = immediate detection subdirs (except SKIP_SUBDIRS).
     """
     scripts: dict[str, list[str]] = {}
 
@@ -84,10 +83,10 @@ def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
             return False
         return not path.name.startswith(EXCLUDE_SCRIPT_PREFIXES)
 
-    root_py = sorted(p.name for p in BASE_DIR.glob("*.py") if is_detection_script(p))
+    root_py = sorted(p.name for p in DETECTIONS_DIR.glob("*.py") if is_detection_script(p))
     scripts["root"] = root_py
 
-    for child in sorted(BASE_DIR.iterdir(), key=lambda x: x.name.lower()):
+    for child in sorted(DETECTIONS_DIR.iterdir(), key=lambda x: x.name.lower()):
         if not child.is_dir():
             continue
         if child.name.startswith(".") or child.name in SKIP_SUBDIRS:
@@ -129,8 +128,8 @@ if not VENV_PYTHON:
 
 def script_path_for(folder: str, script_name: str) -> Path:
     if folder == "root":
-        return BASE_DIR / script_name
-    return BASE_DIR / folder / script_name
+        return DETECTIONS_DIR / script_name
+    return DETECTIONS_DIR / folder / script_name
 
 
 def _to_wsl_posix(path: Path) -> str:
@@ -207,11 +206,7 @@ def venv_has_raw_capture_caps() -> bool:
 
 
 def script_has_todo(script_path: Path) -> bool:
-    try:
-        text = script_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    return TODO_PATTERN.search(text) is not None
+    return file_matches_pattern(script_path, TODO_PATTERN)
 
 
 def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int]:

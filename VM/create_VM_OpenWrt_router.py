@@ -22,33 +22,35 @@ import time
 import urllib.request
 from pathlib import Path
 
-# Ensure sibling common/ package is importable when running this script from VM/
+# Ensure the repo package path is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from common.common_vm import (
-    wsl_to_windows_path,
-    get_system_paths,
+from detections.common.common_vm import (
     find_vboxmanage,
-    get_linux_distro_id,
-    get_vboxmanage_install_hint,
     get_active_bridged_interface,
-    run_vboxmanage,
+    get_linux_distro_id,
+    get_system_paths,
+    get_vboxmanage_install_hint,
+    OPENWRT_IMAGE_NAME,
+    OPENWRT_LAN_INTNET_NAME,
+    OPENWRT_ROUTER_VM_NAME,
+    OPENWRT_URL,
+    OPENWRT_VDI_NAME,
+    remove_existing_vm,
     resolve_vbox_settings_path,
+    run_vboxmanage,
     vm_is_registered,
-    get_vm_state,
-    vbox_closemedium_disk_delete_best_effort,
-    try_unregistervm_delete,
+    wsl_to_windows_path,
 )
 
-VM_NAME = "OpenWrt_2026_Router"
+VM_NAME = OPENWRT_ROUTER_VM_NAME
 # Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 openwrt-lan``
-LAN_INTNET_NAME = "openwrt-lan"
-OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
-IMAGE_NAME = "openwrt_2026.img"
-VDI_NAME = "openwrt.vdi"
+LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
+IMAGE_NAME = OPENWRT_IMAGE_NAME
+VDI_NAME = OPENWRT_VDI_NAME
 
 
 def download_openwrt_image(url: str, dest_path: str) -> None:
@@ -121,7 +123,14 @@ def remove_existing_router_vm(
     *,
     medium_path_for_vbox: str,
 ) -> None:
-    """Drop any prior VM + disk folder for ``VM_NAME`` so this run starts clean."""
+    """Compatibility wrapper; use ``common_vm.remove_existing_vm`` for new code."""
+    remove_existing_vm(
+        vboxmanage,
+        VM_NAME,
+        vm_base,
+        medium_path_for_vbox=medium_path_for_vbox,
+    )
+    return
     if vm_is_registered(vboxmanage, VM_NAME):
         state = get_vm_state(vboxmanage, VM_NAME)
         if state == "saved":
@@ -180,8 +189,8 @@ def setup_openwrt_vm(start_type: str = "gui") -> None:
     vdi_path = os.path.join(vm_base, VDI_NAME)
     dst_path = wsl_to_windows_path(vdi_path) if paths["is_wsl"] else vdi_path
 
-    remove_existing_router_vm(
-        vboxmanage, vm_base, medium_path_for_vbox=dst_path
+    remove_existing_vm(
+        vboxmanage, VM_NAME, vm_base, medium_path_for_vbox=dst_path
     )
 
     os.makedirs(vms_root, exist_ok=True)

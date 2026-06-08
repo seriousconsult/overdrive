@@ -16,7 +16,6 @@ import platform
 import re
 import shutil
 import socket
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +25,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from common.common_local import is_wsl_local
+from detections.common.common_local import is_wsl_local
+from detections.common.common_utils import normalize_address, run_command, split_address_port
 
 
 @dataclass
@@ -38,38 +38,6 @@ class PortListener:
     state: str | None
     pid: str | None
     process: str | None
-
-
-def _run_command(cmd: list[str]) -> tuple[int, str]:
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        return result.returncode, result.stdout or ""
-    except (OSError, subprocess.SubprocessError):
-        return -1, ""
-
-
-def _split_address_port(endpoint: str) -> tuple[str, int | None]:
-    endpoint = endpoint.strip()
-    if endpoint.startswith("[") and "]" in endpoint:
-        host, _, port = endpoint.rpartition("]:")
-        host = host + "]"
-    else:
-        host, _, port = endpoint.rpartition(":")
-    try:
-        return host, int(port)
-    except ValueError:
-        return endpoint, None
-
-
-def _normalize_address(addr: str) -> str:
-    addr = addr.split("%", 1)[0]
-    return addr.strip()
 
 
 def _service_name(port: int | None, proto: str) -> str:
@@ -98,12 +66,12 @@ def _parse_ss_line(line: str) -> PortListener | None:
         name = proc_match.group(1)
         pid = proc_match.group(2)
 
-    local_host, local_port = _split_address_port(local)
-    local_host = _normalize_address(local_host)
+    local_host, local_port = split_address_port(local)
+    local_host = normalize_address(local_host)
 
     remote_host = None
     if remote:
-        remote_host = _normalize_address(_split_address_port(remote)[0])
+        remote_host = normalize_address(split_address_port(remote)[0])
 
     return PortListener(
         proto=proto,
@@ -140,9 +108,9 @@ def _parse_netstat_line(line: str, proc_map: dict[str, str]) -> PortListener | N
         pid = fields[3]
 
     process = proc_map.get(pid)
-    local_host, local_port = _split_address_port(local)
-    local_host = _normalize_address(local_host)
-    remote_host = _normalize_address(_split_address_port(remote)[0])
+    local_host, local_port = split_address_port(local)
+    local_host = normalize_address(local_host)
+    remote_host = normalize_address(split_address_port(remote)[0])
 
     return PortListener(
         proto=proto,
@@ -157,7 +125,7 @@ def _parse_netstat_line(line: str, proc_map: dict[str, str]) -> PortListener | N
 
 def _windows_process_map() -> dict[str, str]:
     proc_map: dict[str, str] = {}
-    returncode, output = _run_command(["tasklist", "/FO", "CSV", "/NH"])
+    returncode, output = run_command(["tasklist", "/FO", "CSV", "/NH"])
     if returncode != 0 or not output:
         return proc_map
 
@@ -172,7 +140,7 @@ def _windows_process_map() -> dict[str, str]:
 
 
 def _is_network_accessible(binding: str) -> bool:
-    host = _normalize_address(binding)
+    host = normalize_address(binding)
     if not host or host in {"*", "0.0.0.0", "::"}:
         return True
     try:
@@ -186,7 +154,7 @@ def _collect_linux_listeners() -> list[PortListener]:
     listeners: list[PortListener] = []
     ss_path = shutil.which("ss")
     if ss_path:
-        ret, out = _run_command([ss_path, "-tulnp", "-H"])
+        ret, out = run_command([ss_path, "-tulnp", "-H"])
         if ret == 0 and out:
             for line in out.splitlines():
                 entry = _parse_ss_line(line)
@@ -209,8 +177,8 @@ def _collect_linux_listeners() -> list[PortListener]:
                 continue
             local_hex, state = parts[1], parts[3]
             host_port = _decode_proc_address(local_hex, proto.endswith("6"))
-            local_host, local_port = _split_address_port(host_port)
-            local_host = _normalize_address(local_host)
+            local_host, local_port = split_address_port(host_port)
+            local_host = normalize_address(local_host)
             listeners.append(
                 PortListener(
                     proto=proto,
@@ -248,7 +216,7 @@ def _decode_proc_address(hexaddr: str, ipv6: bool) -> str:
 def _collect_windows_listeners() -> list[PortListener]:
     listeners: list[PortListener] = []
     proc_map = _windows_process_map()
-    ret, out = _run_command(["netstat", "-ano"])
+    ret, out = run_command(["netstat", "-ano"])
     if ret != 0 or not out:
         return listeners
     for line in out.splitlines():
@@ -303,9 +271,9 @@ def run_audit() -> int:
     print(f"Loopback-only listeners: {len(loopback_only)}")
 
     if network_facing:
-        score = 5
+        score = 3
         status = (
-            "At least one listener is bound to a network-facing address; services may be reachable from the LAN."
+            "At least one listener is bound to a network-facing address; alerting but not proof of an artificial host."
         )
     else:
         score = 1

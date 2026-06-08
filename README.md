@@ -1,41 +1,20 @@
 # Overdrive
 
-Overdrive is a Python-based privacy detection suite that runs multiple privacy, fingerprinting,
-network, and environment checks, then summarizes the results as scores.
+Python probes for browser, VPN, network, router, local-host, and VM-lab signals. Detection probes live under `detections/`; results print to the console and `detection_results.html`.
 
-It is designed for analysis of how your current network/browser/runtime
-environment looks to remote services (for example: VPN consistency, browser leaks,
-header mismatch signals, and hosting reputation checks).
+## Score
 
-## What You Get
+All scripts use the same `SCORE: 1-5` host-authenticity scale:
 
-- Individual detection scripts grouped by topic (`vpn`, `browser`, `network`, `router`, and root checks)
-- A full runner (`run/run_all.py`) that can run VM setup/verification and then detections
-- A detection-only runner (`run/run_all_detections.py`) that discovers probe scripts automatically
-- A VM lab runner (`run/run_VMs.py`) that runs `VM/create_VM_*.py` setup scripts and then `VM/verify_lab_from_host.py`
-- Console output plus an HTML report at `detection_results.html`
-- Script-level scoring on a `1-5` scale
+- `1`: authentic residential / not alerting
+- `2`: mildly atypical, probably still home-like
+- `3`: inconclusive, inconsistent, misleading, or partly non-home
+- `4`: very alerting, but not proven
+- `5`: definitely artificial host
 
+Batch runner extras: `0` means skipped due to `TODO`; `Error` means failed, timed out, or non-zero exit.
 
-## Scoring Model
-Scripts print a `SCORE` value in the range `1-5`.
-Interpretation can vary slightly by script, but a common pattern is:
-
-- `1`: low risk / no anomaly detected
-- `3`: uncertain or mixed signal
-- `5`: strong mismatch, leak, or suspicious condition
-
-Special cases in the batch runner:
-
-- `Error`: script failed, timed out, or returned non-zero
-- `0`: script contains `TODO` and was skipped intentionally
-
-
-## Running Checks
-
-### Run Everything
-
-From the **repository root**, using the project virtualenv on **Linux or WSL** (recommended):
+## Run
 
 ```bash
 cd /path/to/overdrive
@@ -43,142 +22,75 @@ source virtual_env/bin/activate   # optional
 python3 run/run_all.py
 ```
 
-Outputs:
-
-- Detailed console output
-- HTML report: `detection_results.html`
-
-`run/run_all.py` runs VM setup/verification first and then runs detections. Useful options:
+Useful commands:
 
 ```bash
+python3 run/run_all.py --skip-vms          # detections only
+python3 run/run_all.py --skip-detections   # VM setup/verification only
 python3 run/run_all.py --dry-run
-python3 run/run_all.py --skip-vms
-python3 run/run_all.py --skip-detections
-python3 run/run_all.py --keep-going
-python3 run/run_all.py --vm-arg=--skip-verify
-```
-
-You can also run it from the `run/` directory:
-
-```bash
-cd /path/to/overdrive/run
-python3 run_all.py
-```
-
-### Run Detections Only
-
-If the VM lab is already configured, or you do not want the runner to touch VirtualBox:
-
-```bash
-cd /path/to/overdrive
 python3 run/run_all_detections.py
-```
-
-The detection runner skips support/tooling folders and scripts, including `common/`, `run/`, `VM/create_VM_*.py`, and `VM/verify_lab_from_host.py`.
-
-### Run VM Setup Only
-
-To create/refresh the OpenWrt lab VMs and verify host-side VirtualBox wiring:
-
-```bash
-cd /path/to/overdrive
 python3 run/run_VMs.py
 ```
 
-Useful options:
+## Layout
 
-```bash
-python3 run/run_VMs.py --dry-run
-python3 run/run_VMs.py --skip-verify
-python3 run/run_VMs.py --keep-going
-python3 run/run_VMs.py --include-todo
-```
+- `detections/browser`, `detections/network`, `detections/router`, `detections/vpn`: score-producing probes.
+- `detections/common`: shared constants and helper libraries; not run directly.
+- `local_host`: local machine / WSL checks.
+- `VM`: OpenWrt lab VM setup and verification.
+- `run`: batch runners.
 
-By default, `run/run_VMs.py` skips `create_VM_*.py` scripts whose source contains `TODO`.
+## Gotchas
 
-#### Where to run (host vs VMs)
-**WSL or native Linux** at repo root 
+- Run from the repo root unless a script says otherwise.
+- `run/run_all.py` touches the VM lab first; use `--skip-vms` for detections only.
+- Scripts containing `TODO` are skipped and reported as score `0`.
+- `VM/create_VM_linux.py` is unfinished and skipped unless explicitly included by VM tooling.
+- `run/run_VMs.py` skips `VM/create_VM_client_browser_pipe.py` by default because it attaches to the serial console; pass `--include-client` to run it.
+- Third-party pages/APIs can be blocked, rate-limited, or changed upstream; expect some score `3` ambiguity.
+- Packet-capture probes need raw socket privileges: `detections/vpn/TCP_stack.py`, `detections/router/TTL.py`, `detections/router/NAT_OS.py`.
 
-
-#### OpenWrt lab: two vantage points (WAN vs LAN)
-- **WAN profile** — Run directed router checks from the **host** (or anything on the **same Layer-2 segment as the router’s bridged WAN**), targeting the router’s **WAN IP**. That matches how upstream / “outside the guest” paths see the router.
-- **LAN profile** — Run checks from the **client VM** on internal network `openwrt-lan`, targeting the router’s **LAN IP** (e.g. `192.168.1.1`). The **WSL/Linux host cannot reach intnet** (VirtualBox isolates `openwrt-lan`), so LAN-plane probes must originate inside a guest on that intnet.
-
-Outbound traffic to the internet (e.g. HTTPS to Google) from the **client VM** still exits via **OpenWrt’s WAN** (NAT). What remote collectors see reflects that WAN path. **Management-plane** probes to `192.168.1.x` must still use the **LAN** seat.
-
-The full batch runner may probe **whatever your default gateway is**, which might **not** be OpenWrt. For lab fidelity, run router modules with explicit `--ip` (and the correct profile) as described in [`VM/ROUTER_PLAN.txt`](VM/ROUTER_PLAN.txt). Topology diagrams and example `VBoxManage` / guest output live in [`VM/LAB_TOPOLOGY.md`](VM/LAB_TOPOLOGY.md). To verify only VirtualBox wiring from the host: `python3 VM/verify_lab_from_host.py`.
-
-## Important Runtime Notes
-
-
-### Notes
-- `setup_virtual_env.py` sets up the environment and installs all dependencies
-- `run/run_all.py` runs VM setup/verification and then the full detection suite
-- `run/run_all_detections.py` runs the detection suite only
-- `run/run_VMs.py` runs VM setup scripts and then `VM/verify_lab_from_host.py`
-- `/local/wsl_config.py` turns on mirrored mode for WSL networking
-- `/VM/verify_lab_from_host.py` verifies basic networking is set up correctly on the VMs
-- `/local/*` reports information about your physical environment
-
-### WSL2 Prerequisite: Mirrored Networking
-If you are running Overdrive inside Windows Subsystem for Linux (WSL2), the default NAT networking isolates your environment, preventing accurate discovery of local routers, mDNS services, and broadcast traffic.
-
-You must enable Mirrored Networking to make WSL a peer to your Windows host.
-
-1. Configure WSL mode
-   Run the included configuration utility from within your Overdrive directory:
-
-   ```bash
-   chmod +x wsl_config.py
-   ./wsl_config.py --enable
-   ```
-
-2. Restart WSL
-   Configuration changes to the WSL VM require a full shutdown to take effect. Run this in a Windows PowerShell terminal:
-
-   ```powershell
-   wsl --shutdown
-   ```
-
-3. Verify
-   Re-open your WSL terminal and run:
-
-   ```bash
-   ./wsl_config.py
-   ```
-
-   It should now report `[*] Current WSL Networking Mode: MIRRORED.`
-
-
-### Passwordless sudo (Scapy capture scripts)
-
-`run/run_all_detections.py` runs these scripts with **`sudo -n`** (non-interactive sudo, no password prompt):
-
-- `vpn/TCP_stack.py`
-- `router/TTL.py`
-- `router/NAT_OS.py`
-
-Scapy packet capture usually needs elevated privileges on Linux/WSL.
-
-On Linux/WSL, you can grant the virtualenv Python binary raw-socket capabilities so captures work without sudo. For example:
+Optional capture setup:
 
 ```bash
 sudo setcap cap_net_raw,cap_net_admin+eip virtual_env/bin/python
 ```
 
-When those capabilities are present, the batch runner may execute the capture scripts without sudo.
+## WSL2
 
+Default WSL2 NAT hides LAN broadcast/multicast behavior. For router, mDNS, ARP/OUI, and capture probes, enable mirrored networking:
 
-### TODO-Based Skip Logic
+```bash
+python3 local_host/wsl_config.py --enable
+```
 
-The batch runner scans each script's source for the word `TODO`.  
-If present, the script is skipped and recorded as score `0` with comment `TODO:`.
+Then restart WSL from Windows PowerShell:
 
-This makes partially implemented modules visible without breaking full-suite runs.
+```powershell
+wsl --shutdown
+```
 
-## Limitations
+Verify after reopening WSL:
 
-- Results are heuristics, not definitive attribution.
-- VPNs, CDNs, CGNAT, enterprise networks, and hardened browsers can produce
-  false positives/false negatives.
-- Some scripts rely on third-party pages/APIs and may drift as upstream behavior changes.
+```bash
+python3 local_host/wsl_config.py
+```
+
+## OpenWrt Lab
+
+- **WAN checks:** run from the host or the router WAN segment; target the router WAN IP.
+- **LAN checks:** run from the client VM on `openwrt-lan`; target the router LAN IP, usually `192.168.1.1`.
+- The WSL/Linux host cannot directly reach VirtualBox `intnet` LANs.
+- The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
+
+Verify wiring:
+
+```bash
+python3 VM/verify_lab_from_host.py
+```
+
+More detail: `VM/LAB_TOPOLOGY.md`.
+
+## Limits
+
+Scores are heuristics, not attribution. VPNs, CGNAT, enterprise networks, CDNs, hardened browsers, missing permissions, and blocked APIs can all skew results.

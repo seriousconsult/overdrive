@@ -4,24 +4,20 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from detections.common.common_runner import run_step
 
 
 RUN_DIR = Path(__file__).resolve().parent
 REPO_ROOT = RUN_DIR.parent
 RUN_VMS = RUN_DIR / "run_VMs.py"
 RUN_DETECTIONS = RUN_DIR / "run_all_detections.py"
-
-
-def run_step(name: str, command: list[str], *, dry_run: bool) -> int:
-    print()
-    print(f"=== {name} ===")
-    print("[run] " + " ".join(command))
-    if dry_run:
-        return 0
-    return subprocess.run(command, cwd=str(REPO_ROOT), check=False).returncode
 
 
 def main() -> int:
@@ -60,9 +56,10 @@ def main() -> int:
 
     if not args.skip_vms:
         rc = run_step(
-            "VM setup and verification",
             [sys.executable, str(RUN_VMS), *args.vm_arg],
+            cwd=REPO_ROOT,
             dry_run=args.dry_run,
+            name="VM setup and verification",
         )
         if rc != 0:
             failures.append(("run_VMs.py", rc))
@@ -71,9 +68,10 @@ def main() -> int:
 
     if not args.skip_detections:
         rc = run_step(
-            "Detection suite",
             [sys.executable, str(RUN_DETECTIONS)],
+            cwd=REPO_ROOT,
             dry_run=args.dry_run,
+            name="Detection suite",
         )
         if rc != 0:
             failures.append(("run_all_detections.py", rc))

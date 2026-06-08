@@ -40,7 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
 import requests
 from scapy.all import AsyncSniffer, Ether, IP, TCP  # type: ignore
 
-from common.common_local import (
+from detections.common.common_local import (
     is_wsl_local,
     mac_to_oui,
     path_exists,

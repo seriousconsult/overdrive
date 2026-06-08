@@ -8,9 +8,14 @@ creation scripts mutate VirtualBox state and can start GUI/headless guests.
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from detections.common.common_runner import file_contains_token, run_step
 
 
 RUN_DIR = Path(__file__).resolve().parent
@@ -21,17 +26,21 @@ PREFERRED_CREATE_ORDER = (
     "create_VM_OpenWrt_router.py",
     "create_VM_client_browser_pipe.py",
 )
+DEFAULT_SKIP_CREATE_SCRIPTS = frozenset(
+    {
+        # This script starts the client and attaches to its serial TCP console, which
+        # can block unattended batch runs. Run it manually or pass --include-client.
+        "create_VM_client_browser_pipe.py",
+    }
+)
 VERIFY_SCRIPT = "verify_lab_from_host.py"
 
 
 def script_has_todo(script_path: Path) -> bool:
-    try:
-        return "TODO" in script_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
+    return file_contains_token(script_path, "TODO")
 
 
-def discover_create_scripts(*, include_todo: bool) -> list[Path]:
+def discover_create_scripts(*, include_todo: bool, include_client: bool) -> list[Path]:
     """Return create_VM_*.py scripts in lab-friendly order."""
     all_scripts = {p.name: p for p in SCRIPT_DIR.glob("create_VM_*.py") if p.is_file()}
     ordered: list[Path] = []
@@ -48,20 +57,14 @@ def discover_create_scripts(*, include_todo: bool) -> list[Path]:
 
     runnable = []
     for path in ordered:
+        if path.name in DEFAULT_SKIP_CREATE_SCRIPTS and not include_client:
+            print(f"[skip] {path.name}: serial-attaching client VM script; use --include-client to run it.")
+            continue
         if script_has_todo(path):
             print(f"[skip] {path.name}: contains TODO; use --include-todo to run it anyway.")
             continue
         runnable.append(path)
     return runnable
-
-
-def run_step(command: list[str], *, dry_run: bool) -> int:
-    print()
-    print("[run] " + " ".join(command))
-    if dry_run:
-        return 0
-    result = subprocess.run(command, cwd=str(REPO_ROOT), check=False)
-    return result.returncode
 
 
 def main() -> int:
@@ -72,6 +75,11 @@ def main() -> int:
         "--include-todo",
         action="store_true",
         help="Also run create_VM_*.py scripts whose source contains TODO.",
+    )
+    parser.add_argument(
+        "--include-client",
+        action="store_true",
+        help="Also run create_VM_client_browser_pipe.py, which attaches to the serial console.",
     )
     parser.add_argument(
         "--keep-going",
@@ -90,14 +98,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    scripts = discover_create_scripts(include_todo=args.include_todo)
+    scripts = discover_create_scripts(
+        include_todo=args.include_todo,
+        include_client=args.include_client,
+    )
     if not scripts:
         print("[!] No runnable create_VM_*.py scripts found.")
         return 1
 
     failures: list[tuple[str, int]] = []
     for script in scripts:
-        rc = run_step([sys.executable, str(script)], dry_run=args.dry_run)
+        rc = run_step([sys.executable, str(script)], cwd=REPO_ROOT, dry_run=args.dry_run)
         if rc != 0:
             failures.append((script.name, rc))
             if not args.keep_going:
@@ -106,7 +117,7 @@ def main() -> int:
 
     if not args.skip_verify:
         verify_path = SCRIPT_DIR / VERIFY_SCRIPT
-        rc = run_step([sys.executable, str(verify_path)], dry_run=args.dry_run)
+        rc = run_step([sys.executable, str(verify_path)], cwd=REPO_ROOT, dry_run=args.dry_run)
         if rc != 0:
             failures.append((VERIFY_SCRIPT, rc))
             if not args.keep_going:

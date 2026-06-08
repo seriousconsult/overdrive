@@ -11,18 +11,23 @@ import platform
 import getpass
 import sys
 
-# Ensure sibling common/ package is importable when running this script from VM/
+# Ensure the repo package path is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from common.common_vm import get_active_bridged_interface, get_half_cpus, get_system_paths
+from detections.common.common_vm import (
+    OSBOXES_ARCHIVE_NAME,
+    OSBOXES_URL,
+    get_active_bridged_interface,
+    get_half_cpus,
+    get_system_paths,
+)
 
 # --- 1. Global Variables (Define these first!) ---
 VM_NAME = "Network_Test"
 VBOX = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
-OSBOXES_URL = "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
 
 # --- 2. Dynamic Detection Functions ---
 
@@ -33,7 +38,7 @@ base = paths["base_path"]
 
 
 DOWNLOAD_DIR = f"{base}/Downloads"
-ARCHIVE_PATH = os.path.join(DOWNLOAD_DIR, "ubuntu_osboxes_2404.7z")
+ARCHIVE_PATH = os.path.join(DOWNLOAD_DIR, OSBOXES_ARCHIVE_NAME)
 EXTRACT_DIR = os.path.join(DOWNLOAD_DIR, "temp_extraction")
 VM_BASE_WSL = f"{base}/VirtualBox VMs/{VM_NAME}"
 INTERFACE = get_active_bridged_interface(VBOX)

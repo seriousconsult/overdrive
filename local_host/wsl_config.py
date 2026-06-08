@@ -10,7 +10,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from common.common_local import windows_userprofile_as_wsl_path
+from detections.common.common_local import windows_userprofile_as_wsl_path
 
 '''
 WSL2 operates as a lightweight Virtual Machine (VM) that, by default, uses a NAT-based network topology. This creates an isolation layer

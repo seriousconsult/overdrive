@@ -68,45 +68,41 @@ import sys
 import time
 from pathlib import Path
 
-# Ensure sibling common/ package is importable when running this script from VM/
+# Ensure the repo package path is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from common.common_vm import (
-    is_wsl_environment,
-    wsl_to_windows_path,
-    get_system_paths,
+from detections.common.common_vm import (
+    CLIENT_VDI_NAME,
     find_vboxmanage,
     get_half_cpus,
-    run_vboxmanage,
-    resolve_vbox_settings_path,
-    vbox_closemedium_disk_delete_best_effort,
-    try_unregistervm_delete,
-    vm_is_registered,
     get_vm_state,
+    get_system_paths,
+    is_wsl_environment,
+    OPENWRT_CLIENT_VM_NAME,
+    OPENWRT_LAN_INTNET_NAME,
+    OSBOXES_ARCHIVE_NAME,
+    OSBOXES_LOGIN_PASSWORD_HINT,
+    OSBOXES_LOGIN_USER,
+    OSBOXES_URL,
+    remove_existing_vm,
+    resolve_vbox_settings_path,
+    run_vboxmanage,
+    SERIAL_BAUD,
+    SERIAL_PTY_LINK_PATH,
+    SERIAL_TCP_HOST,
+    serial_endpoint_for_vbox,
+    SERIAL_UNIX_SOCKET_PATH,
+    vboxmanage_targets_windows,
+    vm_is_registered,
+    wsl_to_windows_path,
 )
 
-# Must match ``LAN_INTNET_NAME`` in create_VM_OpenWrt_router.py
-LAN_INTNET_NAME = "openwrt-lan"
-
-VM_NAME = "OpenWrt_LAN_Client"
-CLIENT_VDI_NAME = "client_browser.vdi"
-SERIAL_TCP_HOST = "127.0.0.1"
-SERIAL_TCP_PORT = 2323
-SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_LAN_Client_serial.sock"
-SERIAL_PTY_LINK_PATH = "/tmp/OpenWrt_LAN_Client_serial.pty"
-SERIAL_BAUD = "115200"
-
-# Ubuntu 24.04 **Server** from OSBoxes.
-OSBOXES_URL = (
-    "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
-)
-ARCHIVE_NAME = "ubuntu_osboxes_2404.7z"
-# Default OSBoxes credentials (verify on the OSBoxes download page for this image).
-OSBOXES_LOGIN_USER = "osboxes"
-OSBOXES_LOGIN_PASSWORD_HINT = "osboxes.org"
+LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
+VM_NAME = OPENWRT_CLIENT_VM_NAME
+ARCHIVE_NAME = OSBOXES_ARCHIVE_NAME
 
 
 def download_osboxes_archive(url: str, archive_path: str) -> None:
@@ -251,18 +247,6 @@ def guest_serial_console_commands() -> list[str]:
             "fi"
         ),
     ]
-
-
-def vboxmanage_targets_windows(vboxmanage: str) -> bool:
-    """Return True when WSL/Linux is controlling Windows VirtualBox via VBoxManage.exe."""
-    return Path(vboxmanage).name.lower().endswith(".exe")
-
-
-def serial_endpoint_for_vbox(vboxmanage: str) -> str:
-    """Return the host-side serial endpoint VirtualBox should expose."""
-    if vboxmanage_targets_windows(vboxmanage):
-        return str(SERIAL_TCP_PORT)
-    return SERIAL_UNIX_SOCKET_PATH
 
 
 def serial_console_instructions(vboxmanage: str, endpoint: str) -> str:
@@ -444,7 +428,14 @@ def remove_existing_client_vm(
     *,
     medium_path_for_vbox: str,
 ) -> None:
-    """Drop any prior VM + disk folder for ``VM_NAME`` so this run starts clean."""
+    """Compatibility wrapper; use ``common_vm.remove_existing_vm`` for new code."""
+    remove_existing_vm(
+        vboxmanage,
+        VM_NAME,
+        vm_base,
+        medium_path_for_vbox=medium_path_for_vbox,
+    )
+    return
     if vm_is_registered(vboxmanage, VM_NAME):
         state = get_vm_state(vboxmanage, VM_NAME)
         if state == "saved":
@@ -641,8 +632,9 @@ def setup_client_vm(
 
     if recreate:
         print(f"--recreate: removing existing {VM_NAME!r} registration and disk before rebuild.")
-        remove_existing_client_vm(
+        remove_existing_vm(
             vboxmanage,
+            VM_NAME,
             vm_base,
             medium_path_for_vbox=wsl_to_windows_path(vdi_wsl)
             if paths["is_wsl"]
