@@ -108,7 +108,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <header>
   <h1>Overdrive detection results</h1>
   <div style="display: flex; gap: 1rem; align-items: baseline;">
-    <span class="timestamp">2026-06-08 19:41:44</span>    <span class="timestamp">(7m 1s)</span>
+    <span class="timestamp">2026-06-08 19:52:43</span>    <span class="timestamp">(9m 50s)</span>
   </div>
 </header>
 <main>
@@ -122,7 +122,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
 <tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like profile: stable canvas is present, but browser signals indicate automation: User-Agent exposes headless browser. hash=digest unavailable, dataURL bytes=9766.</td></tr>
 <tr><td class="script">cookie_tracking.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
-<tr><td class="script">font_enumeration.py</td><td><span class="badge badge todo">0</span></td><td class="comment">TODO:</td></tr>
+<tr><td class="script">font_enumeration.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like profile: font probing worked, but browser signals indicate automation: User-Agent exposes headless browser; detected 8/45 tested fonts (sample: Arial, Courier New, Times New Roman, Helvetica, Liberation Sans, Liberation Serif, Liberation Mono, Noto Sans).</td></tr>
 <tr><td class="script">full_header.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Request headers and Client Hints look internally consistent for the detected family. | echo=https://httpbin.org/get</td></tr>
 <tr><td class="script">screen_capture.py</td><td><span class="badge badge n3">3</span></td><td class="comment">Screen capture detection returned unexpected data.</td></tr>
 </tbody></table>
@@ -139,9 +139,9 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <section>
 <h2>Router</h2>
 <table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
-<tr><td class="script">NAT_OS.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: No source showed both Linux- and Windows-range TTLs.</td></tr>
+<tr><td class="script">NAT_OS.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No IPv4 packets observed; cannot confirm home NAT behavior.</td></tr>
 <tr><td class="script">OUI.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: MAC present; OUI not in heuristic map.</td></tr>
-<tr><td class="script">TTL.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: Strongest suspect 192.168.1.164: No strong residential TTL evidence (heuristic)</td></tr>
+<tr><td class="script">TTL.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Strongest suspect 192.168.1.164: Typical Linux/mac/IoT-ish endpoint TTL (weak residential evidence)</td></tr>
 <tr><td class="script">UPNP.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Verizon | G3100 | G3100 | G3100 | G401119081362912</td></tr>
 <tr><td class="script">banners.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: https://192.168.1.1/login.html</td></tr>
 <tr><td class="script">mDNS_mesh.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Multiple mDNS/DNS-SD services found (6); strong residential LAN evidence.</td></tr>
@@ -158,7 +158,7 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
 <tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: UNCERTAIN: Mixed or incomplete fingerprint signals. Breakdown: Declared script UA; TLS is not a catalogued library hash (custom stack or rare build).</td></tr>
 <tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
 <tr><td class="script">proxy_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No proxy env vars; echo showed no common forward headers.</td></tr>
-<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 280.40 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 288.25 ms — LIKELY MATCH: Minor routing overhead vs distance.</td></tr>
 <tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No tunnel-pattern interfaces found (tun/tap/wg/…); no VPN-style virtual iface names.</td></tr>
 <tr><td class="script">vpn_ports.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: VPN/proxy-related port(s) responded OPEN on at least one scan target.</td></tr>
 </tbody></table>

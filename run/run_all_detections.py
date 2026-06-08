@@ -502,7 +502,9 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
         rows = results.get(folder) or []
         if not rows:
             continue
-        parts.append(f'<section>\n<h2>{html.escape(section_title(folder))}</h2>\n')
+        mean_score = _format_mean_score(_mean_score(rows))
+        title = f"{section_title(folder)}: {mean_score}"
+        parts.append(f'<section>\n<h2>{html.escape(title)}</h2>\n')
         parts.append(
             "<table>"
             "<colgroup><col><col><col></colgroup>"
