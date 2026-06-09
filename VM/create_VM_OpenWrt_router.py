@@ -170,7 +170,7 @@ def remove_existing_router_vm(
         shutil.rmtree(vm_base, ignore_errors=True)
 
 
-def setup_openwrt_vm(start_type: str = "gui") -> None:
+def setup_openwrt_vm(start_type: str = "headless") -> None:
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -189,6 +189,7 @@ def setup_openwrt_vm(start_type: str = "gui") -> None:
     vdi_path = os.path.join(vm_base, VDI_NAME)
     dst_path = wsl_to_windows_path(vdi_path) if paths["is_wsl"] else vdi_path
 
+    print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
     remove_existing_vm(
         vboxmanage, VM_NAME, vm_base, medium_path_for_vbox=dst_path
     )
@@ -290,10 +291,10 @@ def main() -> None:
     parser.add_argument(
         "--start-type",
         choices=("gui", "headless", "separate", "none"),
-        default="gui",
+        default="headless",
         help=(
             "How to start the VM after creation. Fedora servers or SSH sessions "
-            "usually want 'headless' or 'none'. Default: gui."
+            "usually want 'headless' or 'none'. Default: headless."
         ),
     )
     args = parser.parse_args()

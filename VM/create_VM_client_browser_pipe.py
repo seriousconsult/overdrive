@@ -65,6 +65,7 @@ import select
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -104,6 +105,7 @@ from detections.common.common_vm import (
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = OPENWRT_CLIENT_VM_NAME
 ARCHIVE_NAME = OSBOXES_ARCHIVE_NAME
+CLIENT_VM_CPUS = min(2, get_half_cpus())
 
 
 def download_osboxes_archive(url: str, archive_path: str) -> None:
@@ -162,6 +164,26 @@ def validate_7z_archive(archive_path: str) -> None:
             "Remove it and re-run this script, or provide a valid archive with "
             "--archive-path."
         ) from exc
+
+
+def require_vdi_prime_tools(*, skip_prime: bool) -> str:
+    """Return virt-customize path or fail before expensive client VDI work."""
+    if skip_prime:
+        raise RuntimeError(
+            "--skip-vdi-prime is incompatible with the current client VM requirement: "
+            "WSL must be able to reach a working ttyS0 serial login. Do not skip VDI priming."
+        )
+    vc = shutil.which("virt-customize")
+    if not vc:
+        raise RuntimeError(
+            "virt-customize is required to enable ttyS0 serial login in the client guest.\n"
+            "Install it in WSL with:\n"
+            "  sudo apt install -y libguestfs-tools\n"
+            "Without this step, VirtualBox can expose TCP port 2323 but Ubuntu may never "
+            "start serial-getty@ttyS0."
+        )
+    return vc
+
 
 # If VDI priming was skipped and the guest somehow has Internet, this still works:
 IN_GUEST_INSTALL_ISC_DHCP_CLIENT = "sudo apt install -y isc-dhcp-client"
@@ -305,7 +327,11 @@ def configure_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
 
 
 def refresh_live_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
-    """Refresh COM1's serial backend for an already-running VM."""
+    """Refresh COM1's serial backend for an already-running VM.
+
+    This briefly suspends/resumes the guest in VirtualBox, so only use it as a
+    manual recovery action after the VM has finished booting.
+    """
     if vboxmanage_targets_windows(vboxmanage):
         uart_mode = "tcpserver"
         print(f"Refreshing live serial TCP backend for {VM_NAME}: {SERIAL_TCP_HOST}:{endpoint}")
@@ -364,81 +390,263 @@ def _serial_input_fd():
     yield None
 
 
-def connect_tcp_serial_console(host: str, port: int, *, timeout_s: float = 20.0) -> None:
-    """Attach this WSL/Linux terminal to a VirtualBox TCP serial endpoint."""
-    host_candidates = serial_tcp_host_candidates(host)
+def _write_serial_output(data: bytes) -> None:
+    """Write serial bytes to stdout even when the console has a narrow encoding."""
+    try:
+        os.write(sys.stdout.fileno(), data)
+    except OSError:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
 
+
+def _print_serial_health_hint(sample: bytes) -> None:
+    """Surface guest-side failures before asking the user to type into the console."""
+    lower = sample.lower()
+    if b"soft lockup" in lower or b"watchdog: bug" in lower:
+        print(
+            "\n[!] Guest output contains Linux watchdog soft-lockup messages.\n"
+            "    The serial TCP connection works, but the Ubuntu guest appears wedged.\n"
+            "    Power off OpenWrt_LAN_Client, then rerun this script so the stable "
+            f"{CLIENT_VM_CPUS}-CPU profile is applied before boot.\n"
+        )
+
+
+def _probe_serial_guest_output(sock: socket.socket, *, wait_s: float = 6.0) -> bytes:
+    """Send Enter and wait briefly for guest bytes so the user knows the console is alive."""
     print(
-        f"Connecting WSL terminal to serial TCP port {port} "
-        f"({SERIAL_BAUD} baud equivalent)."
+        "[serial check] TCP socket connected. Sending Enter and waiting "
+        f"up to {wait_s:.0f}s for guest serial output..."
     )
-    print("Press Enter once for a login prompt. Disconnect with Ctrl-].")
+    sample = bytearray()
+
+    sock.setblocking(False)
+    deadline = time.monotonic() + wait_s
+    next_enter_at = 0.0
+    next_progress_at = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_enter_at:
+            try:
+                sock.sendall(b"\r")
+            except OSError:
+                return bytes(sample)
+            next_enter_at = now + 5.0
+        if now >= next_progress_at:
+            remaining = max(0.0, deadline - now)
+            print(f"[serial check] Still waiting for guest serial output ({remaining:.0f}s left)...")
+            next_progress_at = now + 10.0
+        timeout = max(0.05, min(0.25, deadline - time.monotonic()))
+        readable, _, _ = select.select([sock], [], [], timeout)
+        if sock not in readable:
+            continue
+        try:
+            data = sock.recv(4096)
+        except BlockingIOError:
+            continue
+        if not data:
+            print("\n[serial check] TCP endpoint closed during probe.")
+            return bytes(sample)
+        sample.extend(data)
+        _write_serial_output(data)
+        if b"login:" in sample.lower() or b"password:" in sample.lower():
+            break
+
+    if sample:
+        print("\n[serial check] Guest serial output received; interactive bridge is ready.")
+        _print_serial_health_hint(bytes(sample))
+    else:
+        print(
+            "[serial check] TCP socket is reachable, but the guest produced no serial output.\n"
+            "    If the VirtualBox GUI is already at a tty1 login prompt, the likely issue is "
+            "that ttyS0/serial-getty is not enabled inside the guest."
+        )
+    return bytes(sample)
+
+
+def _connect_tcp_serial_windows(sock: socket.socket) -> None:
+    """Interactive TCP serial bridge for Windows consoles."""
+    try:
+        import msvcrt
+    except ImportError as exc:
+        raise RuntimeError("Windows serial bridge requires the msvcrt module.") from exc
+
+    stop = threading.Event()
+    sock.settimeout(0.25)
+
+    def recv_loop() -> None:
+        while not stop.is_set():
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not data:
+                print("\n[serial disconnected]")
+                break
+            _write_serial_output(data)
+        stop.set()
+
+    reader = threading.Thread(target=recv_loop, daemon=True)
+    reader.start()
+    print("[serial interactive] Type normally. Press Ctrl+] to detach.")
+    while not stop.is_set():
+        if not msvcrt.kbhit():
+            time.sleep(0.03)
+            continue
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            # Function/arrow keys arrive as two-code sequences. Ignore the suffix.
+            if msvcrt.kbhit():
+                msvcrt.getwch()
+            continue
+        if ch == "\x1d":
+            print("\n[serial detached]")
+            stop.set()
+            return
+        if ch in ("\r", "\n"):
+            data = b"\r"
+        else:
+            data = ch.encode("utf-8", errors="ignore")
+        if data:
+            try:
+                sock.sendall(data)
+            except OSError:
+                print("\n[serial disconnected]")
+                stop.set()
+                return
+
+
+def _connect_tcp_serial_posix(sock: socket.socket) -> None:
+    """Interactive TCP serial bridge for POSIX terminals."""
+    sock.setblocking(False)
+    with _serial_input_fd() as input_fd:
+        if input_fd is None:
+            print(
+                "[!] No controlling terminal for keyboard input. "
+                "Run from an interactive shell or let run_VMs.py open a new terminal tab."
+            )
+        with _raw_stdin_for_serial(input_fd):
+            watch_fds = [sock]
+            if input_fd is not None:
+                watch_fds.append(input_fd)
+            print("[serial interactive] Type normally. Press Ctrl+] to detach.")
+            while True:
+                readable, _, _ = select.select(watch_fds, [], [])
+                if sock in readable:
+                    try:
+                        data = sock.recv(4096)
+                    except BlockingIOError:
+                        data = b""
+                    if not data:
+                        print("\n[serial disconnected]")
+                        return
+                    _write_serial_output(data)
+                if input_fd is not None and input_fd in readable:
+                    try:
+                        data = os.read(input_fd, 1024)
+                    except BlockingIOError:
+                        data = b""
+                    if not data:
+                        continue
+                    if b"\x1d" in data:
+                        before, _, _ = data.partition(b"\x1d")
+                        if before:
+                            sock.sendall(before.replace(b"\n", b"\r"))
+                        print("\n[serial detached]")
+                        return
+                    sock.sendall(data.replace(b"\n", b"\r"))
+
+
+def _open_tcp_serial_socket(host: str, port: int, *, timeout_s: float) -> socket.socket:
+    """Open the VirtualBox TCP serial endpoint."""
+    host_candidates = serial_tcp_host_candidates(host)
     deadline = time.monotonic() + timeout_s
     last_error: OSError | None = None
-    sock: socket.socket | None = None
     while time.monotonic() < deadline:
         for candidate in host_candidates:
             try:
                 sock = socket.create_connection((candidate, port), timeout=1.0)
                 print(f"CONNECTED_TO_SERIAL_TCP: {candidate}:{port}")
-                break
+                return sock
             except OSError as exc:
                 last_error = exc
-        if sock is not None:
-            break
         time.sleep(0.25)
-    if sock is None:
-        tried = ", ".join(f"{candidate}:{port}" for candidate in host_candidates)
-        raise RuntimeError(f"Could not connect to serial TCP endpoint; tried {tried}: {last_error}")
-
-    with sock:
-        sock.setblocking(False)
-        try:
-            sock.sendall(b"\r")
-        except OSError:
-            pass
-        with _serial_input_fd() as input_fd:
-            if input_fd is None:
-                print(
-                    "[!] No controlling terminal for keyboard input. "
-                    "Run from an interactive shell or let run_VMs.py open a new terminal tab."
-                )
-            with _raw_stdin_for_serial(input_fd):
-                watch_fds = [sock]
-                if input_fd is not None:
-                    watch_fds.append(input_fd)
-                while True:
-                    readable, _, _ = select.select(watch_fds, [], [])
-                    if sock in readable:
-                        try:
-                            data = sock.recv(4096)
-                        except BlockingIOError:
-                            data = b""
-                        if not data:
-                            print("\n[serial disconnected]")
-                            return
-                        os.write(sys.stdout.fileno(), data)
-                    if input_fd is not None and input_fd in readable:
-                        try:
-                            data = os.read(input_fd, 1024)
-                        except BlockingIOError:
-                            data = b""
-                        if not data:
-                            continue
-                        if b"\x1d" in data:
-                            before, _, _ = data.partition(b"\x1d")
-                            if before:
-                                sock.sendall(before.replace(b"\n", b"\r"))
-                            print("\n[serial detached]")
-                            return
-                        sock.sendall(data.replace(b"\n", b"\r"))
+    tried = ", ".join(f"{candidate}:{port}" for candidate in host_candidates)
+    raise RuntimeError(f"Could not connect to serial TCP endpoint; tried {tried}: {last_error}")
 
 
-def connect_serial_console(vboxmanage: str, endpoint: str, *, timeout_ms: int = 15000) -> None:
+def wait_for_tcp_serial_guest_output(
+    host: str,
+    port: int,
+    *,
+    timeout_s: float,
+    connect_timeout_s: float = 30.0,
+    probe_wait_s: float | None = None,
+) -> bool:
+    """Poll until the serial endpoint returns actual guest bytes."""
+    print("[serial readiness] Waiting for the TCP endpoint, then for guest serial bytes...")
+    try:
+        with _open_tcp_serial_socket(host, port, timeout_s=connect_timeout_s) as sock:
+            sample = _probe_serial_guest_output(sock, wait_s=probe_wait_s or timeout_s)
+    except RuntimeError as exc:
+        print(f"[serial readiness] TCP endpoint did not become reachable: {exc}")
+        sample = b""
+    if sample:
+        print("[serial readiness] Guest serial output is available.")
+        return True
+    print(
+        "[serial readiness] Timed out waiting for guest serial output. "
+        "Not opening an interactive serial window."
+    )
+    return False
+
+
+def connect_tcp_serial_console(
+    host: str,
+    port: int,
+    *,
+    timeout_s: float = 20.0,
+    force_interactive: bool = False,
+) -> bool:
+    """Attach this terminal to a VirtualBox TCP serial endpoint."""
+    print(
+        f"Connecting terminal to serial TCP port {port} "
+        f"({SERIAL_BAUD} baud equivalent)."
+    )
+    print("The script will verify guest output before handing you the interactive console.")
+
+    with _open_tcp_serial_socket(host, port, timeout_s=timeout_s) as sock:
+        sample = _probe_serial_guest_output(sock)
+        if not sample and not force_interactive:
+            print(
+                "[serial interactive] Not opening interactive mode because the guest "
+                "did not produce serial output. Re-run with --force-interactive-serial "
+                "only if you intentionally want a raw socket bridge."
+            )
+            return False
+        if os.name == "nt":
+            _connect_tcp_serial_windows(sock)
+        else:
+            _connect_tcp_serial_posix(sock)
+    return True
+
+
+def connect_serial_console(
+    vboxmanage: str,
+    endpoint: str,
+    *,
+    timeout_ms: int = 15000,
+    force_interactive: bool = False,
+) -> bool:
     """Attach the current terminal to the VM serial console."""
     if vboxmanage_targets_windows(vboxmanage):
-        connect_tcp_serial_console(SERIAL_TCP_HOST, int(endpoint), timeout_s=timeout_ms / 1000)
-        return
+        return connect_tcp_serial_console(
+            SERIAL_TCP_HOST,
+            int(endpoint),
+            timeout_s=timeout_ms / 1000,
+            force_interactive=force_interactive,
+        )
 
     socat = shutil.which("socat")
     screen = shutil.which("screen")
@@ -453,6 +661,7 @@ def connect_serial_console(vboxmanage: str, endpoint: str, *, timeout_ms: int = 
         f"  socat -d -d UNIX-CONNECT:{endpoint} PTY,link={SERIAL_PTY_LINK_PATH},raw,echo=0\n"
         f"  screen {SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}"
     )
+    return True
 
 
 
@@ -523,37 +732,22 @@ def prime_client_vdi_for_intnet_lab(
     ``lab-net-troubleshoot`` into the VDI so the guest works **without** in-guest ``apt`` when
     OpenWrt has not yet provided a route.
     """
-    if skip_prime:
-        print(
-            "[!] --skip-vdi-prime: skipping offline lab network tools. "
-            "The guest may have no dhclient and no ttyS0 login until you fix it another way."
-        )
-        return False
-
     if is_wsl_environment():
         print(
             "[!] Running under WSL: attempting host-side virt-customize/libguestfs VDI priming."
             " libguestfs/supermin is unreliable on WSL — re-run without WSL or use --skip-vdi-prime"
         )
 
-    vc = shutil.which("virt-customize")
-    if not vc:
-        print(
-            "\n" + "*" * 62 + "\n"
-            "WARNING: ``virt-customize`` not found (install libguestfs-tools on **this** WSL host).\n"
-            "  sudo apt install -y libguestfs-tools\n"
-            "Without it, the lab client may ship **without** dhclient. If OpenWrt DHCP fails, the\n"
-            "guest has **no Internet**, so ``apt install isc-dhcp-client`` inside the guest will fail.\n"
-            "Re-run this script after installing libguestfs-tools (VM powered off).\n" + "*" * 62 + "\n"
-        )
-        return False
+    vc = require_vdi_prime_tools(skip_prime=skip_prime)
     virt_env = os.environ.copy()
     if is_wsl_environment():
         virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
 
     if not _poweroff_vm_for_vdi_edit(vboxmanage, vm_name, force_poweroff=force_poweroff):
-        print("[!] VDI priming skipped (VM running). Power off or use --force-poweroff-for-vdi.")
-        return False
+        raise RuntimeError(
+            "VDI priming could not run because the VM was not powered off. "
+            "Fresh rebuild should prevent this; close VirtualBox windows for the client and rerun."
+        )
 
     script_host = work_root / "lab_net_troubleshoot.sh"
     script_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8")
@@ -578,11 +772,10 @@ def prime_client_vdi_for_intnet_lab(
                 print(detail)
             raise subprocess.CalledProcessError(result.returncode, result.args)
     except subprocess.CalledProcessError:
-        print(
-            "[!] Could not enable serial-getty in the guest image. The serial endpoint may open, "
-            "but commands will not work until ttyS0 has a login service."
+        raise RuntimeError(
+            "Could not enable serial-getty@ttyS0 in the guest image. "
+            "The client serial TCP socket may open, but WSL will not get a usable login prompt."
         )
-        return False
 
     print("Injecting lab network troubleshoot helper and optional network packages...")
     try:
@@ -649,7 +842,7 @@ def setup_client_vm(
     force_poweroff_for_vdi: bool = False,
     start_vm: bool = True,
     connect_serial: bool = True,
-    recreate: bool = False,
+    recreate: bool = True,
     skip_vdi_prime: bool = False,
     archive_override: str | None = None,
 ) -> None:
@@ -666,7 +859,7 @@ def setup_client_vm(
     vdi_wsl = os.path.join(vm_base, CLIENT_VDI_NAME)
 
     if recreate:
-        print(f"--recreate: removing existing {VM_NAME!r} registration and disk before rebuild.")
+        print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
         remove_existing_vm(
             vboxmanage,
             VM_NAME,
@@ -679,6 +872,7 @@ def setup_client_vm(
 
     os.makedirs(vm_base, exist_ok=True)
     os.makedirs(vms_root, exist_ok=True)
+    require_vdi_prime_tools(skip_prime=skip_vdi_prime)
 
     extract_dir = os.path.join(download_dir, "temp_osboxes_client_extract")
 
@@ -752,7 +946,13 @@ def setup_client_vm(
         )
     else:
         serial_console_ready = False
-        print("[!] Skipping VDI priming because this run is reusing a registered VM disk.")
+        print("[!] Skipping VDI priming because no client VDI was found.")
+
+    if not serial_console_ready:
+        raise RuntimeError(
+            "Client VM serial console was not confirmed during offline VDI priming. "
+            "Refusing to boot a client that WSL cannot control over ttyS0."
+        )
 
     if not vm_is_registered(vboxmanage, VM_NAME):
         existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
@@ -780,12 +980,7 @@ def setup_client_vm(
             )
 
     if get_vm_state(vboxmanage, VM_NAME) == "running":
-        print(f"{VM_NAME} is already running; reusing it without recreating or applying offline edits.")
-        refresh_live_serial_endpoint(vboxmanage, serial_endpoint)
-        print(serial_console_instructions(vboxmanage, serial_endpoint))
-        if connect_serial:
-            connect_serial_console(vboxmanage, serial_endpoint)
-        return
+        raise RuntimeError(f"{VM_NAME} is already running after rebuild; refusing to reuse it.")
 
     # NIC1 = LAN leg behind OpenWrt (DHCP from OpenWrt br-lan)
     print(
@@ -799,8 +994,10 @@ def setup_client_vm(
             VM_NAME,
             "--memory",
             "4096",
+            "--ioapic",
+            "on",
             "--cpus",
-            str(get_half_cpus()),
+            str(CLIENT_VM_CPUS),
             "--nic1",
             "intnet",
             "--intnet1",
@@ -871,16 +1068,10 @@ def setup_client_vm(
         "\n"
     )
     print(serial_console_instructions(vboxmanage, serial_endpoint))
-    if connect_serial and not serial_console_ready:
-        print(
-            "[!] Could not confirm guest ttyS0 setup. Attaching anyway because this script's "
-            "job is serial bash; if commands still do not work, fix virt-customize/libguestfs "
-            "or enable serial-getty@ttyS0 inside the guest."
-        )
     if start_vm:
         state = get_vm_state(vboxmanage, VM_NAME)
         if state == "running":
-            print(f"{VM_NAME} is already running; reusing it.")
+            raise RuntimeError(f"{VM_NAME} is already running before startvm; refusing to reuse it.")
         else:
             run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "headless"])
         if connect_serial:
@@ -894,7 +1085,7 @@ def setup_client_vm(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="Create or reuse OpenWrt LAN client VM for headless serial bash.",
+        description="Freshly rebuild the OpenWrt LAN client VM for headless serial bash.",
     )
     ap.add_argument(
         "--force-poweroff-for-vdi",
@@ -909,12 +1100,12 @@ if __name__ == "__main__":
     ap.add_argument(
         "--recreate",
         action="store_true",
-        help="Delete and rebuild the client VM/disk. By default existing VMs are reused.",
+        help="Delete and rebuild the client VM/disk. This is now the default for normal setup.",
     )
     ap.add_argument(
         "--skip-vdi-prime",
         action="store_true",
-        help="Do not inject DHCP/ping/dig/lab-net-troubleshoot via virt-customize (not recommended).",
+        help="Debug-only; normal setup rejects this because ttyS0 serial login is required.",
     )
     ap.add_argument(
         "--archive-path",
@@ -938,23 +1129,72 @@ if __name__ == "__main__":
         action="store_true",
         help="Do not create or modify the VM; just attach to the existing serial console.",
     )
+    ap.add_argument(
+        "--serial-check-only",
+        action="store_true",
+        help="Probe the serial TCP endpoint until guest output appears; do not open interactive mode.",
+    )
+    ap.add_argument(
+        "--serial-ready-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for guest serial output with --serial-check-only (default: 30).",
+    )
+    ap.add_argument(
+        "--force-interactive-serial",
+        action="store_true",
+        help="Open the raw serial bridge even when the guest emits no serial output.",
+    )
+    ap.add_argument(
+        "--refresh-live-serial",
+        action="store_true",
+        help=(
+            "Manually bounce the running VM's UART backend before serial attach/check. "
+            "This briefly suspends/resumes the guest; avoid during boot."
+        ),
+    )
     ns = ap.parse_args()
+    if ns.serial_check_only:
+        paths = get_system_paths(VM_NAME)
+        vboxmanage = find_vboxmanage(paths)
+        if not vboxmanage:
+            raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
+        serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
+        if get_vm_state(vboxmanage, VM_NAME) != "running":
+            print(f"[serial readiness] {VM_NAME} is not running.")
+            raise SystemExit(1)
+        if vboxmanage_targets_windows(vboxmanage):
+            if ns.refresh_live_serial:
+                refresh_live_serial_endpoint(vboxmanage, serial_endpoint)
+            ready = wait_for_tcp_serial_guest_output(
+                SERIAL_TCP_HOST,
+                int(serial_endpoint),
+                timeout_s=ns.serial_ready_timeout,
+            )
+            raise SystemExit(0 if ready else 1)
+        print("[serial readiness] Native Linux socket mode does not support TCP readiness probing.")
+        raise SystemExit(0)
+
     if ns.serial_only:
         paths = get_system_paths(VM_NAME)
         vboxmanage = find_vboxmanage(paths)
         if not vboxmanage:
             raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
         serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
-        if get_vm_state(vboxmanage, VM_NAME) == "running":
+        if ns.refresh_live_serial and get_vm_state(vboxmanage, VM_NAME) == "running":
             refresh_live_serial_endpoint(vboxmanage, serial_endpoint)
-        connect_serial_console(vboxmanage, serial_endpoint)
-        raise SystemExit(0)
+        connected = connect_serial_console(
+            vboxmanage,
+            serial_endpoint,
+            force_interactive=ns.force_interactive_serial,
+        )
+        raise SystemExit(0 if connected else 1)
 
     setup_client_vm(
         force_poweroff_for_vdi=ns.force_poweroff_for_vdi,
         start_vm=not ns.no_start,
         connect_serial=ns.connect_serial or (not ns.no_start and not ns.no_connect_serial),
-        recreate=ns.recreate,
+        recreate=True,
         skip_vdi_prime=ns.skip_vdi_prime,
         archive_override=ns.archive_path,
     )

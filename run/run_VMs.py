@@ -11,6 +11,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,12 +50,9 @@ def discover_create_scripts(*, include_todo: bool) -> list[Path]:
 
     ordered.extend(all_scripts[name] for name in sorted(all_scripts))
 
-    if include_todo:
-        return ordered
-
     runnable = []
     for path in ordered:
-        if script_has_todo(path):
+        if not include_todo and script_has_todo(path):
             print(f"[skip] {path.name}: contains TODO; use --include-todo to run it anyway.")
             continue
         runnable.append(path)
@@ -85,6 +83,23 @@ def main() -> int:
         action="store_true",
         help="Run VM creation scripts but skip verify_lab_from_host.py.",
     )
+    parser.add_argument(
+        "--include-client",
+        action="store_true",
+        help="Deprecated no-op; the client VM and serial pipe are always required.",
+    )
+    parser.add_argument(
+        "--client-boot-grace",
+        type=float,
+        default=45.0,
+        help="Seconds to wait after starting the client before serial probing.",
+    )
+    parser.add_argument(
+        "--client-serial-ready-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for required guest serial output before failing VM setup.",
+    )
     args = parser.parse_args()
 
     scripts = discover_create_scripts(
@@ -96,15 +111,29 @@ def main() -> int:
 
     failures: list[tuple[str, int]] = []
 
-    def run_client_pipe_step(script: Path, *, dry_run: bool) -> int:
+    def run_client_pipe_step(
+        script: Path,
+        *,
+        dry_run: bool,
+        boot_grace_s: float,
+        serial_ready_timeout_s: float,
+    ) -> int:
         """Start the client VM synchronously, then open serial in a separate terminal."""
-        setup_cmd = [sys.executable, str(script), "--no-connect-serial"]
+        setup_cmd = [sys.executable, str(script), "--no-connect-serial", "--recreate"]
+        check_cmd = [
+            sys.executable,
+            str(script),
+            "--serial-check-only",
+            "--serial-ready-timeout",
+            str(serial_ready_timeout_s),
+        ]
         serial_cmd = [sys.executable, str(script), "--serial-only"]
 
         print()
-        print(f"=== {script.name} (VM setup, then serial in new window) ===")
+        print(f"=== {script.name} (VM setup, readiness check, then serial window) ===")
         print("[run] " + " ".join(setup_cmd))
         if dry_run:
+            print("[run] " + " ".join(check_cmd))
             print("[run] " + " ".join(serial_cmd) + "  # new terminal")
             return 0
 
@@ -112,12 +141,28 @@ def main() -> int:
         if rc != 0:
             return rc
 
+        if boot_grace_s > 0:
+            print(
+                f"[wait] Giving {script.stem} {boot_grace_s:.0f}s to boot before serial probing..."
+            )
+            time.sleep(boot_grace_s)
+
+        print("[run] " + " ".join(check_cmd))
+        rc = subprocess.run(check_cmd, cwd=str(REPO_ROOT), check=False).returncode
+        if rc != 0:
+            print(
+                "[!] Client serial is not usable from WSL. The TCP endpoint may be reachable, "
+                "but no guest ttyS0 output was observed.\n"
+                "    Treating this as a VM setup failure because WSL serial control is required."
+            )
+            return rc
+
         print("[run] " + " ".join(serial_cmd) + "  # new terminal")
         if is_wsl_environment():
             if spawn_wsl_interactive_terminal(
                 serial_cmd,
                 cwd=REPO_ROOT,
-                title="OpenWrt serial",
+                title="OpenWrt client serial",
             ):
                 print("[+] Serial console opened in a new Windows terminal tab.")
                 return 0
@@ -143,9 +188,17 @@ def main() -> int:
 
     for script in scripts:
         if script.name == "create_VM_client_browser_pipe.py":
-            rc = run_client_pipe_step(script, dry_run=args.dry_run)
+            rc = run_client_pipe_step(
+                script,
+                dry_run=args.dry_run,
+                boot_grace_s=args.client_boot_grace,
+                serial_ready_timeout_s=args.client_serial_ready_timeout,
+            )
         else:
-            rc = run_step([sys.executable, str(script)], cwd=REPO_ROOT, dry_run=args.dry_run)
+            command = [sys.executable, str(script)]
+            if script.name == "create_VM_OpenWrt_router.py":
+                command.extend(["--start-type", "headless"])
+            rc = run_step(command, cwd=REPO_ROOT, dry_run=args.dry_run)
 
         if rc != 0:
             failures.append((script.name, rc))

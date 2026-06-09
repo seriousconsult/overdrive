@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run VM setup/verification, then run the Overdrive detection suite."""
+"""Run VM setup/verification, then run the detection suite."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def main() -> int:
             name="Detection suite",
         )
         if rc != 0:
-            failures.append(("run_all_detections.py", rc))
+            failures.append(("run_detections.py", rc))
             if not args.keep_going:
                 return rc
 

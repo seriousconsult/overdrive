@@ -30,7 +30,9 @@ def get_linux_info():
         return {
             "mgr": "dnf",
             "pcap": "libpcap-devel",
-            "7zip": "p7zip p7zip-plugins",
+            "7zip": [["p7zip", "p7zip-plugins"], ["7zip"]],
+            "guestfs": "guestfs-tools",
+            "cap": "libcap",
             "chrome_cmd": "google-chrome",
             "socat": "socat",
             "minicom": "minicom",
@@ -39,12 +41,33 @@ def get_linux_info():
         return {
             "mgr": "apt",
             "pcap": "libpcap-dev",
-            "7zip": "p7zip-full",
+            "7zip": [["p7zip-full"], ["7zip"]],
+            "guestfs": "libguestfs-tools",
+            "cap": "libcap2-bin",
             "chrome_cmd": "google-chrome-stable",
             "socat": "socat",
             "minicom": "minicom",
         }
     return None
+
+
+def install_packages(mgr: str, packages: list[str]) -> None:
+    """Install one package set with the active Linux package manager."""
+    subprocess.run(["sudo", mgr, "install", "-y", *packages], check=True)
+
+
+def install_first_available_package_set(mgr: str, package_sets: list[list[str]]) -> None:
+    """Try package-name alternatives, useful for Ubuntu/Fedora version differences."""
+    last_error: subprocess.CalledProcessError | None = None
+    for packages in package_sets:
+        try:
+            install_packages(mgr, packages)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            print(f"[-] Failed installing {' '.join(packages)}; trying next option...")
+    if last_error:
+        raise last_error
 
 
 def _distro_success_label() -> str:
@@ -102,16 +125,19 @@ def install_system_deps():
     print(f"Detected {mgr} package manager. Preparing installation...")
 
     try:
+        if mgr == "apt":
+            print("Updating apt package indexes...")
+            subprocess.run(["sudo", "apt", "update"], check=True)
+
         # 1. Install libpcap
         print(f"Installing {info['pcap']}...")
-        subprocess.run(["sudo", mgr, "install", "-y", info["pcap"]], check=True)
+        install_packages(mgr, [info["pcap"]])
 
 
         # 2. Install 7-Zip
         if not shutil.which("7z"):
-            print(f"Installing {info['7zip']}...")
-            # split() handles the multiple packages for Fedora 7zip
-            subprocess.run(["sudo", mgr, "install", "-y"] + info["7zip"].split(), check=True)
+            print("Installing 7-Zip...")
+            install_first_available_package_set(mgr, info["7zip"])
         else:
             print("7-Zip is already installed.")
 
@@ -123,11 +149,11 @@ def install_system_deps():
                     # Direct installation via the Google RPM URL - bypasses the need for config-manager
                     print("Attempting direct RPM installation...")
                     chrome_url = "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
-                    subprocess.run(["sudo", "dnf", "install", "-y", chrome_url], check=True)
+                    install_packages("dnf", [chrome_url])
                 except subprocess.CalledProcessError:
                     print("Direct install failed. Trying repo method...")
                     # Fallback: Just try installing it normally; if workstation-repos is there, it might just work
-                    subprocess.run(["sudo", "dnf", "install", "-y", "google-chrome-stable"], check=True)
+                    install_packages("dnf", ["google-chrome-stable"])
             elif mgr == "apt":
                 deb_url = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
                 deb_fd, deb_path = tempfile.mkstemp(suffix=".deb")
@@ -135,7 +161,7 @@ def install_system_deps():
                 try:
                     print("Downloading Google Chrome .deb...")
                     urllib.request.urlretrieve(deb_url, deb_path)
-                    subprocess.run(["sudo", "apt", "install", "-y", deb_path], check=True)
+                    install_packages("apt", [deb_path])
                 finally:
                     try:
                         os.unlink(deb_path)
@@ -145,7 +171,7 @@ def install_system_deps():
         # 4. Install nmap
         if not shutil.which("nmap"):
             print("Installing nmap...")
-            subprocess.run(["sudo", mgr, "install", "-y", "nmap"], check=True)
+            install_packages(mgr, ["nmap"])
         else:
             print("nmap is already installed.")
 
@@ -153,19 +179,38 @@ def install_system_deps():
         # 5. Install minicom
         if not shutil.which("minicom"):
             print("Installing minicom...")
-            subprocess.run(["sudo", mgr, "install", "-y", "minicom"], check=True)
+            install_packages(mgr, ["minicom"])
         else:
             print("minicom is already installed.")
 
         # 6. Install socat
         if not shutil.which("socat"):
             print("Installing socat...")
-            subprocess.run(["sudo", mgr, "install", "-y", "socat"], check=True)
+            install_packages(mgr, ["socat"])
         else:
             print("socat is already installed.")
             
-    except:
-        print("Dependancies failed to install.")
+        # 7. Install guestfs tooling; create_VM_client_browser_pipe.py needs virt-customize.
+        if not shutil.which("virt-customize"):
+            print(f"Installing {info['guestfs']} for virt-customize...")
+            install_packages(mgr, info["guestfs"].split())
+        else:
+            print("virt-customize is already installed.")
+
+        # 8. Install setcap provider before applying capabilities.
+        if not shutil.which("setcap"):
+            print(f"Installing {info['cap']} for setcap...")
+            install_packages(mgr, [info["cap"]])
+        else:
+            print("setcap is already installed.")
+
+    except subprocess.CalledProcessError as exc:
+        print(f"Dependencies failed to install: {exc}")
+        raise
+
+
+
+
 
 
 # --- Main Logic ---

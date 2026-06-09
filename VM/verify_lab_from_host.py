@@ -62,7 +62,11 @@ def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool) -> 
     if vboxmanage_targets_windows(vbox):
         ok, detail = probe_tcp_serial(SERIAL_TCP_HOST, SERIAL_TCP_PORT)
         if ok:
-            print(f"  [+] {CLIENT_VM} serial TCP endpoint accepts a client: {SERIAL_TCP_HOST}:{SERIAL_TCP_PORT}")
+            print(f"  [+] {CLIENT_VM} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{SERIAL_TCP_PORT}")
+            print(
+                "      Socket-level check only; this does not prove guest ttyS0 output. "
+                "Run: python VM/create_VM_client_browser_pipe.py --serial-check-only"
+            )
         else:
             errs.append(
                 "client serial TCP endpoint did not accept a client. "
@@ -255,14 +259,6 @@ def main() -> int:
         print("\n[!] VERIFICATION FAILED:")
         for e in all_errs:
             print(f"    - {e}")
-        
-        print("\nPossible Solutions:")
-        print(f"  1. Run the 'create_VM_*.py' scripts to reset the NICs.")
-        print(f"  2. Open VirtualBox GUI -> Settings -> Network -> Advanced.")
-        print(f"     Ensure 'Cable Connected' is checked and 'Promiscuous Mode' is NOT 'Deny'.")
-        print(f"  3. If only the serial endpoint is busy/stuck, refresh the live UART backend:")
-        print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 disconnected")
-        print(f"     VBoxManage.exe controlvm {CLIENT_VM} changeuartmode1 tcpserver {SERIAL_TCP_PORT}")
         return 1
 
     print("\n[+] SUCCESS: VirtualBox 'Layer 1' wiring is correct.")
