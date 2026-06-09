@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import platform
 import shutil
@@ -44,11 +45,19 @@ __all__ = [
     "resolve_vbox_settings_path",
     "run_vboxmanage",
     "serial_endpoint_for_vbox",
+    "serial_tcp_host_candidates",
     "serial_uart_mode_and_endpoint",
+    "spawn_wsl_interactive_terminal",
+    "start_vm_headless_safe",
+    "ensure_vm_ready_to_start",
+    "close_medium_best_effort",
+    "wait_after_disk_operation",
+    "wsl_windows_host_ip",
     "try_unregistervm_delete",
     "vbox_closemedium_disk_delete_best_effort",
     "vm_is_registered",
     "wsl_to_windows_path",
+    "windows_temp_dir_linux",
 ]
 
 OPENWRT_ROUTER_VM_NAME = "OpenWrt_2026_Router"
@@ -77,6 +86,41 @@ def is_wsl_environment() -> bool:
     return "microsoft" in platform.release().lower() or os.path.exists(
         "/proc/sys/fs/binfmt_misc/WSLInterop"
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_cmd_available() -> bool:
+    """True when ``cmd.exe`` interop works (optional Windows helper, not required for VM setup)."""
+    if os.name == "nt":
+        return True
+    if not is_wsl_environment() or shutil.which("cmd.exe") is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["cmd.exe", "/c", "echo", "ok"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return proc.returncode == 0 and "ok" in proc.stdout
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def wsl_windows_host_ip() -> str | None:
+    """Return the Windows host IP as seen from WSL2 (for Windows-local TCP services)."""
+    if not is_wsl_environment():
+        return None
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8") as resolv:
+            for line in resolv:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    return parts[1]
+    except OSError:
+        return None
+    return None
 
 
 def get_linux_distro_id() -> str | None:
@@ -111,6 +155,33 @@ def wsl_to_windows_path(path: str | Path) -> str:
         return path_str
 
 
+def windows_temp_dir_linux() -> Path | None:
+    """Return Windows %TEMP% as a WSL path when cmd.exe interop is available."""
+    if not is_wsl_environment() or not _windows_cmd_available():
+        return None
+    try:
+        proc = subprocess.run(
+            ["cmd.exe", "/c", "echo", "%TEMP%"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        win_temp = proc.stdout.strip()
+        if not win_temp or win_temp == "%TEMP%":
+            return None
+        wsl = subprocess.run(
+            ["wslpath", win_temp],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        path = Path(wsl.stdout.strip())
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+
 def vboxmanage_targets_windows(vboxmanage: str) -> bool:
     """True when this shell is controlling Windows VirtualBox through VBoxManage.exe."""
     return Path(vboxmanage).name.lower().endswith(".exe")
@@ -119,8 +190,8 @@ def vboxmanage_targets_windows(vboxmanage: str) -> bool:
 def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, str | bool | None]:
     """Return standard host paths for VirtualBox VM creation and downloads."""
     linux_home = str(Path.home())
-    win_profile = None
-    if is_wsl_environment():
+    win_profile: str | None = None
+    if is_wsl_environment() and _windows_cmd_available():
         try:
             proc = subprocess.run(
                 ["cmd.exe", "/c", "echo", "%USERPROFILE%"],
@@ -128,8 +199,10 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
                 text=True,
                 check=True,
             )
-            win_profile = proc.stdout.strip()
-        except subprocess.CalledProcessError:
+            candidate = proc.stdout.strip()
+            if candidate and candidate != "%USERPROFILE%":
+                win_profile = candidate
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             win_profile = None
 
     downloads = os.path.join(linux_home, "Downloads")
@@ -140,7 +213,7 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
         "is_wsl": is_wsl_environment(),
         "linux_home": linux_home,
         "win_profile": win_profile,
-        "base_path": win_profile if win_profile else linux_home,
+        "base_path": linux_home,
         "downloads": downloads,
         "vms_root": vms_root,
         "vm_base": vm_base,
@@ -238,7 +311,8 @@ def get_half_cpus() -> int:
 def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
     """Run VBoxManage with the provided arguments."""
     print(f"Executing: {vboxmanage} {' '.join(args)}")
-    capture_output = kwargs.pop("capture_output", True)
+    stream = kwargs.pop("stream", False)
+    capture_output = kwargs.pop("capture_output", not stream)
     text = kwargs.pop("text", True)
     lock_retries = int(kwargs.pop("lock_retries", 12))
     lock_retry_s = float(kwargs.pop("lock_retry_s", 1.0))
@@ -251,19 +325,27 @@ def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
             **kwargs,
         )
         if result.returncode == 0:
+            if stream:
+                print()
             return
 
-        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        output = ""
+        if capture_output:
+            output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
         lower = output.lower()
         locked = (
             "already locked for a session" in lower
             or "being unlocked" in lower
+            or "locking of attached media" in lower
             or "vbox_e_invalid_object_state" in lower
             or "0x80bb0007" in lower
         )
         if locked and attempt < lock_retries:
             if attempt == 0:
                 print("VirtualBox still has a machine lock; waiting and retrying...")
+            if attempt == 5 and (is_wsl_environment() or os.name == "nt"):
+                print("Clearing stale VBoxManage.exe processes that may hold disk locks...")
+                terminate_stale_vboxmanage_processes()
             time.sleep(lock_retry_s)
             continue
 
@@ -437,11 +519,124 @@ def get_vm_state(vboxmanage: str, vm_name: str) -> str | None:
     return None
 
 
+def terminate_stale_vboxmanage_processes() -> None:
+    """Kill orphan Windows VBoxManage.exe processes that hold disk locks after failed runs."""
+    if not _windows_cmd_available():
+        return
+    subprocess.run(
+        ["cmd.exe", "/c", "taskkill", "/F", "/IM", "VBoxManage.exe"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    time.sleep(1)
+
+
+def close_medium_best_effort(vboxmanage: str, medium_linux: str) -> None:
+    """Close a disk medium in VirtualBox if it is still open (e.g. after clonemedium)."""
+    medium = (
+        wsl_to_windows_path(medium_linux)
+        if vboxmanage_targets_windows(vboxmanage)
+        else medium_linux
+    )
+    subprocess.run(
+        [vboxmanage, "closemedium", "disk", medium],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def wait_after_disk_operation(vboxmanage: str, *, seconds: float = 5.0) -> None:
+    """Pause after VDI clone/edit so Windows VirtualBox can release media locks."""
+    print(f"Waiting {seconds:.0f}s for VirtualBox to release disk locks...")
+    time.sleep(seconds)
+
+
+def ensure_vm_ready_to_start(vboxmanage: str, vm_name: str, *, wait_s: int = 60) -> None:
+    """Power off and discard saved state so startvm can attach media."""
+    state = get_vm_state(vboxmanage, vm_name)
+    if state is None:
+        return
+    if state == "saved":
+        run_vboxmanage(vboxmanage, ["discardstate", vm_name])
+        state = get_vm_state(vboxmanage, vm_name)
+    if state in ("running", "paused", "stopping", "starting"):
+        run_vboxmanage(
+            vboxmanage,
+            ["controlvm", vm_name, "poweroff"],
+            lock_retries=20,
+            lock_retry_s=2.0,
+        )
+        for _ in range(wait_s):
+            time.sleep(1)
+            st = get_vm_state(vboxmanage, vm_name)
+            if st in (None, "poweroff", "aborted"):
+                break
+
+
+def start_vm_headless_safe(vboxmanage: str, vm_name: str) -> None:
+    """Start a VM headless after clearing stale locks from recent disk operations."""
+    if get_vm_state(vboxmanage, vm_name) == "running":
+        return
+    terminate_stale_vboxmanage_processes()
+    ensure_vm_ready_to_start(vboxmanage, vm_name)
+    wait_after_disk_operation(vboxmanage)
+    run_vboxmanage(
+        vboxmanage,
+        ["startvm", vm_name, "--type", "headless"],
+        lock_retries=30,
+        lock_retry_s=2.0,
+    )
+
+
 def serial_endpoint_for_vbox(vboxmanage: str) -> str:
     """Return the host-side serial endpoint VirtualBox should expose."""
     if vboxmanage_targets_windows(vboxmanage):
         return str(SERIAL_TCP_PORT)
     return SERIAL_UNIX_SOCKET_PATH
+
+
+def serial_tcp_host_candidates(base_host: str | None = None) -> list[str]:
+    """Hosts to try when reaching VirtualBox's Windows TCP serial server from WSL."""
+    host = base_host or SERIAL_TCP_HOST
+    candidates: list[str] = []
+    if is_wsl_environment():
+        win_host = wsl_windows_host_ip()
+        if win_host:
+            candidates.append(win_host)
+    if host not in candidates:
+        candidates.append(host)
+    if is_wsl_environment() and "127.0.0.1" not in candidates:
+        candidates.append("127.0.0.1")
+    return candidates
+
+
+def spawn_wsl_interactive_terminal(
+    command: list[str],
+    *,
+    cwd: str | Path,
+    title: str = "Serial console",
+) -> bool:
+    """Launch a Python command in a new Windows Terminal tab when cmd.exe interop works."""
+    if not _windows_cmd_available():
+        return False
+    cwd_str = str(Path(cwd).resolve())
+    launchers = [
+        ["cmd.exe", "/C", "start", title, "wt.exe", "new-tab", "--", "wsl.exe", "--cd", cwd_str, "-e", *command],
+        ["cmd.exe", "/C", "start", title, "wsl.exe", "--cd", cwd_str, "-e", *command],
+    ]
+    for launcher in launchers:
+        try:
+            subprocess.Popen(
+                launcher,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            continue
+    return False
 
 
 def serial_uart_mode_and_endpoint(vboxmanage: str) -> tuple[str, str]:
@@ -453,11 +648,14 @@ def serial_uart_mode_and_endpoint(vboxmanage: str) -> tuple[str, str]:
 
 def probe_tcp_serial(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool, str]:
     """Connect to a VirtualBox TCP serial endpoint without sending bytes."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            return True, "CONNECTED"
-    except OSError as exc:
-        return False, str(exc)
+    last_error: OSError | None = None
+    for candidate in serial_tcp_host_candidates(host):
+        try:
+            with socket.create_connection((candidate, port), timeout=timeout_s):
+                return True, f"CONNECTED ({candidate}:{port})"
+        except OSError as exc:
+            last_error = exc
+    return False, str(last_error) if last_error else "no host candidates"
 
 
 def get_active_bridged_interface(vboxmanage: str) -> str | None:

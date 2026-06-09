@@ -94,6 +94,7 @@ from detections.common.common_vm import (
     SERIAL_PTY_LINK_PATH,
     SERIAL_TCP_HOST,
     serial_endpoint_for_vbox,
+    serial_tcp_host_candidates,
     SERIAL_UNIX_SOCKET_PATH,
     vboxmanage_targets_windows,
     vm_is_registered,
@@ -252,9 +253,11 @@ def guest_serial_console_commands() -> list[str]:
 def serial_console_instructions(vboxmanage: str, endpoint: str) -> str:
     """Host-specific commands for attaching to the VM serial console."""
     if vboxmanage_targets_windows(vboxmanage):
+        hosts = ", ".join(serial_tcp_host_candidates(SERIAL_TCP_HOST))
         return (
             "--- Serial console TCP endpoint ---\n"
-            f"VirtualBox exposes COM1 as TCP {SERIAL_TCP_HOST}:{endpoint}\n"
+            f"VirtualBox exposes COM1 as TCP port {endpoint} on the Windows host.\n"
+            f"From WSL, connect to one of: {hosts}\n"
             "This avoids Windows named-pipe stdin issues when attaching from WSL.\n"
             "If the endpoint is busy/stuck, refresh only the live UART backend:\n"
             f"  VBoxManage.exe controlvm {VM_NAME} changeuartmode1 disconnected\n"
@@ -314,11 +317,18 @@ def refresh_live_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
 
 
 @contextlib.contextmanager
-def _raw_stdin_for_serial():
-    """Put a WSL/Linux TTY into raw mode while a child bridge owns stdio."""
-    if platform.system().lower() != "linux" or not sys.stdin.isatty():
+def _raw_stdin_for_serial(input_fd: int | None = None):
+    """Put the controlling TTY into raw mode while the serial bridge owns keyboard input."""
+    if platform.system().lower() != "linux":
         yield
         return
+
+    fd = input_fd
+    if fd is None:
+        if not sys.stdin.isatty():
+            yield
+            return
+        fd = sys.stdin.fileno()
     try:
         import termios
         import tty
@@ -326,7 +336,6 @@ def _raw_stdin_for_serial():
         yield
         return
 
-    fd = sys.stdin.fileno()
     old_attrs = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
@@ -335,19 +344,29 @@ def _raw_stdin_for_serial():
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
 
+@contextlib.contextmanager
+def _serial_input_fd():
+    """Prefer the controlling terminal for keyboard input instead of inherited stdin."""
+    tty_fd: int | None = None
+    try:
+        tty_fd = os.open("/dev/tty", os.O_RDONLY)
+    except OSError:
+        pass
+    if tty_fd is not None:
+        try:
+            yield tty_fd
+        finally:
+            os.close(tty_fd)
+        return
+    if sys.stdin.isatty():
+        yield sys.stdin.fileno()
+        return
+    yield None
+
+
 def connect_tcp_serial_console(host: str, port: int, *, timeout_s: float = 20.0) -> None:
     """Attach this WSL/Linux terminal to a VirtualBox TCP serial endpoint."""
-    host_candidates = [host]
-    if is_wsl_environment():
-        try:
-            with open("/etc/resolv.conf", encoding="utf-8") as resolv:
-                for line in resolv:
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[0] == "nameserver" and parts[1] not in host_candidates:
-                        host_candidates.append(parts[1])
-                        break
-        except OSError:
-            pass
+    host_candidates = serial_tcp_host_candidates(host)
 
     print(
         f"Connecting WSL terminal to serial TCP port {port} "
@@ -374,29 +393,45 @@ def connect_tcp_serial_console(host: str, port: int, *, timeout_s: float = 20.0)
 
     with sock:
         sock.setblocking(False)
-        with _raw_stdin_for_serial():
-            while True:
-                readable, _, _ = select.select([sys.stdin, sock], [], [])
-                if sock in readable:
-                    try:
-                        data = sock.recv(4096)
-                    except BlockingIOError:
-                        data = b""
-                    if not data:
-                        print("\n[serial disconnected]")
-                        return
-                    os.write(sys.stdout.fileno(), data)
-                if sys.stdin in readable:
-                    data = os.read(sys.stdin.fileno(), 1024)
-                    if not data:
-                        return
-                    if b"\x1d" in data:
-                        before, _, _ = data.partition(b"\x1d")
-                        if before:
-                            sock.sendall(before.replace(b"\n", b"\r"))
-                        print("\n[serial detached]")
-                        return
-                    sock.sendall(data.replace(b"\n", b"\r"))
+        try:
+            sock.sendall(b"\r")
+        except OSError:
+            pass
+        with _serial_input_fd() as input_fd:
+            if input_fd is None:
+                print(
+                    "[!] No controlling terminal for keyboard input. "
+                    "Run from an interactive shell or let run_VMs.py open a new terminal tab."
+                )
+            with _raw_stdin_for_serial(input_fd):
+                watch_fds = [sock]
+                if input_fd is not None:
+                    watch_fds.append(input_fd)
+                while True:
+                    readable, _, _ = select.select(watch_fds, [], [])
+                    if sock in readable:
+                        try:
+                            data = sock.recv(4096)
+                        except BlockingIOError:
+                            data = b""
+                        if not data:
+                            print("\n[serial disconnected]")
+                            return
+                        os.write(sys.stdout.fileno(), data)
+                    if input_fd is not None and input_fd in readable:
+                        try:
+                            data = os.read(input_fd, 1024)
+                        except BlockingIOError:
+                            data = b""
+                        if not data:
+                            continue
+                        if b"\x1d" in data:
+                            before, _, _ = data.partition(b"\x1d")
+                            if before:
+                                sock.sendall(before.replace(b"\n", b"\r"))
+                            print("\n[serial detached]")
+                            return
+                        sock.sendall(data.replace(b"\n", b"\r"))
 
 
 def connect_serial_console(vboxmanage: str, endpoint: str, *, timeout_ms: int = 15000) -> None:
@@ -909,7 +944,10 @@ if __name__ == "__main__":
         vboxmanage = find_vboxmanage(paths)
         if not vboxmanage:
             raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
-        connect_serial_console(vboxmanage, serial_endpoint_for_vbox(vboxmanage))
+        serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
+        if get_vm_state(vboxmanage, VM_NAME) == "running":
+            refresh_live_serial_endpoint(vboxmanage, serial_endpoint)
+        connect_serial_console(vboxmanage, serial_endpoint)
         raise SystemExit(0)
 
     setup_client_vm(

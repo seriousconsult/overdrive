@@ -4,12 +4,15 @@ Screen Capture API Detection
 
 Detects if screen capture APIs (getDisplayMedia, getUserMedia with video)
 are available and being used for fingerprinting.
+Typical residential browsers expose screen capture APIs in regular builds;
+hardened or locked-down profiles often remove or restrict them.
 
 Host-authenticity score:
-1 = normal browser behavior / not alerting
-2 = mildly atypical browser API behavior
+1 = normal residential browser behavior
+2 = mostly normal browser behavior with minor atypical details
 3 = inconclusive Selenium/browser result
-4/5 = reserved for artificial-host evidence, which this probe rarely produces
+4 = unusual or hardened browser behavior for a home setup
+5 = strongly non-home-like automation/hardened profile
 """
 
 import sys
@@ -148,14 +151,15 @@ def check_screen_capture() -> tuple[int, str]:
     if has_display:
         status = display_test.get("status") if isinstance(display_test, dict) else None
         if status == "allowed":
-            return 2, (
+            return 1, (
                 "navigator.mediaDevices.getDisplayMedia is supported and a capture request was accepted. "
-                "This is mildly atypical in an unattended probe but still browser-like."
+                "This matches a typical residential browser profile."
             )
 
-        return 1, (
+        return 2, (
             "navigator.mediaDevices.getDisplayMedia is supported. "
-            f"Capture request result: {_format_result(status, display_test.get('name') if isinstance(display_test, dict) else None, display_test.get('message') if isinstance(display_test, dict) else None)}."
+            f"Capture request result: {_format_result(status, display_test.get('name') if isinstance(display_test, dict) else None, display_test.get('message') if isinstance(display_test, dict) else None)}. "
+            "This is still browser-like, though not fully definitive."
         )
 
     if has_user:
@@ -163,23 +167,24 @@ def check_screen_capture() -> tuple[int, str]:
         if status == "allowed":
             return 2, (
                 "navigator.mediaDevices.getUserMedia(video:true) is supported and the request completed. "
-                "This is mildly atypical in an unattended probe but still browser-like."
+                "This is browser-like, but a typical residential browser usually also exposes getDisplayMedia."
             )
 
-        return 1, (
+        return 3, (
             "navigator.mediaDevices.getUserMedia(video:true) is supported. "
-            f"Request result: {_format_result(status, user_test.get('name') if isinstance(user_test, dict) else None, user_test.get('message') if isinstance(user_test, dict) else None)}."
+            f"Request result: {_format_result(status, user_test.get('name') if isinstance(user_test, dict) else None, user_test.get('message') if isinstance(user_test, dict) else None)}. "
+            "Missing getDisplayMedia makes this less typical for a modern home browser."
         )
 
     if detection.get("hasMediaDevices"):
-        return 2, (
+        return 4, (
             "navigator.mediaDevices exists, but no screen capture API was detected. "
-            "This reduces the browser attack surface for screen capture tracking."
+            "This is unusual for a normal residential browser and suggests a hardened profile."
         )
 
-    return 1, (
+    return 5, (
         "No navigator.mediaDevices or capture APIs were detected. "
-        "Screen capture APIs are not available and not used."
+        "This is not typical for a residential browser and is characteristic of hardened or automation profiles."
     )
 
 
