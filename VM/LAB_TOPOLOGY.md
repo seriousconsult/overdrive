@@ -46,7 +46,7 @@ WSL / Linux shell on host: runs scripts, calls VBoxManage.exe — NOT on openwrt
 | Machine | VBox NIC | Mode | Must match | OpenWrt / Ubuntu guest (typical) |
 |--------|----------|------|------------|----------------------------------|
 | **OpenWrt_2026_Router** | **NIC1** | Internal network **`openwrt-lan`** | Client **NIC1** intnet name | **`eth0`** → **`br-lan`** (e.g. `192.168.1.1/24`) |
-| **OpenWrt_2026_Router** | **NIC2** | **Bridged** (preferred) or **NAT** | Your uplink / internet path | **`eth1`** → **`wan`** / **`wan6`** (DHCP or similar) |
+| **OpenWrt_2026_Router** | **NIC2** | **NAT** (default) or bridged | Your uplink / internet path | **`eth1`** → **`wan`** / **`wan6`** (DHCP or similar) |
 | **OpenWrt_LAN_Client** | **NIC1** | Internal network **`openwrt-lan`** | Router **NIC1** intnet name | **`enp0s3`** (or `eth0` on older images) — DHCP client |
 
 Why **NIC1 = LAN** on the router: the factory image puts **`br-lan` on `eth0`**. The first VirtualBox adapter is usually `eth0`, so LAN must be NIC1.
@@ -136,7 +136,7 @@ That combination is the **real** end-to-end proof for the **LAN leg**.
 |-----------|---------|
 | “WSL has internet, so the client should too” | Client uses **intnet**, not WSL’s interfaces. Internet on the client requires OpenWrt **WAN** working and routing/NAT configured. |
 | “I’ll ping 192.168.1.1 from WSL to test the router” | **LAN** IP is on **intnet**; WSL is not on that segment. Use **guest** console or verify **VBox** NICs + ping **inside** client. |
-| “Router says bridged — is that wrong?” | **OpenWrt `br-lan`** is a **Linux bridge** (normal). **VirtualBox “bridged”** on **NIC2** is the **WAN** uplink to the host’s adapter. Different meanings. |
+| “Router says bridged — is that wrong?” | **OpenWrt `br-lan`** is a **Linux bridge** (normal). **VirtualBox “bridged”** on **NIC2** is an optional WAN uplink. The scripts default to **NAT** for WAN because it avoids Wi-Fi bridge issues and subnet overlap with OpenWrt's default `192.168.1.0/24` LAN. |
 | “Client has no `eth0`” | **Predictable network names** (`enp0s3`) are normal. Use `ip link` to see the real name. |
 
 ---

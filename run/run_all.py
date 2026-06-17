@@ -17,7 +17,7 @@ from detections.common.common_runner import run_step
 RUN_DIR = Path(__file__).resolve().parent
 REPO_ROOT = RUN_DIR.parent
 RUN_VMS = RUN_DIR / "run_VMs.py"
-RUN_DETECTIONS = RUN_DIR / "run_all_detections.py"
+RUN_DETECTIONS = RUN_DIR / "run_detections.py"
 
 
 def main() -> int:

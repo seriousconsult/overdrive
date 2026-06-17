@@ -19,7 +19,14 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_runner import file_contains_token, run_step
-from detections.common.common_vm import is_wsl_environment, spawn_wsl_interactive_terminal
+from detections.common.common_vm import (
+    OPENWRT_CLIENT_VM_NAME,
+    find_vboxmanage,
+    get_system_paths,
+    get_vm_state,
+    is_wsl_environment,
+    spawn_wsl_interactive_terminal,
+)
 
 
 RUN_DIR = Path(__file__).resolve().parent
@@ -59,6 +66,37 @@ def discover_create_scripts(*, include_todo: bool) -> list[Path]:
     return runnable
 
 
+def wait_for_client_vm_running(timeout_s: float, *, poll_s: float = 2.0) -> bool:
+    """Wait until VirtualBox reports the client VM as running."""
+    paths = get_system_paths(OPENWRT_CLIENT_VM_NAME)
+    vboxmanage = find_vboxmanage(paths)
+    if not vboxmanage:
+        print("[!] VBoxManage not found; cannot wait for client VM state.")
+        return False
+
+    deadline = time.monotonic() + timeout_s
+    last_state: str | None = None
+    while True:
+        state = get_vm_state(vboxmanage, OPENWRT_CLIENT_VM_NAME)
+        if state == "running":
+            print(f"[wait] {OPENWRT_CLIENT_VM_NAME} is running.")
+            return True
+
+        if state != last_state:
+            print(f"[wait] {OPENWRT_CLIENT_VM_NAME} state: {state or 'not registered'}")
+            last_state = state
+
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            print(
+                f"[!] Timed out after {timeout_s:.0f}s waiting for "
+                f"{OPENWRT_CLIENT_VM_NAME} to be running."
+            )
+            return False
+
+        time.sleep(min(poll_s, remaining_s))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Create/refresh the OpenWrt lab VMs, then verify host-side wiring.",
@@ -92,7 +130,13 @@ def main() -> int:
         "--client-boot-grace",
         type=float,
         default=45.0,
-        help="Seconds to wait after starting the client before serial probing.",
+        help="Seconds to wait after the client VM is running before serial probing.",
+    )
+    parser.add_argument(
+        "--client-vm-running-timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait for VirtualBox to report the client VM as running.",
     )
     parser.add_argument(
         "--client-serial-ready-timeout",
@@ -115,6 +159,7 @@ def main() -> int:
         script: Path,
         *,
         dry_run: bool,
+        vm_running_timeout_s: float,
         boot_grace_s: float,
         serial_ready_timeout_s: float,
     ) -> int:
@@ -141,9 +186,13 @@ def main() -> int:
         if rc != 0:
             return rc
 
+        if vm_running_timeout_s > 0 and not wait_for_client_vm_running(vm_running_timeout_s):
+            return 1
+
         if boot_grace_s > 0:
             print(
-                f"[wait] Giving {script.stem} {boot_grace_s:.0f}s to boot before serial probing..."
+                f"[wait] Giving {script.stem} {boot_grace_s:.0f}s after VM-running state "
+                "before serial probing..."
             )
             time.sleep(boot_grace_s)
 
@@ -191,13 +240,14 @@ def main() -> int:
             rc = run_client_pipe_step(
                 script,
                 dry_run=args.dry_run,
+                vm_running_timeout_s=args.client_vm_running_timeout,
                 boot_grace_s=args.client_boot_grace,
                 serial_ready_timeout_s=args.client_serial_ready_timeout,
             )
         else:
             command = [sys.executable, str(script)]
             if script.name == "create_VM_OpenWrt_router.py":
-                command.extend(["--start-type", "headless"])
+                command.extend(["--start-type", "headless", "--wan-mode", "nat"])
             rc = run_step(command, cwd=REPO_ROOT, dry_run=args.dry_run)
 
         if rc != 0:

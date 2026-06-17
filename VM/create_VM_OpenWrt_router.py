@@ -170,7 +170,7 @@ def remove_existing_router_vm(
         shutil.rmtree(vm_base, ignore_errors=True)
 
 
-def setup_openwrt_vm(start_type: str = "headless") -> None:
+def setup_openwrt_vm(start_type: str = "headless", *, wan_mode: str = "nat") -> None:
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -235,15 +235,25 @@ def setup_openwrt_vm(start_type: str = "headless") -> None:
             )
 
     # NIC1 = LAN: matches OpenWrt default br-lan on eth0. NIC2 = WAN: matches wan on eth1.
-    lan_nic_args = ["--nic1", "intnet", "--intnet1", LAN_INTNET_NAME]
+    lan_nic_args = [
+        "--nic1",
+        "intnet",
+        "--intnet1",
+        LAN_INTNET_NAME,
+        "--nicpromisc1",
+        "allow-vms",
+    ]
 
-    bridge_interface = get_active_bridged_interface(vboxmanage)
-    if bridge_interface:
+    bridge_interface = get_active_bridged_interface(vboxmanage) if wan_mode == "bridged" else None
+    if wan_mode == "bridged" and bridge_interface:
         wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
         wan_note = f"bridged → {bridge_interface!r} (WAN / uplink)"
     else:
         wan_nic_args = ["--nic2", "nat"]
-        wan_note = "NAT (WAN fallback — no bridged adapter resolved)"
+        if wan_mode == "bridged":
+            wan_note = "NAT (WAN fallback — no bridged adapter resolved)"
+        else:
+            wan_note = "NAT (WAN / reliable lab uplink)"
 
     print(f"Configuring VM {VM_NAME}…")
     print(
@@ -282,6 +292,11 @@ def setup_openwrt_vm(start_type: str = "headless") -> None:
 
     print(f"Starting VM ({start_type})...")
     run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
+    if start_type == "headless":
+        print(
+            f"{VM_NAME} is running headless. Do not open it with the VirtualBox GUI; "
+            "the router is verified via VBoxManage and the client serial path."
+        )
 
 
 def main() -> None:
@@ -297,8 +312,17 @@ def main() -> None:
             "usually want 'headless' or 'none'. Default: headless."
         ),
     )
+    parser.add_argument(
+        "--wan-mode",
+        choices=("nat", "bridged"),
+        default="nat",
+        help=(
+            "Router WAN VirtualBox mode. Default: nat, which avoids Wi-Fi bridge issues "
+            "and LAN subnet overlap with OpenWrt's default 192.168.1.0/24 LAN."
+        ),
+    )
     args = parser.parse_args()
-    setup_openwrt_vm(start_type=args.start_type)
+    setup_openwrt_vm(start_type=args.start_type, wan_mode=args.wan_mode)
 
 
 if __name__ == "__main__":
