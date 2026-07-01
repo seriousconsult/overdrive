@@ -285,50 +285,88 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
     try_remove_vbox_storage_controller_with_retry(vboxmanage, VM_NAME, "IDE")
 
     run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
-    run_vboxmanage(vboxmanage, ["storageattach", VM_NAME, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", dst_path])
+    run_vboxmanage(
+        vboxmanage,
+        ["storageattach", VM_NAME, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", dst_path],
+    )
 
     if start_type == "none":
         print("VM configured. Skipping start because --start-type none was selected.")
         return
 
-
-
     print(f"Starting VM ({start_type})...")
 
-    try:
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
-    except RuntimeError as e:
+    def dump_vbox_diagnostics(exc: Exception, which: str) -> None:
         ts = time.strftime("%Y%m%d_%H%M%S")
         out_dir = Path(REPO_ROOT) / "VM" / "vbox_logs"
-
-
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1) Write a summary of VM info (includes Log folder)
-        summary_path = out_dir / f"{VM_NAME}_showvminfo_{ts}.txt"
+        # 1) Write a summary of VM info (includes Log folder, when VirtualBox creates it)
+        summary_path = out_dir / f"{VM_NAME}_showvminfo_{which}_{ts}.txt"
         r = subprocess.run(
             [vboxmanage, "showvminfo", VM_NAME],
             capture_output=True,
             text=True,
             check=False,
         )
-        summary_path.write_text((r.stdout or "") + (r.stderr or ""), encoding="utf-8", errors="replace")
+        summary_path.write_text(
+            (r.stdout or "") + (r.stderr or ""),
+            encoding="utf-8",
+            errors="replace",
+        )
 
         # 2) Dump release/VBox logs by index: 0=VBox.log, 1=VBoxHardening.log, 2+=others
         for idx in range(0, 6):
-            p = out_dir / f"{VM_NAME}_showvminfo_log{idx}_{ts}.txt"
+            p = out_dir / f"{VM_NAME}_showvminfo_log{idx}_{which}_{ts}.txt"
             r = subprocess.run(
                 [vboxmanage, "showvminfo", VM_NAME, f"--log={idx}"],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            p.write_text((r.stdout or "") + (r.stderr or ""), encoding="utf-8", errors="replace")
+            p.write_text(
+                (r.stdout or "") + (r.stderr or ""),
+                encoding="utf-8",
+                errors="replace",
+            )
 
-        print(f"\n[!] VBox startup failed: {e}")
+        print(f"\n[!] VBox startup failed during {which}: {exc}")
         print(f"[!] Wrote VirtualBox diagnostics to: {out_dir}")
-        raise
 
+    def try_start(type_to_try: str) -> None:
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", type_to_try])
+
+    try:
+        try_start(start_type)
+        return
+    except RuntimeError as e_headless:
+        # Headless-only bug workaround: if headless fails, retry GUI.
+        if start_type == "headless":
+            print(f"[!] Headless start crashed ({e_headless}). Retrying with GUI mode...")
+
+            # Best-effort poweroff to clear half-started state.
+            try:
+                run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "poweroff"])
+            except Exception:
+                pass
+            time.sleep(2)
+
+            # Dump diagnostics for the headless attempt
+            dump_vbox_diagnostics(e_headless, which="headless_fail")
+
+            # Now retry GUI
+            try:
+                try_start("gui")
+                print("[+] Router started successfully with GUI fallback.")
+                return
+            except RuntimeError as e_gui:
+                dump_vbox_diagnostics(e_gui, which="gui_fail")
+                raise
+
+        # For non-headless start types, keep existing behavior: dump diagnostics and raise.
+        dump_vbox_diagnostics(e_headless, which=start_type)
+        raise
+    
 
 
 def main() -> None:
