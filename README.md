@@ -8,7 +8,7 @@ All scripts use the same `SCORE: 1-5` host-authenticity scale:
 
 - `1`: authentic residential / not alerting
 - `2`: mildly atypical, probably still home-like
-- `3`: inconclusive, inconsistent, misleading, or partly non-home
+- `3`: inconclusive, inconsistent or misleading
 - `4`: very alerting, but not proven
 - `5`: definitely artificial host
 
