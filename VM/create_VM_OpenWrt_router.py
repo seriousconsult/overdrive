@@ -22,6 +22,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+
 # Ensure the repo package path is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -170,7 +171,7 @@ def remove_existing_router_vm(
         shutil.rmtree(vm_base, ignore_errors=True)
 
 
-def setup_openwrt_vm(start_type: str = "headless", *, wan_mode: str = "nat") -> None:
+def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> None:
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -290,13 +291,44 @@ def setup_openwrt_vm(start_type: str = "headless", *, wan_mode: str = "nat") -> 
         print("VM configured. Skipping start because --start-type none was selected.")
         return
 
+
+
     print(f"Starting VM ({start_type})...")
-    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
-    if start_type == "headless":
-        print(
-            f"{VM_NAME} is running headless. Do not open it with the VirtualBox GUI; "
-            "the router is verified via VBoxManage and the client serial path."
+
+    try:
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
+    except RuntimeError as e:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(REPO_ROOT) / "VM" / "vbox_logs"
+
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1) Write a summary of VM info (includes Log folder)
+        summary_path = out_dir / f"{VM_NAME}_showvminfo_{ts}.txt"
+        r = subprocess.run(
+            [vboxmanage, "showvminfo", VM_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        summary_path.write_text((r.stdout or "") + (r.stderr or ""), encoding="utf-8", errors="replace")
+
+        # 2) Dump release/VBox logs by index: 0=VBox.log, 1=VBoxHardening.log, 2+=others
+        for idx in range(0, 6):
+            p = out_dir / f"{VM_NAME}_showvminfo_log{idx}_{ts}.txt"
+            r = subprocess.run(
+                [vboxmanage, "showvminfo", VM_NAME, f"--log={idx}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            p.write_text((r.stdout or "") + (r.stderr or ""), encoding="utf-8", errors="replace")
+
+        print(f"\n[!] VBox startup failed: {e}")
+        print(f"[!] Wrote VirtualBox diagnostics to: {out_dir}")
+        raise
+
 
 
 def main() -> None:
@@ -306,10 +338,10 @@ def main() -> None:
     parser.add_argument(
         "--start-type",
         choices=("gui", "headless", "separate", "none"),
-        default="headless",
+        default="seperate",
         help=(
             "How to start the VM after creation. Fedora servers or SSH sessions "
-            "usually want 'headless' or 'none'. Default: headless."
+            "usually want 'separate' or 'none'. Default: separate."
         ),
     )
     parser.add_argument(

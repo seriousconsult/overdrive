@@ -137,6 +137,21 @@ def get_linux_distro_id() -> str | None:
     return None
 
 
+def windows_to_wsl_path(path: str | Path) -> str:
+    """Convert a Windows path to a WSL path when possible."""
+    path_str = str(path)
+    try:
+        proc = subprocess.run(
+            ["wslpath", "-u", path_str],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return proc.stdout.strip()
+    except Exception:
+        return path_str
+    
+
 def wsl_to_windows_path(path: str | Path) -> str:
     """Convert a WSL-style POSIX path to a Windows path when possible."""
     path_str = str(path)
@@ -187,10 +202,12 @@ def vboxmanage_targets_windows(vboxmanage: str) -> bool:
     return Path(vboxmanage).name.lower().endswith(".exe")
 
 
+
+
 def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, str | bool | None]:
-    """Return standard host paths for VirtualBox VM creation and downloads."""
     linux_home = str(Path.home())
     win_profile: str | None = None
+
     if is_wsl_environment() and _windows_cmd_available():
         try:
             proc = subprocess.run(
@@ -204,6 +221,11 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
                 win_profile = candidate
         except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             win_profile = None
+
+    # IMPORTANT: when we have a Windows profile, store downloads/VMs on Windows filesystem
+    # so VBoxManage.exe can access them via C:\... (not \\wsl.localhost\...).
+    if win_profile:
+        linux_home = windows_to_wsl_path(win_profile)  # typically /mnt/c/Users/<name>
 
     downloads = os.path.join(linux_home, "Downloads")
     vms_root = os.path.join(linux_home, "VirtualBox VMs")
@@ -584,7 +606,7 @@ def start_vm_headless_safe(vboxmanage: str, vm_name: str) -> None:
     wait_after_disk_operation(vboxmanage)
     run_vboxmanage(
         vboxmanage,
-        ["startvm", vm_name, "--type", "headless"],
+        ["startvm", vm_name, "--type", "separate"],
         lock_retries=30,
         lock_retry_s=2.0,
     )

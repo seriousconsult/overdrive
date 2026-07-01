@@ -67,6 +67,10 @@ import subprocess
 import sys
 import threading
 import time
+import glob
+import re
+import tarfile
+import urllib.request
 from pathlib import Path
 
 # Ensure the repo package path is importable when running this script from VM/
@@ -106,6 +110,116 @@ LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = OPENWRT_CLIENT_VM_NAME
 ARCHIVE_NAME = OSBOXES_ARCHIVE_NAME
 CLIENT_VM_CPUS = min(2, get_half_cpus())
+
+def _find_existing_fixed_appliance_dir() -> str | None:
+    """Return a directory containing kernel/initrd/root/README.fixed if found."""
+    candidates = [
+        "/usr/lib64/guestfs/appliance",
+        "/usr/lib/guestfs/appliance",
+        "/usr/local/lib/guestfs/appliance",
+    ]
+    for c in candidates:
+        d = Path(c)
+        if (d / "README.fixed").is_file() and all((d / x).is_file() for x in ["kernel", "initrd", "root"]):
+            return str(d)
+
+    # Common cache locations
+    cache_roots = [
+        Path.home() / ".cache" / "libguestfs" / "appliance",
+        Path.home() / ".cache" / "guestfs" / "appliance",
+    ]
+    for cr in cache_roots:
+        if not cr.exists():
+            continue
+        for d in cr.glob("**/"):
+            if not d.is_dir():
+                continue
+            if (d / "README.fixed").is_file() and all((d / x).is_file() for x in ["kernel", "initrd", "root"]):
+                return str(d)
+
+    return None
+
+
+def _pick_supermin_kernel_env() -> dict[str, str] | None:
+    """
+    Attempt to set SUPERMIN_KERNEL (and SUPERMIN_MODULES when derivable).
+    supermin searches for kernels in /boot and /lib/modules/*/vmlinuz by default; we override.
+    """
+    # 1) Prefer /boot/vmlinuz*
+    boot_kernels = sorted(glob.glob("/boot/vmlinuz*"))
+    if boot_kernels:
+        kernel = max(boot_kernels, key=lambda p: os.path.getmtime(p))
+        # Try to derive module dir name from filename: /boot/vmlinuz-<ver>
+        m = re.sub(r"^/boot/vmlinuz-?", "", os.path.basename(kernel))
+        mod_dir = f"/lib/modules/{m}"
+        env = {"SUPERMIN_KERNEL": kernel}
+        if Path(mod_dir).is_dir():
+            env["SUPERMIN_MODULES"] = mod_dir
+        return env
+
+    # 2) Try /lib/modules/<ver>/vmlinuz* (some distros may place it here)
+    # supermin error you showed indicates it still looked there, but we generalize.
+    candidates = glob.glob("/lib/modules/*/vmlinuz*")
+    if candidates:
+        kernel = max(candidates, key=lambda p: os.path.getmtime(p))
+        # infer module dir = parent of vmlinuz*
+        mod_dir = str(Path(kernel).parent)
+        env = {"SUPERMIN_KERNEL": kernel}
+        if Path(mod_dir).is_dir():
+            env["SUPERMIN_MODULES"] = mod_dir
+        return env
+
+    return None
+
+
+def _download_latest_fixed_appliance(cache_dir: Path) -> str:
+    """
+    Download and extract the latest fixed appliance tarball into cache_dir.
+    Then return the directory containing README.fixed + kernel/initrd/root.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    index_url = "https://download.libguestfs.org/binaries/appliance/"
+    index_html = urllib.request.urlopen(index_url, timeout=60).read().decode("utf-8", errors="replace")
+
+    # Find appliance-<ver>.tar.xz entries
+    versions = re.findall(r"(appliance-\d+(?:\.\d+)+)\.tar\.xz", index_html)
+    if not versions:
+        raise RuntimeError("Could not parse libguestfs appliance versions from index.")
+
+    # Choose latest by version tuple
+    def verkey(s: str) -> tuple[int, ...]:
+        s = s.replace("appliance-", "")
+        return tuple(int(x) for x in s.split("."))
+
+    latest = max(versions, key=verkey)
+    tar_name = f"{latest}.tar.xz"
+    tar_url = f"{index_url}{tar_name}"
+    tar_path = cache_dir / tar_name
+
+    extract_root = cache_dir / latest
+    if not (extract_root / "README.fixed").is_file():
+        if not tar_path.exists():
+            print(f"[libguestfs] Downloading fixed appliance: {tar_name} ...")
+            urllib.request.urlretrieve(tar_url, tar_path)
+
+        print(f"[libguestfs] Extracting fixed appliance into cache: {extract_root} ...")
+        if extract_root.exists():
+            shutil.rmtree(extract_root)
+        extract_root.mkdir(parents=True, exist_ok=True)
+
+        with tarfile.open(tar_path, mode="r:xz") as tf:
+            tf.extractall(path=extract_root)
+
+    # Search extracted tree for README.fixed
+    for d in [extract_root] + list(extract_root.glob("**/")):
+        if not d.is_dir():
+            continue
+        if (d / "README.fixed").is_file() and all((d / x).is_file() for x in ["kernel", "initrd", "root"]):
+            return str(d)
+
+    raise RuntimeError("Downloaded appliance but could not find README.fixed + kernel/initrd/root in extracted content.")
+
 
 
 def download_osboxes_archive(url: str, archive_path: str) -> None:
@@ -307,10 +421,13 @@ def configure_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
     """Expose COM1 as a host pipe/socket that a terminal program can attach to."""
     if vboxmanage_targets_windows(vboxmanage):
         uart_mode = "tcpserver"
-        print(f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} ({SERIAL_BAUD} baud).")
+        print(
+            f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} ({SERIAL_BAUD} baud)."
+        )
     else:
         uart_mode = "server"
         print(f"Serial console: COM1 -> host socket {endpoint} ({SERIAL_BAUD} baud).")
+
     run_vboxmanage(
         vboxmanage,
         [
@@ -732,6 +849,7 @@ def prime_client_vdi_for_intnet_lab(
     ``lab-net-troubleshoot`` into the VDI so the guest works **without** in-guest ``apt`` when
     OpenWrt has not yet provided a route.
     """
+
     if is_wsl_environment():
         print(
             "[!] Running under WSL: attempting host-side virt-customize/libguestfs VDI priming."
@@ -740,8 +858,29 @@ def prime_client_vdi_for_intnet_lab(
 
     vc = require_vdi_prime_tools(skip_prime=skip_prime)
     virt_env = os.environ.copy()
+
+    # 1) Always prefer forcing direct backend on WSL (you already do this)
     if is_wsl_environment():
         virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
+
+    # 2) Auto-resolve libguestfs kernel handling:
+    #    - If host has /boot/vmlinuz* or /lib/modules/*/vmlinuz*: set SUPERMIN_KERNEL (+ SUPERMIN_MODULES)
+    #    - Else fall back to fixed appliance and set LIBGUESTFS_PATH (skips supermin)
+    supermin_env = _pick_supermin_kernel_env()
+    if supermin_env:
+        virt_env.update(supermin_env)
+        print(f"[libguestfs] Using supermin kernel override: SUPERMIN_KERNEL={supermin_env.get('SUPERMIN_KERNEL')}")
+    else:
+        fixed_dir = _find_existing_fixed_appliance_dir()
+        if fixed_dir:
+            virt_env["LIBGUESTFS_PATH"] = fixed_dir
+            print(f"[libguestfs] Using existing fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
+        else:
+            cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
+            fixed_dir = _download_latest_fixed_appliance(cache_dir)
+            virt_env["LIBGUESTFS_PATH"] = fixed_dir
+            print(f"[libguestfs] Downloaded & using fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
+
 
     if not _poweroff_vm_for_vdi_edit(vboxmanage, vm_name, force_poweroff=force_poweroff):
         raise RuntimeError(
@@ -836,7 +975,6 @@ def _poweroff_vm_for_vdi_edit(
     print("[!] VM did not power off in time.")
     return False
 
-
 def setup_client_vm(
     *,
     force_poweroff_for_vdi: bool = False,
@@ -855,6 +993,7 @@ def setup_client_vm(
     vms_root = paths["vms_root"]
     download_dir = paths["downloads"]
     os.makedirs(download_dir, exist_ok=True)
+
     serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
     vdi_wsl = os.path.join(vm_base, CLIENT_VDI_NAME)
 
@@ -864,10 +1003,9 @@ def setup_client_vm(
             vboxmanage,
             VM_NAME,
             vm_base,
-            medium_path_for_vbox=wsl_to_windows_path(vdi_wsl)
-            if paths["is_wsl"]
-            else vdi_wsl,
+            medium_path_for_vbox=wsl_to_windows_path(vdi_wsl) if paths["is_wsl"] else vdi_wsl,
         )
+
     existing_registered_vm = vm_is_registered(vboxmanage, VM_NAME)
 
     os.makedirs(vm_base, exist_ok=True)
@@ -877,7 +1015,6 @@ def setup_client_vm(
     extract_dir = os.path.join(download_dir, "temp_osboxes_client_extract")
 
     # Paths passed to Windows VBoxManage must be Windows-style when running from WSL.
-    # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir, not ``.../<VM_NAME>``.
     if paths["is_wsl"]:
         vdi_for_vbox = wsl_to_windows_path(vdi_wsl)
         vms_root_for_vbox = wsl_to_windows_path(vms_root)
@@ -957,34 +1094,20 @@ def setup_client_vm(
     if not vm_is_registered(vboxmanage, VM_NAME):
         existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
         if existing_vbox:
-            reg_path = (
-                wsl_to_windows_path(existing_vbox)
-                if paths["is_wsl"]
-                else existing_vbox
-            )
+            reg_path = wsl_to_windows_path(existing_vbox) if paths["is_wsl"] else existing_vbox
             print(f"Registering existing settings file: {existing_vbox}")
             run_vboxmanage(vboxmanage, ["registervm", reg_path])
         else:
             run_vboxmanage(
                 vboxmanage,
-                [
-                    "createvm",
-                    "--name",
-                    VM_NAME,
-                    "--ostype",
-                    "Ubuntu_64",
-                    "--basefolder",
-                    vms_root_for_vbox,
-                    "--register",
-                ],
+                ["createvm", "--name", VM_NAME, "--ostype", "Ubuntu_64", "--basefolder", vms_root_for_vbox, "--register"],
             )
 
     if get_vm_state(vboxmanage, VM_NAME) == "running":
         raise RuntimeError(f"{VM_NAME} is already running after rebuild; refusing to reuse it.")
 
-    # NIC1 = LAN leg behind OpenWrt (DHCP from OpenWrt br-lan)
     print(
-        f"Networking: NIC1 → internal network {LAN_INTNET_NAME!r} "
+        f"Networking: NIC1 → internal network {OPENWRT_LAN_INTNET_NAME!r} "
         f"(OpenWrt router LAN is NIC1 on the same intnet; start router before client DHCP)."
     )
     run_vboxmanage(
@@ -1001,15 +1124,15 @@ def setup_client_vm(
             "--nic1",
             "intnet",
             "--intnet1",
-            LAN_INTNET_NAME,
+            OPENWRT_LAN_INTNET_NAME,
         ],
     )
+
     configure_serial_endpoint(vboxmanage, serial_endpoint)
 
     if existing_registered_vm:
         print(f"{VM_NAME} is already registered; keeping existing storage attachment.")
     else:
-        # SATA controller + disk (ignore error if controller already exists)
         try:
             run_vboxmanage(
                 vboxmanage,
@@ -1040,10 +1163,7 @@ def setup_client_vm(
                 ],
             )
         except RuntimeError as exc:
-            if (
-                "already attached" in str(exc).lower()
-                or "vbox_e_invalid_object_state" in str(exc).lower()
-            ):
+            if "already attached" in str(exc).lower() or "vbox_e_invalid_object_state" in str(exc).lower():
                 print("Disk is already attached; keeping existing storage attachment.")
             else:
                 raise
@@ -1057,30 +1177,44 @@ def setup_client_vm(
         "That script renews DHCP and prints static-IP fallback commands if OpenWrt has no DHCP.\n"
         "Only if the guest **does** have Internet and tools are missing:\n"
         f"  sudo apt update && {IN_GUEST_INSTALL_ISC_DHCP_CLIENT}\n"
-        "\n"
-        "--- If ``ip -4 route show default`` prints nothing ---\n"
-        "There is no default IPv4 route (usually DHCP from OpenWrt never ran or failed).\n"
-        "• Start the **OpenWrt** VM **before** this client; router **LAN (NIC1)** and this client **NIC1** must use intnet ``openwrt-lan``.\n"
-        "• In OpenWrt (LuCI): LAN = static or DHCP **server** on br-lan, firewall zone LAN→WAN allowed.\n"
-        "• In the client: ``ip -br a`` and ``ip route`` — confirm an address on the LAN interface.\n"
-        "• Run ``lab-net-troubleshoot`` first; only then try ``sudo networkctl renew <iface>``.\n"
-        "• Manual test route: ``sudo ip route add default via 192.168.1.1 dev <iface>`` (use your OpenWrt LAN IP).\n"
-        "\n"
     )
     print(serial_console_instructions(vboxmanage, serial_endpoint))
-    if start_vm:
-        state = get_vm_state(vboxmanage, VM_NAME)
-        if state == "running":
-            raise RuntimeError(f"{VM_NAME} is already running before startvm; refusing to reuse it.")
-        else:
-            run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "headless"])
-        if connect_serial:
-            time.sleep(2)
-            connect_serial_console(vboxmanage, serial_endpoint)
-    else:
+
+    if not start_vm:
         print("Not starting VM (--no-start).")
         if connect_serial:
             connect_serial_console(vboxmanage, serial_endpoint)
+        return
+
+    state = get_vm_state(vboxmanage, VM_NAME)
+    if state == "running":
+        raise RuntimeError(f"{VM_NAME} is already running before startvm; refusing to reuse it.")
+
+    # Ensure log directory exists (helps prevent early log-file path issues).
+    logs_dir = Path(vm_base) / "Logs"
+    os.makedirs(logs_dir, exist_ok=True)
+    print(f"[vbox] Ensured VM Logs directory exists: {logs_dir}")
+
+    started_via_gui = False
+    try:
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "headless"])
+    except RuntimeError as exc:
+        print(f"[!] Headless start failed ({exc}). Retrying with GUI mode...")
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+        started_via_gui = True
+
+    if connect_serial:
+        time.sleep(2)
+        # Key change: if we had to use GUI fallback, attach interactively even
+        # if the first 6s probe didn't see output yet.
+        connect_serial_console(
+            vboxmanage,
+            serial_endpoint,
+            force_interactive=started_via_gui,
+        )
+
+
+
 
 
 if __name__ == "__main__":

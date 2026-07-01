@@ -247,7 +247,8 @@ def main() -> int:
         else:
             command = [sys.executable, str(script)]
             if script.name == "create_VM_OpenWrt_router.py":
-                command.extend(["--start-type", "headless", "--wan-mode", "nat"])
+                command.extend(["--start-type", "separate", "--wan-mode", "nat"])
+
             rc = run_step(command, cwd=REPO_ROOT, dry_run=args.dry_run)
 
         if rc != 0:
