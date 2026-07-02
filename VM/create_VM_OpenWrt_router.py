@@ -171,7 +171,7 @@ def remove_existing_router_vm(
         shutil.rmtree(vm_base, ignore_errors=True)
 
 
-def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> None:
+def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -184,7 +184,7 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
             "check that the VirtualBox kernel modules are built for the running kernel."
         )
 
-    img_path = paths["img_path"]
+    img_path = paths["img_path"]  # raw OpenWrt image (tar/gzip handled by downloader elsewhere)
     vm_base = paths["vm_base"]
     vms_root = paths["vms_root"]
     vdi_path = os.path.join(vm_base, VDI_NAME)
@@ -192,12 +192,17 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
 
     print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
     remove_existing_vm(
-        vboxmanage, VM_NAME, vm_base, medium_path_for_vbox=dst_path
+        vboxmanage,
+        VM_NAME,
+        vm_base,
+        medium_path_for_vbox=dst_path,
     )
 
     os.makedirs(vms_root, exist_ok=True)
     os.makedirs(vm_base, exist_ok=True)
 
+    # This script expects the raw OpenWrt image already being downloadable/available via OPENWRT_URL logic.
+    # Keep your existing downloader/converter flow:
     download_openwrt_image(OPENWRT_URL, img_path)
 
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
@@ -235,6 +240,9 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
                 ],
             )
 
+    # Force BIOS firmware (command line uses modifyvm, not createvm).
+    run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--firmware", "bios"])
+
     # NIC1 = LAN: matches OpenWrt default br-lan on eth0. NIC2 = WAN: matches wan on eth1.
     lan_nic_args = [
         "--nic1",
@@ -256,16 +264,15 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
         else:
             wan_note = "NAT (WAN / reliable lab uplink)"
 
+    # Ensure VirtualBox can create VM log files.
+    logs_dir = Path(vm_base) / "Logs"
+    os.makedirs(logs_dir, exist_ok=True)
+
     print(f"Configuring VM {VM_NAME}…")
-    print(
-        f"  LAN (NIC1): internal network {LAN_INTNET_NAME!r} — stock OpenWrt ``br-lan`` on ``eth0``."
-    )
-    print(
-        f"  WAN (NIC2): {wan_note} — stock OpenWrt ``wan`` on ``eth1``."
-    )
-    print(
-        "  Client VMs: ``--nic1 intnet`` on the same intnet name (see create_VM_client_browser.py)."
-    )
+    print(f"  LAN (NIC1): internal network {LAN_INTNET_NAME!r} — stock OpenWrt ``br-lan`` on ``eth0``.")
+    print(f"  WAN (NIC2): {wan_note} — stock OpenWrt ``wan`` on ``eth1``.")
+    print("  Client VMs: ``--nic1 intnet`` on the same intnet name (see create_VM_client_browser.py).")
+
     run_vboxmanage(
         vboxmanage,
         [
@@ -287,7 +294,20 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
     run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
     run_vboxmanage(
         vboxmanage,
-        ["storageattach", VM_NAME, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", dst_path],
+        [
+            "storageattach",
+            VM_NAME,
+            "--storagectl",
+            "IDE",
+            "--port",
+            "0",
+            "--device",
+            "0",
+            "--type",
+            "hdd",
+            "--medium",
+            dst_path,
+        ],
     )
 
     if start_type == "none":
@@ -295,78 +315,12 @@ def setup_openwrt_vm(start_type: str = "separate", *, wan_mode: str = "nat") -> 
         return
 
     print(f"Starting VM ({start_type})...")
+    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
 
-    def dump_vbox_diagnostics(exc: Exception, which: str) -> None:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(REPO_ROOT) / "VM" / "vbox_logs"
-        out_dir.mkdir(parents=True, exist_ok=True)
+    # IMPORTANT: Do not call get_vm_state() here; it is not imported and the VM may
+    # already be running by the time this function executes.
+    print(f"[+] VM start command issued for {VM_NAME!r} with --type {start_type!r}.")
 
-        # 1) Write a summary of VM info (includes Log folder, when VirtualBox creates it)
-        summary_path = out_dir / f"{VM_NAME}_showvminfo_{which}_{ts}.txt"
-        r = subprocess.run(
-            [vboxmanage, "showvminfo", VM_NAME],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        summary_path.write_text(
-            (r.stdout or "") + (r.stderr or ""),
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        # 2) Dump release/VBox logs by index: 0=VBox.log, 1=VBoxHardening.log, 2+=others
-        for idx in range(0, 6):
-            p = out_dir / f"{VM_NAME}_showvminfo_log{idx}_{which}_{ts}.txt"
-            r = subprocess.run(
-                [vboxmanage, "showvminfo", VM_NAME, f"--log={idx}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            p.write_text(
-                (r.stdout or "") + (r.stderr or ""),
-                encoding="utf-8",
-                errors="replace",
-            )
-
-        print(f"\n[!] VBox startup failed during {which}: {exc}")
-        print(f"[!] Wrote VirtualBox diagnostics to: {out_dir}")
-
-    def try_start(type_to_try: str) -> None:
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", type_to_try])
-
-    try:
-        try_start(start_type)
-        return
-    except RuntimeError as e_headless:
-        # Headless-only bug workaround: if headless fails, retry GUI.
-        if start_type == "headless":
-            print(f"[!] Headless start crashed ({e_headless}). Retrying with GUI mode...")
-
-            # Best-effort poweroff to clear half-started state.
-            try:
-                run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "poweroff"])
-            except Exception:
-                pass
-            time.sleep(2)
-
-            # Dump diagnostics for the headless attempt
-            dump_vbox_diagnostics(e_headless, which="headless_fail")
-
-            # Now retry GUI
-            try:
-                try_start("gui")
-                print("[+] Router started successfully with GUI fallback.")
-                return
-            except RuntimeError as e_gui:
-                dump_vbox_diagnostics(e_gui, which="gui_fail")
-                raise
-
-        # For non-headless start types, keep existing behavior: dump diagnostics and raise.
-        dump_vbox_diagnostics(e_headless, which=start_type)
-        raise
-    
 
 
 def main() -> None:
@@ -375,24 +329,24 @@ def main() -> None:
     )
     parser.add_argument(
         "--start-type",
-        choices=("gui", "headless", "separate", "none"),
-        default="seperate",
+        choices=("gui", "separate", "none"),
+        default="gui",
         help=(
-            "How to start the VM after creation. Fedora servers or SSH sessions "
-            "usually want 'separate' or 'none'. Default: separate."
+            "How to start the VM after creation.\n"
+            "Headless removed because it crashes on this host.\n"
+            "Default: gui."
         ),
     )
     parser.add_argument(
         "--wan-mode",
         choices=("nat", "bridged"),
         default="nat",
-        help=(
-            "Router WAN VirtualBox mode. Default: nat, which avoids Wi-Fi bridge issues "
-            "and LAN subnet overlap with OpenWrt's default 192.168.1.0/24 LAN."
-        ),
+        help="Router WAN VirtualBox mode. Default: nat.",
     )
     args = parser.parse_args()
     setup_openwrt_vm(start_type=args.start_type, wan_mode=args.wan_mode)
+    
+         
 
 
 if __name__ == "__main__":

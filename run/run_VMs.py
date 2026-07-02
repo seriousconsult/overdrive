@@ -2,7 +2,7 @@
 """Run the VirtualBox lab setup scripts, then verify the lab wiring.
 
 This is intentionally separate from ``run_all_detections.py`` because VM
-creation scripts mutate VirtualBox state and can start GUI/headless guests.
+creation scripts mutate VirtualBox state and can start GUI guests.
 """
 
 from __future__ import annotations
@@ -247,7 +247,7 @@ def main() -> int:
         else:
             command = [sys.executable, str(script)]
             if script.name == "create_VM_OpenWrt_router.py":
-                command.extend(["--start-type", "separate", "--wan-mode", "nat"])
+                command.extend(["--start-type", "gui", "--wan-mode", "nat"])
 
             rc = run_step(command, cwd=REPO_ROOT, dry_run=args.dry_run)
 

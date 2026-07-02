@@ -28,7 +28,7 @@ Serial console endpoint:
   Which endpoint you connect to depends on the **host VirtualBox is actually running on**:
 
   * Windows host / Windows VirtualBox:
-      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2323``. The script starts the VM headless
+      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2323``. The script starts the VM 
       and attaches from WSL using a native Python socket terminal.
 
   * WSL shell controlling Windows VirtualBox through ``VBoxManage.exe``:
@@ -36,7 +36,7 @@ Serial console endpoint:
       To attach to an already-running VM:
         ./create_VM_client_browser_pipe.py --serial-only
 
-      By default, this script starts the VM headless and then attaches this terminal. Use
+      By default, this script starts the VM and then attaches this terminal. Use
       ``--no-connect-serial`` when you only want to create/start the VM and return to the shell.
 
       The built-in WSL bridge uses raw terminal input, maps Enter to serial carriage return, and
@@ -1196,12 +1196,9 @@ def setup_client_vm(
     print(f"[vbox] Ensured VM Logs directory exists: {logs_dir}")
 
     started_via_gui = False
-    try:
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "headless"])
-    except RuntimeError as exc:
-        print(f"[!] Headless start failed ({exc}). Retrying with GUI mode...")
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
-        started_via_gui = True
+    print(f"GUI mode...")
+    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+    started_via_gui = True
 
     if connect_serial:
         time.sleep(2)
@@ -1219,7 +1216,7 @@ def setup_client_vm(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="Freshly rebuild the OpenWrt LAN client VM for headless serial bash.",
+        description="Freshly rebuild the OpenWrt LAN client VM for serial bash.",
     )
     ap.add_argument(
         "--force-poweroff-for-vdi",
