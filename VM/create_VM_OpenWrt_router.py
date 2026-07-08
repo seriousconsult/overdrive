@@ -90,6 +90,7 @@ def try_remove_vbox_storage_controller(vboxmanage: str, vm_name: str, ctl_name: 
         f"VBoxManage storagectl --remove {ctl_name!r} failed unexpectedly: {msg}"
     )
 
+
 def try_remove_vbox_storage_controller_with_retry(
     vboxmanage: str,
     vm_name: str,

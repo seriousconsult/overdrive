@@ -60,7 +60,7 @@ def discover_create_scripts(*, include_todo: bool) -> list[Path]:
     runnable = []
     for path in ordered:
         if not include_todo and script_has_todo(path):
-            print(f"[skip] {path.name}: contains TODO; use --include-todo to run it anyway.")
+            print(f"[skip] {path.name}: contains TODO")
             continue
         runnable.append(path)
     return runnable

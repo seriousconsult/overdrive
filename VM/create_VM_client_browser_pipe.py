@@ -110,6 +110,8 @@ LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = OPENWRT_CLIENT_VM_NAME
 ARCHIVE_NAME = OSBOXES_ARCHIVE_NAME
 CLIENT_VM_CPUS = min(2, get_half_cpus())
+CLIENT_GUEST_HOSTNAME = "my-home-client"
+
 
 def _find_existing_fixed_appliance_dir() -> str | None:
     """Return a directory containing kernel/initrd/root/README.fixed if found."""
@@ -893,9 +895,11 @@ def prime_client_vdi_for_intnet_lab(
     script_host.chmod(0o644)
 
     print("Enabling guest ttyS0 serial login in the VDI...")
+    print(f"Setting guest hostname to {CLIENT_GUEST_HOSTNAME!r} and enabling ttyS0 serial login in the VDI...")
+
     try:
         result = subprocess.run(
-            [vc, "-a", vdi_linux]
+            [vc, "-a", vdi_linux, "--hostname", CLIENT_GUEST_HOSTNAME]
             + [
                 item
                 for command in guest_serial_console_commands()
