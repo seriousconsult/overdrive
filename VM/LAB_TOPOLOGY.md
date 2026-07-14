@@ -128,6 +128,49 @@ $ ping -c2 192.168.1.1
 
 That combination is the **real** end-to-end proof for the **LAN leg**.
 
+`create_VM_client_browser_pipe.py` primes the client VDI with **netplan DHCP on `en*`** plus **`lab-net-up.service`** (link up + `dhclient`) so a fresh boot should not leave `enp0s3` with no address. If the guest only shows `lo`, run `lab-net-troubleshoot` or:
+
+```bash
+sudo ip link set enp0s3 up
+sudo dhclient -v -1 enp0s3
+```
+
+### 3.7 DNS path (Mullvad DoT)
+
+Clients use **OpenWrt** as DNS (DHCP option 6 → `192.168.1.1`). OpenWrt does **not** hand out Mullvad IPs directly.
+
+Path:
+
+```text
+LAN client → dnsmasq :53 on 192.168.1.1 → stubby :5453 → Mullvad DoT :853
+                                                      (194.242.2.2 dns.mullvad.net,
+                                                       194.242.2.4 base.dns.mullvad.net)
+```
+
+Mullvad’s public resolvers **refuse plain UDP/53**; DoT (or DoH) is required. `create_VM_OpenWrt_router.py` installs **stubby** on first boot (after WAN is up) and configures this path. VBox `--natdnshostresolver2 on` is only for **bootstrap** (so `apk`/`opkg` can resolve package mirrors before stubby is ready).
+
+| Symptom on client | Meaning |
+|-------------------|---------|
+| `ping 192.168.1.1` OK, `ping 8.8.8.8` OK, `ping google.com` fails | DNS path / stubby not up yet — check `/tmp/overdrive-mullvad-dot.log` on OpenWrt |
+| `ping 192.168.1.1` OK, `ping 8.8.8.8` fails | **WAN/NAT/routing**, not just DNS |
+| No nameserver in `/etc/resolv.conf` | DHCP DNS missing, or static IP without `nameserver 192.168.1.1` |
+
+**Manual apply on OpenWrt (if auto first-boot did not run):**
+
+```sh
+sh /root/apply_mullvad_dot.sh
+# or host copy: VM/apply_mullvad_dot.sh
+nslookup google.com 192.168.1.1
+```
+
+**Client checks:**
+
+```bash
+cat /etc/resolv.conf          # expect nameserver 192.168.1.1
+dig @192.168.1.1 google.com +short
+lab-net-troubleshoot
+```
+
 ---
 
 ## 4. Common confusions
@@ -138,6 +181,8 @@ That combination is the **real** end-to-end proof for the **LAN leg**.
 | “I’ll ping 192.168.1.1 from WSL to test the router” | **LAN** IP is on **intnet**; WSL is not on that segment. Use **guest** console or verify **VBox** NICs + ping **inside** client. |
 | “Router says bridged — is that wrong?” | **OpenWrt `br-lan`** is a **Linux bridge** (normal). **VirtualBox “bridged”** on **NIC2** is an optional WAN uplink. The scripts default to **NAT** for WAN because it avoids Wi-Fi bridge issues and subnet overlap with OpenWrt's default `192.168.1.0/24` LAN. |
 | “Client has no `eth0`” | **Predictable network names** (`enp0s3`) are normal. Use `ip link` to see the real name. |
+| “Router isn’t providing DNS” | OpenWrt advertises `192.168.1.1` via DHCP; upstream is **Mullvad DoT** via stubby (`apply_mullvad_dot.sh`). |
+| “Static IP still can’t ping google” | Static fallback must also set `nameserver 192.168.1.1` in `/etc/resolv.conf`. |
 
 ---
 

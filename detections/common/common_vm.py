@@ -20,6 +20,10 @@ __all__ = [
     "OPENWRT_ROUTER_VM_NAME",
     "OPENWRT_URL",
     "OPENWRT_VDI_NAME",
+    "MULLVAD_DOT_RESOLVERS",
+    "MULLVAD_DOT_PORT",
+    "OPENWRT_LAN_DNS",
+    "OPENWRT_STUBBY_LISTEN",
     "OSBOXES_ARCHIVE_NAME",
     "OSBOXES_LOGIN_PASSWORD_HINT",
     "OSBOXES_LOGIN_USER",
@@ -73,6 +77,16 @@ SERIAL_BAUD = "115200"
 OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
 OPENWRT_IMAGE_NAME = "openwrt_2026.img"
 OPENWRT_VDI_NAME = "openwrt.vdi"
+
+# Mullvad public DNS-over-TLS (DoT). Plain UDP/53 is refused; use stubby on OpenWrt.
+# https://mullvad.net/en/help/dns-over-https-and-dns-over-tls
+MULLVAD_DOT_RESOLVERS: tuple[tuple[str, str], ...] = (
+    ("194.242.2.2", "dns.mullvad.net"),  # unfiltered
+    ("194.242.2.4", "base.dns.mullvad.net"),  # ads/trackers/malware block
+)
+MULLVAD_DOT_PORT = 853
+OPENWRT_LAN_DNS = "192.168.1.1"
+OPENWRT_STUBBY_LISTEN = "127.0.0.1#5453"
 
 OSBOXES_URL = "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
 OSBOXES_ARCHIVE_NAME = "ubuntu_osboxes_2404.7z"

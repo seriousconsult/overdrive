@@ -133,6 +133,24 @@ def check_router(info: dict[str, str], verbose: bool) -> list[str]:
         errs.append(
             f"router NIC2: expected bridged or nat (WAN), got {nic2!r}"
         )
+    if nic2 == "nat":
+        # Keys vary by VirtualBox version; treat missing as "not clearly on".
+        nat_dns = (
+            info.get("natdnshostresolver2")
+            or info.get("NATDNSHostResolver2")
+            or ""
+        ).lower()
+        if nat_dns and nat_dns not in ("on", "1", "true"):
+            print(
+                f"  [!] {ROUTER_VM}: WAN is NAT but natdnshostresolver2={nat_dns!r}. "
+                "LAN clients may fail DNS (ping google.com). Enable with:\n"
+                f"      VBoxManage modifyvm {ROUTER_VM} --natdnshostresolver2 on"
+            )
+        elif not nat_dns:
+            print(
+                f"  [i] {ROUTER_VM}: WAN is NAT — ensure DNS host-resolver is on "
+                f"(modifyvm {ROUTER_VM} --natdnshostresolver2 on) if clients cannot resolve names."
+            )
 
     if verbose:
         print(

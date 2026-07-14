@@ -5,7 +5,11 @@
 **NIC order vs stock OpenWrt:** The x86 image defaults to **LAN** on ``eth0`` (``br-lan``) and **WAN**
 on ``eth1``. VirtualBox presents adapters in order as ``eth0``, ``eth1``. So **NIC1** is the **LAN**
 leg (internal network ``openwrt-lan``) and **NIC2** is **WAN** (bridged or NAT). Client VMs use
-``--nic1 intnet`` on the same intnet name — no UCI edits required on first boot.
+``--nic1 intnet`` on the same intnet name.
+
+**DNS:** After first boot (once WAN is up), the router installs **stubby**, forwards LAN DNS
+through **dnsmasq → stubby → Mullvad DoT** (``dns.mullvad.net`` / ``base.dns.mullvad.net``), and
+DHCP advertises OpenWrt ``192.168.1.1`` to clients.
 
 At startup, any **existing VirtualBox VM with the same name** and the matching folder under
 ``~/VirtualBox VMs/<VM_NAME>/`` are **removed** (power off, ``unregistervm --delete``, then delete
@@ -18,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -30,6 +35,10 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from detections.common.common_vm import (
+    MULLVAD_DOT_PORT,
+    MULLVAD_DOT_RESOLVERS,
+    OPENWRT_LAN_DNS,
+    OPENWRT_STUBBY_LISTEN,
     find_vboxmanage,
     get_active_bridged_interface,
     get_linux_distro_id,
@@ -53,6 +62,108 @@ LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 IMAGE_NAME = OPENWRT_IMAGE_NAME
 VDI_NAME = OPENWRT_VDI_NAME
 
+# Written into the OpenWrt image (uci-defaults + init.d) and also printed for manual apply.
+_MULLVAD_RESOLVER_UCI = "\n".join(
+    f"uci add stubby resolver\n"
+    f"uci set stubby.@resolver[-1].address='{ip}'\n"
+    f"uci set stubby.@resolver[-1].tls_auth_name='{name}'\n"
+    f"uci set stubby.@resolver[-1].tls_port='{MULLVAD_DOT_PORT}'"
+    for ip, name in MULLVAD_DOT_RESOLVERS
+)
+
+APPLY_MULLVAD_DOT_SH = f"""#!/bin/sh
+# Overdrive lab: Mullvad DNS-over-TLS via stubby; LAN clients use OpenWrt as DNS.
+# Safe to re-run. Requires WAN (NAT/bridged) so apk/opkg can fetch stubby.
+set -e
+DONE=/etc/overdrive-mullvad-dot.done
+
+echo "[overdrive] Installing stubby for Mullvad DoT..."
+if command -v apk >/dev/null 2>&1; then
+  apk update
+  apk add stubby ca-bundle
+elif command -v opkg >/dev/null 2>&1; then
+  opkg update
+  opkg install stubby ca-bundle
+else
+  echo "[overdrive] ERROR: neither apk nor opkg found" >&2
+  exit 1
+fi
+
+echo "[overdrive] Configuring stubby → Mullvad DoT..."
+while uci -q delete stubby.@resolver[0]; do :; done
+{_MULLVAD_RESOLVER_UCI}
+uci set stubby.global.manual='0'
+uci set stubby.global.trigger='wan'
+uci set stubby.global.tls_authentication='1'
+uci set stubby.global.round_robin_upstreams='1'
+uci -q delete stubby.global.listen_address
+uci add_list stubby.global.listen_address='127.0.0.1@5453'
+uci add_list stubby.global.listen_address='0::1@5453'
+uci commit stubby
+
+echo "[overdrive] Pointing dnsmasq at stubby; advertising LAN DNS {OPENWRT_LAN_DNS}..."
+uci -q delete dhcp.@dnsmasq[0].server
+uci add_list dhcp.@dnsmasq[0].server='{OPENWRT_STUBBY_LISTEN}'
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci set dhcp.@dnsmasq[0].localuse='1'
+# DHCP option 6: clients must use OpenWrt, not upstream Mullvad IPs directly
+uci -q delete dhcp.lan.dhcp_option
+uci add_list dhcp.lan.dhcp_option='6,{OPENWRT_LAN_DNS}'
+uci commit dhcp
+
+# Stop relying on VBox/WAN plaintext DNS once DoT is in place
+uci -q delete network.wan.dns
+uci set network.wan.peerdns='0'
+uci commit network
+
+/etc/init.d/stubby enable
+/etc/init.d/stubby restart
+/etc/init.d/dnsmasq restart
+
+touch "$DONE"
+echo "[overdrive] Done. Verify: nslookup google.com {OPENWRT_LAN_DNS}"
+nslookup google.com {OPENWRT_LAN_DNS} || true
+"""
+
+OVERDRIVE_MULLVAD_INIT_D = """#!/bin/sh /etc/rc.common
+# One-shot: after WAN is up, install stubby and switch DNS to Mullvad DoT.
+START=99
+STOP=10
+
+boot() {
+	start
+}
+
+start() {
+	[ -f /etc/overdrive-mullvad-dot.done ] && return 0
+	[ -x /root/apply_mullvad_dot.sh ] || return 1
+	(
+		# Wait for WAN connectivity (VBox NAT DNS / peerdns bootstrap).
+		i=0
+		while [ "$i" -lt 90 ]; do
+			if ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 \\
+				|| ping -c1 -W2 9.9.9.9 >/dev/null 2>&1; then
+				break
+			fi
+			i=$((i + 1))
+			sleep 2
+		done
+		/root/apply_mullvad_dot.sh >>/tmp/overdrive-mullvad-dot.log 2>&1 \\
+			|| echo "[overdrive] Mullvad DoT setup failed; see /tmp/overdrive-mullvad-dot.log" >&2
+	) &
+}
+
+stop() {
+	return 0
+}
+"""
+
+UCI_DEFAULTS_ENABLE_MULLVAD = """#!/bin/sh
+# Enable one-shot Mullvad DoT setup on first boot.
+[ -x /etc/init.d/overdrive-mullvad-dot ] && /etc/init.d/overdrive-mullvad-dot enable
+exit 0
+"""
+
 
 def download_openwrt_image(url: str, dest_path: str) -> None:
     dest = Path(dest_path)
@@ -69,6 +180,104 @@ def download_openwrt_image(url: str, dest_path: str) -> None:
                 shutil.copyfileobj(gz, out_file)
     print("Download complete.")
 
+
+def write_mullvad_dot_helpers(dest_dir: Path) -> Path:
+    """Write the apply script next to the raw image / VM folder for manual use."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    apply_path = dest_dir / "apply_mullvad_dot.sh"
+    apply_path.write_text(APPLY_MULLVAD_DOT_SH, encoding="utf-8", newline="\n")
+    try:
+        apply_path.chmod(0o755)
+    except OSError:
+        pass
+    return apply_path
+
+
+def inject_mullvad_dot_into_openwrt_image(img_path: str) -> bool:
+    """
+    Best-effort: place apply script + init.d + uci-defaults into the OpenWrt rootfs.
+    Uses guestfish when available. Returns True on success.
+    """
+    guestfish = shutil.which("guestfish")
+    if not guestfish:
+        print("[!] guestfish not found; skipping image inject of Mullvad DoT scripts.")
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="overdrive_owrt_dns_") as tmp:
+        tmp_path = Path(tmp)
+        apply = tmp_path / "apply_mullvad_dot.sh"
+        initd = tmp_path / "overdrive-mullvad-dot"
+        uci_def = tmp_path / "99-overdrive-mullvad-dot"
+        apply.write_text(APPLY_MULLVAD_DOT_SH, encoding="utf-8", newline="\n")
+        initd.write_text(OVERDRIVE_MULLVAD_INIT_D, encoding="utf-8", newline="\n")
+        uci_def.write_text(UCI_DEFAULTS_ENABLE_MULLVAD, encoding="utf-8", newline="\n")
+
+        gf_script = f"""\
+run
+list-filesystems
+# Prefer second ext partition (rootfs on combined images); fall back to first.
+mount /dev/sda2 /
+mkdir-p /root
+mkdir-p /etc/init.d
+mkdir-p /etc/uci-defaults
+mkdir-p /etc/rc.d
+upload {apply.as_posix()} /root/apply_mullvad_dot.sh
+upload {initd.as_posix()} /etc/init.d/overdrive-mullvad-dot
+upload {uci_def.as_posix()} /etc/uci-defaults/99-overdrive-mullvad-dot
+chmod 0755 /root/apply_mullvad_dot.sh
+chmod 0755 /etc/init.d/overdrive-mullvad-dot
+chmod 0755 /etc/uci-defaults/99-overdrive-mullvad-dot
+ln-sf ../init.d/overdrive-mullvad-dot /etc/rc.d/S99overdrive-mullvad-dot
+sync
+umount /
+"""
+        print(f"Injecting Mullvad DoT first-boot scripts into {img_path}...")
+        result = subprocess.run(
+            [guestfish, "--rw", "-a", img_path],
+            input=gf_script,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            # Retry with sda1 in case partition layout differs
+            gf_script_sda1 = gf_script.replace("mount /dev/sda2 /", "mount /dev/sda1 /")
+            result = subprocess.run(
+                [guestfish, "--rw", "-a", img_path],
+                input=gf_script_sda1,
+                capture_output=True,
+                text=True,
+            )
+        if result.returncode != 0:
+            detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+            print(f"[!] guestfish inject failed:\n{detail}")
+            return False
+    print("[+] Mullvad DoT scripts injected into OpenWrt image.")
+    return True
+
+
+def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
+    resolvers = ", ".join(f"{ip} ({name})" for ip, name in MULLVAD_DOT_RESOLVERS)
+    extra = ""
+    if apply_path is not None:
+        extra = (
+            f"Host copy of the apply script: {apply_path}\n"
+            "Paste or scp onto OpenWrt if first-boot auto-setup did not run:\n"
+            "  sh /root/apply_mullvad_dot.sh\n"
+            "Or paste the same script from the host file above.\n"
+        )
+    return (
+        "\n--- DNS (Mullvad DoT) ---\n"
+        f"Upstream: Mullvad DNS-over-TLS on port {MULLVAD_DOT_PORT}: {resolvers}\n"
+        f"LAN clients: DHCP option 6 → {OPENWRT_LAN_DNS} (dnsmasq → stubby → Mullvad).\n"
+        "On first boot after WAN is up, OpenWrt runs apply_mullvad_dot.sh automatically\n"
+        "if the image was injected; log: /tmp/overdrive-mullvad-dot.log\n"
+        f"{extra}"
+        "Manual apply on OpenWrt console (after WAN works):\n"
+        "  sh /root/apply_mullvad_dot.sh\n"
+        f"Verify on OpenWrt:  nslookup google.com {OPENWRT_LAN_DNS}\n"
+        f"Verify on client:   dig @{OPENWRT_LAN_DNS} google.com +short\n"
+        "  cat /etc/resolv.conf   # expect nameserver 192.168.1.1\n"
+    )
 
 
 def try_remove_vbox_storage_controller(vboxmanage: str, vm_name: str, ctl_name: str) -> None:
@@ -205,6 +414,15 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
     # This script expects the raw OpenWrt image already being downloadable/available via OPENWRT_URL logic.
     # Keep your existing downloader/converter flow:
     download_openwrt_image(OPENWRT_URL, img_path)
+    apply_helper = write_mullvad_dot_helpers(Path(vm_base))
+    # Also keep a copy beside the script for easy access from the repo.
+    write_mullvad_dot_helpers(Path(SCRIPT_DIR))
+    if not inject_mullvad_dot_into_openwrt_image(img_path):
+        print(
+            "[!] Image inject skipped/failed — after OpenWrt WAN is up, run on the router console:\n"
+            "      sh /root/apply_mullvad_dot.sh\n"
+            f"    (host copy: {apply_helper})"
+        )
 
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
     vms_root_for_vbox = wsl_to_windows_path(vms_root) if paths["is_wsl"] else vms_root
@@ -214,6 +432,11 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
         run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
     else:
         print("VDI already exists; skipping conversion.")
+        print(
+            "[!] Existing VDI may predate Mullvad DoT inject. "
+            "Delete the VDI (or re-run after removing it) so convertfromraw picks up the patched image, "
+            "or run apply_mullvad_dot.sh on the OpenWrt console."
+        )
 
     # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir (Windows path for VBoxManage.exe).
     if not vm_is_registered(vboxmanage, VM_NAME):
@@ -259,11 +482,18 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
         wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
         wan_note = f"bridged → {bridge_interface!r} (WAN / uplink)"
     else:
-        wan_nic_args = ["--nic2", "nat"]
+        # Host resolver is bootstrap only: so apk/opkg can resolve package mirrors
+        # before stubby + Mullvad DoT is installed on first boot.
+        wan_nic_args = [
+            "--nic2",
+            "nat",
+            "--natdnshostresolver2",
+            "on",
+        ]
         if wan_mode == "bridged":
-            wan_note = "NAT (WAN fallback — no bridged adapter resolved)"
+            wan_note = "NAT (WAN fallback — no bridged adapter; DNS host-resolver for stubby bootstrap)"
         else:
-            wan_note = "NAT (WAN / reliable lab uplink)"
+            wan_note = "NAT (WAN; DNS host-resolver for stubby/Mullvad DoT bootstrap)"
 
     # Ensure VirtualBox can create VM log files.
     logs_dir = Path(vm_base) / "Logs"
@@ -313,6 +543,7 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
 
     if start_type == "none":
         print("VM configured. Skipping start because --start-type none was selected.")
+        print(mullvad_dot_console_instructions(apply_helper))
         return
 
     print(f"Starting VM ({start_type})...")
@@ -321,6 +552,7 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
     # IMPORTANT: Do not call get_vm_state() here; it is not imported and the VM may
     # already be running by the time this function executes.
     print(f"[+] VM start command issued for {VM_NAME!r} with --type {start_type!r}.")
+    print(mullvad_dot_console_instructions(apply_helper))
 
 
 

@@ -11,8 +11,9 @@ Networking (lab):
 
 The client often has **no path to the Internet** until OpenWrt DHCP works, so **this script** (on the
 **WSL host**, which does have Internet) runs ``virt-customize`` to pre-install ``isc-dhcp-client``,
-    ``dig``, and a ``lab-net-troubleshoot`` helper **into the VDI before first lab boot**. Use
-``--skip-vdi-prime`` only if you know what you are doing.
+``dig``, a ``lab-net-troubleshoot`` helper, and a **netplan** config so ``enp0s3`` comes up with
+DHCP from OpenWrt on boot **into the VDI before first lab boot**. Use ``--skip-vdi-prime`` only if
+you know what you are doing.
 
 This VM is **not** bridged to your Windows/WSL LAN. WSL **mirrored** mode only affects the Linux
 namespace on the host; it does not change VirtualBox intnet isolation. To browse from the host
@@ -304,6 +305,65 @@ def require_vdi_prime_tools(*, skip_prime: bool) -> str:
 # If VDI priming was skipped and the guest somehow has Internet, this still works:
 IN_GUEST_INSTALL_ISC_DHCP_CLIENT = "sudo apt install -y isc-dhcp-client"
 
+# Netplan: bring OpenWrt intnet NIC up and DHCP on boot (fixes empty enp0s3 / no default route).
+LAB_NETPLAN_OPENWRT_LAN = """network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    openwrt-lan:
+      match:
+        name: "en*"
+      dhcp4: true
+      dhcp4-overrides:
+        use-dns: true
+        use-routes: true
+      optional: true
+"""
+
+# Fallback oneshot if netplan/networkd left the NIC without an address (matches manual fix).
+LAB_NET_UP_SCRIPT = r"""#!/bin/bash
+# Bring up Ethernet NICs and request DHCP from OpenWrt when still unaddressed.
+set -u
+if ! command -v dhclient >/dev/null 2>&1; then
+  echo "lab-net-up: dhclient missing" >&2
+  exit 1
+fi
+ok=0
+for path in /sys/class/net/*; do
+  IFACE=$(basename "$path")
+  [ "$IFACE" = lo ] && continue
+  [ ! -e "$path/device" ] && continue
+  ip link set "$IFACE" up || true
+  # Skip if netplan/networkd already leased an address.
+  if ip -4 -o addr show dev "$IFACE" 2>/dev/null | grep -q ' inet '; then
+    ok=1
+    continue
+  fi
+  if dhclient -v -1 "$IFACE"; then
+    ok=1
+  fi
+done
+# Also succeed if a default route appeared via netplan while we waited.
+ip -4 route show default 2>/dev/null | grep -q . && exit 0
+[ "$ok" -eq 1 ]
+"""
+
+LAB_NET_UP_SERVICE = """[Unit]
+Description=OpenWrt lab LAN: link up + DHCP (en*)
+After=network-pre.target
+Wants=network-pre.target
+Before=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/lab-net-up
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+"""
+
 # Installed into the guest by ``prime_client_vdi_for_intnet_lab`` (host-side virt-customize).
 LAB_NET_TROUBLESHOOT_SCRIPT = r"""#!/bin/bash
 # Installed by create_VM_client_browser.py — run: lab-net-troubleshoot  (uses sudo when needed)
@@ -316,6 +376,9 @@ echo ""
 echo "=== IPv4 addresses ==="
 ip -br -4 addr 2>/dev/null || true
 echo ""
+echo "=== Link state ==="
+ip -br link 2>/dev/null || true
+echo ""
 echo "=== Routes ==="
 ip route 2>/dev/null || true
 echo ""
@@ -324,6 +387,18 @@ if ip -4 route show default 2>/dev/null | grep -q .; then
   ip -4 route show default
 else
   echo "(none) — no DHCP lease or no gateway from OpenWrt."
+fi
+echo ""
+echo "=== Resolver (/etc/resolv.conf) ==="
+if [ -r /etc/resolv.conf ]; then
+  cat /etc/resolv.conf
+else
+  echo "(missing) — no DNS nameserver configured."
+fi
+if command -v resolvectl >/dev/null 2>&1; then
+  echo ""
+  echo "=== resolvectl (systemd-resolved uplink DNS) ==="
+  resolvectl status 2>/dev/null | head -40 || true
 fi
 echo ""
 echo "=== DHCP on each Ethernet-like interface ==="
@@ -335,10 +410,12 @@ for IFACE in /sys/class/net/*; do
   IFACE=$(basename "$IFACE")
   [ "$IFACE" = lo ] && continue
   [ ! -e "/sys/class/net/$IFACE/device" ] && continue
-  echo "--- dhclient $IFACE ---"
+  echo "--- link up + dhclient $IFACE ---"
   if [ "$(id -u)" -eq 0 ]; then
+    ip link set "$IFACE" up 2>&1 || true
     dhclient -v -1 "$IFACE" 2>&1 | tail -25 || true
   else
+    sudo ip link set "$IFACE" up 2>&1 || true
     sudo dhclient -v -1 "$IFACE" 2>&1 | tail -25 || true
   fi
 done
@@ -347,18 +424,30 @@ echo "=== After DHCP ==="
 ip -br -4 addr 2>/dev/null || true
 ip -4 route show default 2>/dev/null || true
 echo ""
+echo "=== L3 vs DNS (isolates 'cannot ping google') ==="
+echo "--- ping gateway (LAN / DHCP path) ---"
+ping -c2 -W2 192.168.1.1 2>&1 || true
+echo "--- ping 8.8.8.8 (WAN/NAT path; no DNS needed) ---"
+ping -c2 -W3 8.8.8.8 2>&1 || true
+echo "--- ping google.com (needs DNS via OpenWrt dnsmasq) ---"
+ping -c2 -W3 google.com 2>&1 || true
+echo ""
+if command -v dig >/dev/null 2>&1; then
+  echo "=== dig via OpenWrt (192.168.1.1) ==="
+  dig +time=2 +tries=1 +short @192.168.1.1 google.com 2>&1 || true
+  echo ""
+fi
 echo "=== Static fallback (OpenWrt LAN often 192.168.1.1/24) ==="
 echo "  IFACE=enp0s3    # from: ip -br link"
 echo '  sudo ip addr flush dev "$IFACE" 2>/dev/null || true'
 echo '  sudo ip addr add 192.168.1.50/24 dev "$IFACE"'
 echo '  sudo ip link set "$IFACE" up'
 echo '  sudo ip route replace default via 192.168.1.1 dev "$IFACE"'
+echo "  # static IP alone does NOT set DNS — point at OpenWrt dnsmasq:"
+echo '  echo "nameserver 192.168.1.1" | sudo tee /etc/resolv.conf'
 echo "  ping -c2 192.168.1.1"
-echo ""
-if command -v dig >/dev/null 2>&1; then
-  echo "=== dig via router (optional) ==="
-  dig +short @192.168.1.1 openwrt.org 2>/dev/null || true
-fi
+echo "  ping -c2 8.8.8.8"
+echo "  ping -c2 google.com"
 """
 
 
@@ -894,6 +983,17 @@ def prime_client_vdi_for_intnet_lab(
     script_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8")
     script_host.chmod(0o644)
 
+    netplan_host = work_root / "50-openwrt-lan.yaml"
+    netplan_host.write_text(LAB_NETPLAN_OPENWRT_LAN, encoding="utf-8", newline="\n")
+    netplan_host.chmod(0o600)
+
+    lab_net_up_host = work_root / "lab-net-up"
+    lab_net_up_host.write_text(LAB_NET_UP_SCRIPT, encoding="utf-8", newline="\n")
+    lab_net_up_host.chmod(0o755)
+
+    lab_net_up_svc_host = work_root / "lab-net-up.service"
+    lab_net_up_svc_host.write_text(LAB_NET_UP_SERVICE, encoding="utf-8", newline="\n")
+
     print("Enabling guest ttyS0 serial login in the VDI...")
     print(f"Setting guest hostname to {CLIENT_GUEST_HOSTNAME!r} and enabling ttyS0 serial login in the VDI...")
 
@@ -920,7 +1020,7 @@ def prime_client_vdi_for_intnet_lab(
             "The client serial TCP socket may open, but WSL will not get a usable login prompt."
         )
 
-    print("Injecting lab network troubleshoot helper and optional network packages...")
+    print("Injecting lab network (netplan DHCP + lab-net-up + troubleshoot)...")
     try:
         result = subprocess.run(
             [
@@ -931,11 +1031,23 @@ def prime_client_vdi_for_intnet_lab(
                 "isc-dhcp-client,dnsutils,iputils-ping",
                 "--copy-in",
                 f"{script_host}:/usr/local/sbin",
+                "--copy-in",
+                f"{lab_net_up_host}:/usr/local/sbin",
+                "--copy-in",
+                f"{netplan_host}:/etc/netplan",
+                "--copy-in",
+                f"{lab_net_up_svc_host}:/etc/systemd/system",
                 "--run-command",
                 (
                     "mv /usr/local/sbin/lab_net_troubleshoot.sh "
                     "/usr/local/sbin/lab-net-troubleshoot && "
-                    "chmod 0755 /usr/local/sbin/lab-net-troubleshoot"
+                    "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
+                    "chmod 0755 /usr/local/sbin/lab-net-up && "
+                    "chmod 0600 /etc/netplan/50-openwrt-lan.yaml && "
+                    # Prefer our OpenWrt LAN DHCP netplan over cloud-init stubs.
+                    "rm -f /etc/netplan/50-cloud-init.yaml /etc/netplan/00-installer-config.yaml && "
+                    "systemctl enable systemd-networkd.service systemd-resolved.service lab-net-up.service && "
+                    "ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || true"
                 ),
             ],
             capture_output=True,
@@ -1176,9 +1288,10 @@ def setup_client_vm(
         f"\nDone. Start the OpenWrt VM first, then start {VM_NAME}.\n"
         "\n"
         "--- Lab networking (no guest Internet required) ---\n"
-        "This script should have **pre-installed** dhclient/dig on the **disk from WSL**.\n"
-        "After login run:   lab-net-troubleshoot\n"
-        "That script renews DHCP and prints static-IP fallback commands if OpenWrt has no DHCP.\n"
+        "VDI priming should install dhclient/dig, netplan DHCP on en*, and lab-net-up.service\n"
+        "so enp0s3 comes up and leases from OpenWrt on boot.\n"
+        "After login, if needed:   lab-net-troubleshoot\n"
+        "That renews DHCP (link up + dhclient) and prints static-IP fallback commands.\n"
         "Only if the guest **does** have Internet and tools are missing:\n"
         f"  sudo apt update && {IN_GUEST_INSTALL_ISC_DHCP_CLIENT}\n"
     )
