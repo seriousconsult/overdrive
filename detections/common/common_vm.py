@@ -9,6 +9,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -33,6 +34,9 @@ __all__ = [
     "SERIAL_TCP_HOST",
     "SERIAL_TCP_PORT",
     "SERIAL_UNIX_SOCKET_PATH",
+    "ROUTER_SERIAL_PTY_LINK_PATH",
+    "ROUTER_SERIAL_TCP_PORT",
+    "ROUTER_SERIAL_UNIX_SOCKET_PATH",
     "find_vboxmanage",
     "find_vboxmanage_with_windows_fallback",
     "vboxmanage_targets_windows",
@@ -52,6 +56,7 @@ __all__ = [
     "serial_tcp_host_candidates",
     "serial_uart_mode_and_endpoint",
     "spawn_wsl_interactive_terminal",
+    "spawn_serial_console_window",
     "start_vm_headless_safe",
     "ensure_vm_ready_to_start",
     "close_medium_best_effort",
@@ -69,10 +74,15 @@ OPENWRT_CLIENT_VM_NAME = "OpenWrt_LAN_Client"
 OPENWRT_LAN_INTNET_NAME = "openwrt-lan"
 
 SERIAL_TCP_HOST = "127.0.0.1"
-SERIAL_TCP_PORT = 2323
+SERIAL_TCP_PORT = 2323  # OpenWrt_LAN_Client COM1
 SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_LAN_Client_serial.sock"
 SERIAL_PTY_LINK_PATH = "/tmp/OpenWrt_LAN_Client_serial.pty"
 SERIAL_BAUD = "115200"
+
+# OpenWrt router uses a different host TCP port so both VMs can expose COM1 at once.
+ROUTER_SERIAL_TCP_PORT = 2324
+ROUTER_SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_2026_Router_serial.sock"
+ROUTER_SERIAL_PTY_LINK_PATH = "/tmp/OpenWrt_2026_Router_serial.pty"
 
 OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
 OPENWRT_IMAGE_NAME = "openwrt_2026.img"
@@ -626,11 +636,28 @@ def start_vm_headless_safe(vboxmanage: str, vm_name: str) -> None:
     )
 
 
-def serial_endpoint_for_vbox(vboxmanage: str) -> str:
+def serial_endpoint_for_vbox(
+    vboxmanage: str,
+    *,
+    tcp_port: int | None = None,
+    unix_path: str | None = None,
+) -> str:
     """Return the host-side serial endpoint VirtualBox should expose."""
     if vboxmanage_targets_windows(vboxmanage):
-        return str(SERIAL_TCP_PORT)
-    return SERIAL_UNIX_SOCKET_PATH
+        return str(tcp_port if tcp_port is not None else SERIAL_TCP_PORT)
+    return unix_path or SERIAL_UNIX_SOCKET_PATH
+
+
+def serial_uart_mode_and_endpoint(
+    vboxmanage: str,
+    *,
+    tcp_port: int | None = None,
+    unix_path: str | None = None,
+) -> tuple[str, str]:
+    """Return the ``VBoxManage --uartmode1`` mode and endpoint."""
+    if vboxmanage_targets_windows(vboxmanage):
+        return "tcpserver", str(tcp_port if tcp_port is not None else SERIAL_TCP_PORT)
+    return "server", unix_path or SERIAL_UNIX_SOCKET_PATH
 
 
 def serial_tcp_host_candidates(base_host: str | None = None) -> list[str]:
@@ -654,20 +681,40 @@ def spawn_wsl_interactive_terminal(
     cwd: str | Path,
     title: str = "Serial console",
 ) -> bool:
-    """Launch a Python command in a new Windows Terminal tab when cmd.exe interop works."""
+    """Launch a command in a **new** Windows Terminal window (or a new console)."""
     if not _windows_cmd_available():
         return False
     cwd_str = str(Path(cwd).resolve())
-    launchers = [
-        ["cmd.exe", "/C", "start", title, "wt.exe", "new-tab", "--", "wsl.exe", "--cd", cwd_str, "-e", *command],
-        ["cmd.exe", "/C", "start", title, "wsl.exe", "--cd", cwd_str, "-e", *command],
+    # Do NOT wrap this in `cmd /C start "title" …` — titles with spaces/parens break
+    # and Windows treats the title as a program name ("cannot find '\"…\"'").
+    # `wt -w new` already opens a separate window.
+    launchers: list[list[str]] = [
+        [
+            "wt.exe",
+            "-w",
+            "new",
+            "--title",
+            title,
+            "--",
+            "wsl.exe",
+            "--cd",
+            cwd_str,
+            "-e",
+            *command,
+        ],
+        ["wsl.exe", "--cd", cwd_str, "-e", *command],  # may reuse console; last resort
     ]
     for launcher in launchers:
         try:
+            # First launcher: new wt window. Avoid shell=True quoting bugs.
+            creationflags = 0
+            if os.name == "nt" and launcher[0].lower().startswith("wsl"):
+                creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
             subprocess.Popen(
                 launcher,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
             )
             return True
         except OSError:
@@ -675,11 +722,92 @@ def spawn_wsl_interactive_terminal(
     return False
 
 
-def serial_uart_mode_and_endpoint(vboxmanage: str) -> tuple[str, str]:
-    """Return the ``VBoxManage --uartmode1`` mode and endpoint for the lab client."""
-    if vboxmanage_targets_windows(vboxmanage):
-        return "tcpserver", str(SERIAL_TCP_PORT)
-    return "server", SERIAL_UNIX_SOCKET_PATH
+def _windows_path_from_wsl(path: Path) -> str | None:
+    """Convert ``/mnt/c/...`` to ``C:\\...`` when possible."""
+    posix = path.resolve().as_posix()
+    if posix.startswith("/mnt/") and len(posix) > 6 and posix[6] == "/":
+        drive = posix[5].upper()
+        rest = posix[7:].replace("/", "\\")
+        return f"{drive}:\\{rest}"
+    if os.name == "nt":
+        return str(path.resolve())
+    return None
+
+
+def spawn_serial_console_window(
+    script_path: str | Path,
+    *,
+    title: str,
+    extra_args: list[str] | None = None,
+    cwd: str | Path | None = None,
+) -> bool:
+    """
+    Open a **new** terminal window that attaches to a VM serial console.
+
+    The parent shell stays free. The child runs ``script --serial-here …``.
+    Uses Windows Terminal ``-w new`` (no ``cmd start`` title quoting).
+    """
+    script = Path(script_path).resolve()
+    work = Path(cwd).resolve() if cwd is not None else script.parent
+    args = ["--serial-here", *(extra_args or [])]
+    # Avoid parentheses in titles — they confuse cmd/start if any fallback uses it.
+    safe_title = title.replace("(", "").replace(")", "").strip()
+
+    # --- Path A: WSL host → new wt window running Linux Python ---
+    if is_wsl_environment():
+        py = sys.executable or "python3"
+        cmd = [py, str(script), *args]
+        if spawn_wsl_interactive_terminal(cmd, cwd=work, title=safe_title):
+            print(f"[serial] Opened new window: {safe_title}")
+            time.sleep(0.5)
+            return True
+
+    # --- Path B: Windows Python via wt / new console ---
+    if os.name == "nt" or _windows_cmd_available():
+        win_script = _windows_path_from_wsl(script) if is_wsl_environment() else str(script)
+        win_cwd = _windows_path_from_wsl(work) if is_wsl_environment() else str(work)
+        if not win_script:
+            win_script = str(script)
+        if not win_cwd:
+            win_cwd = str(work)
+
+        if is_wsl_environment() or os.name != "nt":
+            run_cmd = ["py", "-3", win_script, *args]
+        else:
+            run_cmd = [sys.executable, win_script, *args]
+
+        launchers: list[list[str]] = [
+            ["wt.exe", "-w", "new", "--title", safe_title, "--", "cmd.exe", "/k", *run_cmd],
+            ["wt.exe", "-w", "new", "--title", safe_title, "--", *run_cmd],
+        ]
+        # Last resort: fresh console (native Windows only)
+        if os.name == "nt":
+            launchers.append(run_cmd)
+
+        for launcher in launchers:
+            try:
+                kwargs: dict = {
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL,
+                }
+                if os.name == "nt":
+                    kwargs["cwd"] = win_cwd
+                    if launcher is launchers[-1] and launcher[0] != "wt.exe":
+                        kwargs["creationflags"] = getattr(
+                            subprocess, "CREATE_NEW_CONSOLE", 0
+                        )
+                subprocess.Popen(launcher, **kwargs)
+                print(f"[serial] Opened new window: {safe_title}")
+                time.sleep(0.5)
+                return True
+            except OSError:
+                continue
+
+    print(
+        f"[!] Could not open a new window for {safe_title!r}. "
+        f"Run in this terminal: {script.name} --serial-here"
+    )
+    return False
 
 
 def probe_tcp_serial(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool, str]:

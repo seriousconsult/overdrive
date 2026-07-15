@@ -102,6 +102,7 @@ from detections.common.common_vm import (
     serial_endpoint_for_vbox,
     serial_tcp_host_candidates,
     SERIAL_UNIX_SOCKET_PATH,
+    spawn_serial_console_window,
     vboxmanage_targets_windows,
     vm_is_registered,
     wsl_to_windows_path,
@@ -1300,7 +1301,14 @@ def setup_client_vm(
     if not start_vm:
         print("Not starting VM (--no-start).")
         if connect_serial:
-            connect_serial_console(vboxmanage, serial_endpoint)
+            spawned = spawn_serial_console_window(
+                Path(__file__).resolve(),
+                title="LAN Client serial (2323)",
+                extra_args=["--force-interactive-serial"],
+                cwd=Path(SCRIPT_DIR),
+            )
+            if not spawned:
+                connect_serial_console(vboxmanage, serial_endpoint)
         return
 
     state = get_vm_state(vboxmanage, VM_NAME)
@@ -1319,13 +1327,19 @@ def setup_client_vm(
 
     if connect_serial:
         time.sleep(2)
-        # Key change: if we had to use GUI fallback, attach interactively even
-        # if the first 6s probe didn't see output yet.
-        connect_serial_console(
-            vboxmanage,
-            serial_endpoint,
-            force_interactive=started_via_gui,
+        # New window by default — keep this create/start shell free.
+        spawned = spawn_serial_console_window(
+            Path(__file__).resolve(),
+            title="LAN Client serial (2323)",
+            extra_args=["--force-interactive-serial"] if started_via_gui else [],
+            cwd=Path(SCRIPT_DIR),
         )
+        if not spawned:
+            connect_serial_console(
+                vboxmanage,
+                serial_endpoint,
+                force_interactive=started_via_gui,
+            )
 
 
 
@@ -1365,17 +1379,22 @@ if __name__ == "__main__":
     ap.add_argument(
         "--connect-serial",
         action="store_true",
-        help="Attach this terminal to the serial console after starting the VM (default).",
+        help="Open a new serial console window after starting the VM (default).",
     )
     ap.add_argument(
         "--no-connect-serial",
         action="store_true",
-        help="Create/start the VM but do not attach this terminal to the serial console.",
+        help="Create/start the VM but do not open a serial console window.",
     )
     ap.add_argument(
         "--serial-only",
         action="store_true",
-        help="Do not create or modify the VM; just attach to the existing serial console.",
+        help="Open client serial in a new window (TCP 2323); do not recreate. Host shell stays free.",
+    )
+    ap.add_argument(
+        "--serial-here",
+        action="store_true",
+        help="Attach client serial in THIS terminal (used by new-window spawners).",
     )
     ap.add_argument(
         "--serial-check-only",
@@ -1423,18 +1442,30 @@ if __name__ == "__main__":
         print("[serial readiness] Native Linux socket mode does not support TCP readiness probing.")
         raise SystemExit(0)
 
-    if ns.serial_only:
+    if ns.serial_here or ns.serial_only:
         paths = get_system_paths(VM_NAME)
         vboxmanage = find_vboxmanage(paths)
         if not vboxmanage:
             raise RuntimeError("VBoxManage not found. Install VirtualBox or add it to PATH.")
         serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
+        if ns.serial_only and not ns.serial_here:
+            spawned = spawn_serial_console_window(
+                Path(__file__).resolve(),
+                title="LAN Client serial (2323)",
+                extra_args=["--force-interactive-serial"]
+                if ns.force_interactive_serial
+                else [],
+                cwd=Path(SCRIPT_DIR),
+            )
+            if spawned:
+                raise SystemExit(0)
+            print("[!] Falling back to in-terminal serial attach.")
         if ns.refresh_live_serial and get_vm_state(vboxmanage, VM_NAME) == "running":
             refresh_live_serial_endpoint(vboxmanage, serial_endpoint)
         connected = connect_serial_console(
             vboxmanage,
             serial_endpoint,
-            force_interactive=ns.force_interactive_serial,
+            force_interactive=ns.force_interactive_serial or ns.serial_here,
         )
         raise SystemExit(0 if connected else 1)
 

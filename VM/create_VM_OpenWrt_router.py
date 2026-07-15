@@ -11,6 +11,10 @@ leg (internal network ``openwrt-lan``) and **NIC2** is **WAN** (bridged or NAT).
 through **dnsmasq → stubby → Mullvad DoT** (``dns.mullvad.net`` / ``base.dns.mullvad.net``), and
 DHCP advertises OpenWrt ``192.168.1.1`` to clients.
 
+**Serial console:** COM1 / ``ttyS0`` at 115200 baud (stock OpenWrt already uses
+``console=ttyS0``). On Windows VirtualBox this is exposed as TCP port **2324** (client uses
+**2323**). Attach with ``./create_VM_OpenWrt_router.py --serial-only``.
+
 At startup, any **existing VirtualBox VM with the same name** and the matching folder under
 ``~/VirtualBox VMs/<VM_NAME>/`` are **removed** (power off, ``unregistervm --delete``, then delete
 leftover directory) so the script always builds the same thing from a clean slate.
@@ -39,11 +43,17 @@ from detections.common.common_vm import (
     MULLVAD_DOT_RESOLVERS,
     OPENWRT_LAN_DNS,
     OPENWRT_STUBBY_LISTEN,
+    ROUTER_SERIAL_PTY_LINK_PATH,
+    ROUTER_SERIAL_TCP_PORT,
+    ROUTER_SERIAL_UNIX_SOCKET_PATH,
+    SERIAL_BAUD,
+    SERIAL_TCP_HOST,
     find_vboxmanage,
     get_active_bridged_interface,
     get_linux_distro_id,
     get_system_paths,
     get_vboxmanage_install_hint,
+    get_vm_state,
     OPENWRT_IMAGE_NAME,
     OPENWRT_LAN_INTNET_NAME,
     OPENWRT_ROUTER_VM_NAME,
@@ -52,6 +62,10 @@ from detections.common.common_vm import (
     remove_existing_vm,
     resolve_vbox_settings_path,
     run_vboxmanage,
+    serial_endpoint_for_vbox,
+    serial_tcp_host_candidates,
+    spawn_serial_console_window,
+    vboxmanage_targets_windows,
     vm_is_registered,
     wsl_to_windows_path,
 )
@@ -280,6 +294,144 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
     )
 
 
+def router_serial_endpoint(vboxmanage: str) -> str:
+    """Host endpoint for OpenWrt COM1 (distinct from the LAN client port)."""
+    return serial_endpoint_for_vbox(
+        vboxmanage,
+        tcp_port=ROUTER_SERIAL_TCP_PORT,
+        unix_path=ROUTER_SERIAL_UNIX_SOCKET_PATH,
+    )
+
+
+def configure_router_serial(vboxmanage: str, endpoint: str) -> None:
+    """Expose OpenWrt COM1 as TCP (Windows VBox) or Unix socket (native Linux VBox)."""
+    if vboxmanage_targets_windows(vboxmanage):
+        uart_mode = "tcpserver"
+        print(
+            f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} "
+            f"({SERIAL_BAUD} baud; OpenWrt ttyS0)."
+        )
+    else:
+        uart_mode = "server"
+        print(f"Serial console: COM1 -> host socket {endpoint} ({SERIAL_BAUD} baud).")
+
+    run_vboxmanage(
+        vboxmanage,
+        [
+            "modifyvm",
+            VM_NAME,
+            "--uart1",
+            "0x3F8",
+            "4",
+            "--uartmode1",
+            uart_mode,
+            endpoint,
+        ],
+    )
+
+
+def refresh_live_router_serial(vboxmanage: str, endpoint: str) -> None:
+    """Refresh COM1 backend on an already-running router VM."""
+    if vboxmanage_targets_windows(vboxmanage):
+        uart_mode = "tcpserver"
+        print(f"Refreshing live serial TCP backend for {VM_NAME}: {SERIAL_TCP_HOST}:{endpoint}")
+    else:
+        uart_mode = "server"
+        print(f"Refreshing live serial socket backend for {VM_NAME}: {endpoint}")
+    run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", "disconnected"])
+    run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", uart_mode, endpoint])
+
+
+def router_serial_instructions(vboxmanage: str, endpoint: str) -> str:
+    """Host-specific attach instructions for the OpenWrt serial console."""
+    if vboxmanage_targets_windows(vboxmanage):
+        hosts = ", ".join(serial_tcp_host_candidates(SERIAL_TCP_HOST))
+        return (
+            "\n--- Serial console (OpenWrt ttyS0) ---\n"
+            f"VirtualBox exposes COM1 as TCP port {endpoint} on the Windows host.\n"
+            f"From WSL, connect to one of: {hosts}\n"
+            f"  ./{Path(__file__).name} --serial-only\n"
+            "Stock OpenWrt already uses console=ttyS0; press Enter for the ash login.\n"
+            "Client serial stays on TCP 2323; router uses 2324 so both can run together.\n"
+        )
+    return (
+        "\n--- Serial console (OpenWrt ttyS0) ---\n"
+        f"VirtualBox exposes COM1 as: {endpoint}\n"
+        f"  rm -f {ROUTER_SERIAL_PTY_LINK_PATH}\n"
+        f"  socat -d -d UNIX-CONNECT:{endpoint} "
+        f"PTY,link={ROUTER_SERIAL_PTY_LINK_PATH},raw,echo=0\n"
+        f"  screen {ROUTER_SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}\n"
+        "Press Enter once if the console is blank (OpenWrt ash askfirst).\n"
+    )
+
+
+def connect_router_serial_console(
+    vboxmanage: str,
+    endpoint: str,
+    *,
+    force_interactive: bool = True,
+) -> bool:
+    """Attach this terminal to the OpenWrt serial console (reuse client TCP bridge)."""
+    # Import lazily so --help / create paths stay light if client module is heavy.
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+    import create_VM_client_browser_pipe as client_serial  # noqa: PLC0415
+
+    if vboxmanage_targets_windows(vboxmanage):
+        return client_serial.connect_tcp_serial_console(
+            SERIAL_TCP_HOST,
+            int(endpoint),
+            force_interactive=force_interactive,
+        )
+
+    socat = shutil.which("socat")
+    screen = shutil.which("screen")
+    if not socat or not screen:
+        raise RuntimeError(
+            "Native Linux serial attach requires socat and screen:\n"
+            "  sudo apt install -y socat screen"
+        )
+    print(router_serial_instructions(vboxmanage, endpoint))
+    return True
+
+
+def serial_only_attach(*, here: bool = False, force_interactive: bool = True) -> None:
+    """Attach to an already-configured OpenWrt serial endpoint.
+
+    By default opens a **new window** so the caller shell stays free.
+    Pass ``here=True`` (``--serial-here``) to attach in this terminal.
+    """
+    if not here:
+        spawned = spawn_serial_console_window(
+            Path(__file__).resolve(),
+            title="OpenWrt Router serial (2324)",
+            extra_args=["--force-interactive-serial"] if force_interactive else [],
+            cwd=Path(SCRIPT_DIR),
+        )
+        if spawned:
+            return
+        print("[!] Falling back to in-terminal serial attach.")
+
+    paths = get_system_paths(VM_NAME)
+    vboxmanage = find_vboxmanage(paths)
+    if not vboxmanage:
+        raise RuntimeError(get_vboxmanage_install_hint())
+    endpoint = router_serial_endpoint(vboxmanage)
+    state = get_vm_state(vboxmanage, VM_NAME)
+    if state != "running":
+        raise RuntimeError(
+            f"{VM_NAME} is not running (state={state!r}). Start it first, then --serial-only."
+        )
+    try:
+        refresh_live_router_serial(vboxmanage, endpoint)
+    except RuntimeError as exc:
+        print(f"[!] Could not refresh live UART mode ({exc}); trying connect anyway.")
+    print(router_serial_instructions(vboxmanage, endpoint))
+    connect_router_serial_console(
+        vboxmanage, endpoint, force_interactive=force_interactive
+    )
+
+
 def try_remove_vbox_storage_controller(vboxmanage: str, vm_name: str, ctl_name: str) -> None:
     """Remove a storage controller if it exists (fresh VMs may not have IDE — avoid noisy errors)."""
     r = subprocess.run(
@@ -381,7 +533,12 @@ def remove_existing_router_vm(
         shutil.rmtree(vm_base, ignore_errors=True)
 
 
-def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
+def setup_openwrt_vm(
+    start_type: str = "gui",
+    *,
+    wan_mode: str = "nat",
+    connect_serial: bool = True,
+) -> None:
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -520,6 +677,9 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
         ],
     )
 
+    serial_endpoint = router_serial_endpoint(vboxmanage)
+    configure_router_serial(vboxmanage, serial_endpoint)
+
     try_remove_vbox_storage_controller_with_retry(vboxmanage, VM_NAME, "IDE")
 
     run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
@@ -544,6 +704,7 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
     if start_type == "none":
         print("VM configured. Skipping start because --start-type none was selected.")
         print(mullvad_dot_console_instructions(apply_helper))
+        print(router_serial_instructions(vboxmanage, serial_endpoint))
         return
 
     print(f"Starting VM ({start_type})...")
@@ -553,7 +714,55 @@ def setup_openwrt_vm(start_type: str = "gui", *, wan_mode: str = "nat") -> None:
     # already be running by the time this function executes.
     print(f"[+] VM start command issued for {VM_NAME!r} with --type {start_type!r}.")
     print(mullvad_dot_console_instructions(apply_helper))
+    print(router_serial_instructions(vboxmanage, serial_endpoint))
 
+    if connect_serial:
+        time.sleep(3)
+        # New window by default — keep the create/start shell free.
+        spawned = spawn_serial_console_window(
+            Path(__file__).resolve(),
+            title="OpenWrt Router serial (2324)",
+            extra_args=["--force-interactive-serial"],
+            cwd=Path(SCRIPT_DIR),
+        )
+        if not spawned:
+            try:
+                connect_router_serial_console(
+                    vboxmanage,
+                    serial_endpoint,
+                    force_interactive=True,
+                )
+            except RuntimeError as exc:
+                print(f"[!] Serial attach failed: {exc}")
+                print(f"    Retry with: ./{Path(__file__).name} --serial-only")
+
+
+def enable_serial_on_existing_router() -> None:
+    """Enable COM1 serial on an already-registered router VM (no full recreate)."""
+    paths = get_system_paths(VM_NAME)
+    vboxmanage = find_vboxmanage(paths)
+    if not vboxmanage:
+        raise RuntimeError(get_vboxmanage_install_hint())
+    if not vm_is_registered(vboxmanage, VM_NAME):
+        raise RuntimeError(f"{VM_NAME} is not registered. Create it first.")
+
+    endpoint = router_serial_endpoint(vboxmanage)
+    state = get_vm_state(vboxmanage, VM_NAME)
+    if state == "running":
+        print(f"{VM_NAME} is running — enabling UART requires power off for --uart1 IRQ setup.")
+        print("Powering off…")
+        subprocess.run([vboxmanage, "controlvm", VM_NAME, "poweroff"], check=False)
+        for _ in range(45):
+            time.sleep(1)
+            st = get_vm_state(vboxmanage, VM_NAME)
+            if st in (None, "poweroff", "aborted"):
+                break
+        else:
+            raise RuntimeError(f"{VM_NAME} did not power off in time.")
+
+    configure_router_serial(vboxmanage, endpoint)
+    print(router_serial_instructions(vboxmanage, endpoint))
+    print(f"Start the VM (GUI), then: ./{Path(__file__).name} --serial-only")
 
 
 def main() -> None:
@@ -576,10 +785,49 @@ def main() -> None:
         default="nat",
         help="Router WAN VirtualBox mode. Default: nat.",
     )
+    parser.add_argument(
+        "--serial-only",
+        action="store_true",
+        help="Open OpenWrt serial in a new window (TCP 2324); do not recreate. Host shell stays free.",
+    )
+    parser.add_argument(
+        "--serial-here",
+        action="store_true",
+        help="Attach OpenWrt serial in THIS terminal (used by new-window spawners).",
+    )
+    parser.add_argument(
+        "--force-interactive-serial",
+        action="store_true",
+        help="Open the serial bridge even if guest output was not detected yet.",
+    )
+    parser.add_argument(
+        "--enable-serial",
+        action="store_true",
+        help="Enable COM1 serial on the existing router VM (power off if needed); do not recreate.",
+    )
+    parser.add_argument(
+        "--no-connect-serial",
+        action="store_true",
+        help="After create/start, do not open a serial console window.",
+    )
     args = parser.parse_args()
-    setup_openwrt_vm(start_type=args.start_type, wan_mode=args.wan_mode)
-    
-         
+    if args.serial_here:
+        serial_only_attach(here=True, force_interactive=True)
+        return
+    if args.serial_only:
+        serial_only_attach(
+            here=False,
+            force_interactive=args.force_interactive_serial or True,
+        )
+        return
+    if args.enable_serial:
+        enable_serial_on_existing_router()
+        return
+    setup_openwrt_vm(
+        start_type=args.start_type,
+        wan_mode=args.wan_mode,
+        connect_serial=not args.no_connect_serial,
+    )
 
 
 if __name__ == "__main__":

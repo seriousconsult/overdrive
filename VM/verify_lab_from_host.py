@@ -133,6 +133,12 @@ def check_router(info: dict[str, str], verbose: bool) -> list[str]:
         errs.append(
             f"router NIC2: expected bridged or nat (WAN), got {nic2!r}"
         )
+    uart = info.get("uart1", "")
+    if uart in ("", "off"):
+        print(
+            f"  [!] {ROUTER_VM}: COM1/uart1 not enabled. "
+            f"Run: python VM/create_VM_OpenWrt_router.py --enable-serial"
+        )
     if nic2 == "nat":
         # Keys vary by VirtualBox version; treat missing as "not clearly on".
         nat_dns = (
