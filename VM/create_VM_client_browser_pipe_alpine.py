@@ -56,6 +56,7 @@ import threading
 import time
 import glob
 import re
+import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -91,11 +92,14 @@ CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
 CLIENT_GUEST_HOSTNAME = "my-alpine-client"
 
-ALPINE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-cloud-3.20.3-x86_64-bios-tiny-r0.vmdk"
-ALPINE_IMAGE_NAME = "alpine_cloud.vmdk"
+ALPINE_SERIAL_TCP_PORT = 2325
+
+ALPINE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
+ALPINE_IMAGE_NAME = "nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
 
 
 def _find_existing_fixed_appliance_dir() -> str | None:
+    """Return a directory containing kernel/initrd/root/README.fixed if found."""
     candidates = [
         "/usr/lib64/guestfs/appliance",
         "/usr/lib/guestfs/appliance",
@@ -105,7 +109,71 @@ def _find_existing_fixed_appliance_dir() -> str | None:
         d = Path(c)
         if (d / "README.fixed").is_file() and all((d / x).is_file() for x in ["kernel", "initrd", "root"]):
             return str(d)
+
+    # Common cache locations
+    cache_roots = [
+        Path.home() / ".cache" / "libguestfs" / "appliance",
+        Path.home() / ".cache" / "guestfs" / "appliance",
+    ]
+    for cr in cache_roots:
+        if not cr.exists():
+            continue
+        for d in cr.glob("**/"):
+            if not d.is_dir():
+                continue
+            if (d / "README.fixed").is_file() and all((d / x).is_file() for x in ["kernel", "initrd", "root"]):
+                return str(d)
+
     return None
+
+
+def _download_latest_fixed_appliance(cache_dir: Path) -> str:
+    """
+    Download and extract the latest fixed appliance tarball into cache_dir.
+    Then return the directory containing README.fixed + kernel/initrd/root.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    index_url = "https://download.libguestfs.org/binaries/appliance/"
+    index_html = urllib.request.urlopen(index_url, timeout=60).read().decode("utf-8", errors="replace")
+
+    # Find appliance-<ver>.tar.xz entries
+    versions = re.findall(r"(appliance-\d+(?:\.\d+)+)\.tar\.xz", index_html)
+    if not versions:
+        raise RuntimeError("Could not parse libguestfs appliance versions from index.")
+
+    # Choose latest by version tuple
+    def verkey(s: str) -> tuple[int, ...]:
+        s = s.replace("appliance-", "")
+        return tuple(int(x) for x in s.split("."))
+
+    latest = max(versions, key=verkey)
+    tar_name = f"{latest}.tar.xz"
+    tar_url = f"{index_url}{tar_name}"
+    tar_path = cache_dir / tar_name
+
+    extract_root = cache_dir / latest
+    if not (extract_root / "README.fixed").is_file():
+        if not tar_path.exists():
+            print(f"[libguestfs] Downloading fixed appliance: {tar_name} ...")
+            urllib.request.urlretrieve(tar_url, tar_path)
+
+        print(f"[libguestfs] Extracting fixed appliance into cache: {extract_root} ...")
+        if extract_root.exists():
+            shutil.rmtree(extract_root)
+        extract_root.mkdir(parents=True, exist_ok=True)
+
+        with tarfile.open(tar_path, mode="r:xz") as tf:
+            tf.extractall(path=extract_root)
+
+    # Search extracted tree for README.fixed
+    for d in [extract_root] + list(extract_root.glob("**/")):
+        if not d.is_dir():
+            continue
+        if (d / "README.fixed").is_file() and all((d / x).is_file() for x in ["kernel", "initrd", "root"]):
+            return str(d)
+
+    raise RuntimeError("Downloaded appliance but could not find README.fixed + kernel/initrd/root in extracted content.")
 
 
 def _pick_supermin_kernel_env() -> dict[str, str] | None:
@@ -124,10 +192,10 @@ def _pick_supermin_kernel_env() -> dict[str, str] | None:
 def download_alpine_image(url: str, dest_path: str) -> None:
     dest = Path(dest_path)
     if dest.exists():
-        print(f"Alpine base VMDK image already exists at {dest}")
+        print(f"Alpine base image already exists at {dest}")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading Alpine base VMDK image to {dest}...")
+    print(f"Downloading Alpine base image to {dest}...")
     with urllib.request.urlopen(url) as response:
         if response.status != 200:
             raise RuntimeError(f"Download failed with HTTP {response.status}")
@@ -488,9 +556,21 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
     virt_env = os.environ.copy()
     if is_wsl_environment():
         virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
+
     supermin_env = _pick_supermin_kernel_env()
     if supermin_env:
         virt_env.update(supermin_env)
+        print(f"[libguestfs] Using supermin kernel override: SUPERMIN_KERNEL={supermin_env.get('SUPERMIN_KERNEL')}")
+    else:
+        fixed_dir = _find_existing_fixed_appliance_dir()
+        if fixed_dir:
+            virt_env["LIBGUESTFS_PATH"] = fixed_dir
+            print(f"[libguestfs] Using existing fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
+        else:
+            cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
+            fixed_dir = _download_latest_fixed_appliance(cache_dir)
+            virt_env["LIBGUESTFS_PATH"] = fixed_dir
+            print(f"[libguestfs] Downloaded & using fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
 
     interfaces_host = work_root / "interfaces"
     interfaces_host.write_text(LAB_INTERFACES_ALPINE, encoding="utf-8", newline="\n")
@@ -514,7 +594,7 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--root-password",
         "password:osboxes.org",
         "--run-command",
-        "apk update && apk add bash bind-tools iputils socat",
+        "mkdir -p /usr/local/sbin && echo 'my-alpine-client' > /etc/hostname && apk update && apk add bash bind-tools iputils socat",
         "--copy-in",
         f"{interfaces_host}:/etc/network",
         "--copy-in",
@@ -564,7 +644,7 @@ def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_
     download_alpine_image(ALPINE_URL, img_path)
 
     if not os.path.exists(vdi_wsl):
-        print("Converting base Alpine VMDK disk into VDI format...")
+        print("Converting base Alpine image into VDI format...")
         run_vboxmanage(vboxmanage, ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"])
 
     prime_client_vdi_for_intnet_lab(vdi_wsl, Path(download_dir), skip_prime=skip_vdi_prime)
@@ -572,7 +652,7 @@ def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_
     run_vboxmanage(vboxmanage, ["createvm", "--name", VM_NAME, "--ostype", "Linux_64", "--basefolder", vms_root_for_vbox, "--register"])
     run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--memory", "1024", "--ioapic", "on", "--cpus", str(CLIENT_VM_CPUS), "--nic1", "intnet", "--intnet1", LAN_INTNET_NAME])
 
-    serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
+    serial_endpoint = serial_endpoint_for_vbox(vboxmanage, tcp_port=ALPINE_SERIAL_TCP_PORT)
     configure_serial_endpoint(vboxmanage, serial_endpoint)
 
     run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci"])
@@ -586,7 +666,8 @@ def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_
 
     if connect_serial:
         time.sleep(2)
-        spawned = spawn_serial_console_window(Path(__file__).resolve(), title="LAN Alpine Client serial (2323)", extra_args=["--force-interactive-serial"], cwd=Path(SCRIPT_DIR))
+        extra_args = ["--force-interactive-serial", "--serial-port", str(ALPINE_SERIAL_TCP_PORT)]
+        spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"LAN Alpine Client serial ({ALPINE_SERIAL_TCP_PORT})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
         if not spawned:
             connect_serial_console(vboxmanage, serial_endpoint, force_interactive=True)
 
@@ -597,6 +678,7 @@ if __name__ == "__main__":
     ap.add_argument("--serial-only", action="store_true", help="Open serial console for already running Alpine client.")
     ap.add_argument("--serial-here", action="store_true", help="Attach to serial directly in this console window.")
     ap.add_argument("--force-interactive-serial", action="store_true", help="Forces interactive socket bridge on startup.")
+    ap.add_argument("--serial-port", type=int, default=ALPINE_SERIAL_TCP_PORT, help="TCP port for serial console.")
     ns = ap.parse_args()
 
     if ns.serial_here or ns.serial_only:
@@ -604,9 +686,11 @@ if __name__ == "__main__":
         vboxmanage = find_vboxmanage(paths)
         if not vboxmanage:
             raise RuntimeError("VBoxManage not found.")
-        serial_endpoint = serial_endpoint_for_vbox(vboxmanage)
+        serial_endpoint = serial_endpoint_for_vbox(vboxmanage, tcp_port=ns.serial_port)
         if ns.serial_only and not ns.serial_here:
-            spawned = spawn_serial_console_window(Path(__file__).resolve(), title="LAN Alpine Client serial (2323)", extra_args=["--force-interactive-serial"] if ns.force_interactive_serial else [], cwd=Path(SCRIPT_DIR))
+            extra_args=["--force-interactive-serial"] if ns.force_interactive_serial else []
+            extra_args.extend(["--serial-port", str(ns.serial_port)])
+            spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"LAN Alpine Client serial ({ns.serial_port})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
             if spawned:
                 raise SystemExit(0)
         connect_serial_console(vboxmanage, serial_endpoint, force_interactive=ns.force_interactive_serial or ns.serial_here)

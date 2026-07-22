@@ -72,6 +72,11 @@ from VM.vm_config import (
     OPENWRT_STUBBY_LISTEN,
 )
 
+try:
+    from VM.create_VM_client_browser_pipe_alpine import setup_client_vm as setup_alpine_client_vm
+except ImportError:
+    setup_alpine_client_vm = None
+
 VM_NAME = OPENWRT_ROUTER_VM_NAME
 # Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 openwrt-lan``
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
@@ -89,23 +94,62 @@ _MULLVAD_RESOLVER_UCI = "\n".join(
 
 APPLY_MULLVAD_DOT_SH = f"""#!/bin/sh
 # Overdrive lab: Mullvad DNS-over-TLS via stubby; LAN clients use OpenWrt as DNS.
-# Safe to re-run. Requires WAN (NAT/bridged) so apk/opkg can fetch stubby.
-set -e
-DONE=/etc/overdrive-mullvad-dot.done
+set -x # Print every command
 
-echo "[overdrive] Installing stubby for Mullvad DoT..."
-if command -v apk >/dev/null 2>&1; then
-  apk update
-  apk add stubby ca-bundle
-elif command -v opkg >/dev/null 2>&1; then
-  opkg update
-  opkg install stubby ca-bundle
-else
-  echo "[overdrive] ERROR: neither apk nor opkg found" >&2
-  exit 1
+DONE=/etc/overdrive-mullvad-dot.done
+if [ -f "$DONE" ]; then
+    echo "[overdrive] Mullvad DoT setup already completed."
+    exit 0
 fi
 
-echo "[overdrive] Configuring stubby → Mullvad DoT..."
+echo "--- [debug] Initial DNS config (/etc/resolv.conf) ---"
+cat /etc/resolv.conf || echo "not found"
+echo "-----------------------------------------------------"
+
+if command -v opkg >/dev/null 2>&1; then
+    echo "[overdrive] Found opkg. Updating packages..."
+    PKG_OK=0
+    for i in $(seq 1 5); do
+        if opkg update; then
+            PKG_OK=1
+            break
+        fi
+        echo "opkg update failed, retrying ($i/5)..."
+        sleep 5
+    done
+    if [ "$PKG_OK" -ne 1 ]; then
+        echo "[!!] FATAL: opkg update failed."
+        exit 1
+    fi
+    echo "[overdrive] Installing stubby..."
+    opkg install stubby ca-bundle || echo "[!!] opkg install stubby failed"
+elif command -v apk >/dev/null 2>&1; then
+    echo "[overdrive] Found apk. Updating packages..."
+    PKG_OK=0
+    for i in $(seq 1 5); do
+        if apk update; then
+            PKG_OK=1
+            break
+        fi
+        echo "apk update failed, retrying ($i/5)..."
+        sleep 5
+    done
+    if [ "$PKG_OK" -ne 1 ]; then
+        echo "[!!] FATAL: apk update failed."
+        exit 1
+    fi
+    echo "[overdrive] Installing stubby..."
+    apk add stubby ca-bundle || echo "[!!] apk add stubby failed"
+else
+    echo "[!!] FATAL: Neither opkg nor apk found."
+    exit 1
+fi
+
+echo "--- [debug] Stubby binary check ---"
+which stubby || echo "[!!] stubby not found in PATH after install"
+echo "-------------------------------------"
+
+echo "[overdrive] Configuring stubby..."
 while uci -q delete stubby.@resolver[0]; do :; done
 {_MULLVAD_RESOLVER_UCI}
 uci set stubby.global.manual='0'
@@ -115,30 +159,44 @@ uci set stubby.global.round_robin_upstreams='1'
 uci -q delete stubby.global.listen_address
 uci add_list stubby.global.listen_address='127.0.0.1@5453'
 uci add_list stubby.global.listen_address='0::1@5453'
-uci commit stubby
+uci commit stubby || echo "[!!] uci commit stubby failed"
+echo "--- [debug] stubby config verification ---"
+uci show stubby
+echo "------------------------------------------"
 
-echo "[overdrive] Pointing dnsmasq at stubby; advertising LAN DNS {OPENWRT_LAN_DNS}..."
+echo "[overdrive] Configuring dnsmasq..."
 uci -q delete dhcp.@dnsmasq[0].server
 uci add_list dhcp.@dnsmasq[0].server='{OPENWRT_STUBBY_LISTEN}'
 uci set dhcp.@dnsmasq[0].noresolv='1'
 uci set dhcp.@dnsmasq[0].localuse='1'
-# DHCP option 6: clients must use OpenWrt, not upstream Mullvad IPs directly
 uci -q delete dhcp.lan.dhcp_option
 uci add_list dhcp.lan.dhcp_option='6,{OPENWRT_LAN_DNS}'
-uci commit dhcp
+uci commit dhcp || echo "[!!] uci commit dhcp failed"
+echo "--- [debug] dnsmasq config verification ---"
+uci show dhcp.@dnsmasq[0]
+echo "-------------------------------------------"
 
-# Stop relying on VBox/WAN plaintext DNS once DoT is in place
+echo "[overdrive] Disabling ISP DNS..."
 uci -q delete network.wan.dns
 uci set network.wan.peerdns='0'
-uci commit network
+uci commit network || echo "[!!] uci commit network failed"
 
-/etc/init.d/stubby enable
-/etc/init.d/stubby restart
-/etc/init.d/dnsmasq restart
+echo "[overdrive] Restarting services..."
+/etc/init.d/stubby enable || echo "[!!] stubby enable failed"
+/etc/init.d/stubby restart || echo "[!!] stubby restart failed"
+/etc/init.d/dnsmasq restart || echo "[!!] dnsmasq restart failed"
+sleep 5
+
+echo "--- [debug] Process check ---"
+ps w | grep -e 'stubby' -e 'dnsmasq' | grep -v grep || echo "stubby/dnsmasq not running"
+echo "-------------------------------"
+
+echo "--- [debug] Final DNS test from router via stubby ---"
+nslookup google.com 127.0.0.1:5453 || echo "[!!] DNS test via stubby FAILED"
+echo "-----------------------------------------------------"
 
 touch "$DONE"
-echo "[overdrive] Done. Verify: nslookup google.com {OPENWRT_LAN_DNS}"
-nslookup google.com {OPENWRT_LAN_DNS} || true
+echo "[overdrive] Mullvad DoT script finished."
 """
 
 OVERDRIVE_MULLVAD_INIT_D = """#!/bin/sh /etc/rc.common
@@ -166,7 +224,7 @@ start() {
 		done
 		/root/apply_mullvad_dot.sh >>/tmp/overdrive-mullvad-dot.log 2>&1 \\
 			|| echo "[overdrive] Mullvad DoT setup failed; see /tmp/overdrive-mullvad-dot.log" >&2
-	) &
+	)
 }
 
 stop() {
@@ -818,6 +876,11 @@ def main() -> None:
         action="store_true",
         help="After create/start, do not open a serial console window.",
     )
+    parser.add_argument(
+        "--start-alpine-client",
+        action="store_true",
+        help="Start the Alpine client VM after the router is ready.",
+    )
     args = parser.parse_args()
     if args.serial_here:
         serial_only_attach(here=True, force_interactive=True)
@@ -836,6 +899,17 @@ def main() -> None:
         wan_mode=args.wan_mode,
         connect_serial=not args.no_connect_serial,
     )
+
+    if args.start_alpine_client:
+        if setup_alpine_client_vm:
+            print("\n--- Starting Alpine Client VM ---")
+            try:
+                setup_alpine_client_vm(start_vm=True, connect_serial=True)
+                print("[+] Alpine client VM started successfully.")
+            except Exception as e:
+                print(f"[!] Failed to start Alpine client VM: {e}")
+        else:
+            print("\n[!] Alpine client setup script not found, cannot start Alpine VM.")
 
 
 if __name__ == "__main__":

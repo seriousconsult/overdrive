@@ -35,7 +35,6 @@ SCRIPT_DIR = REPO_ROOT / "VM"
 
 PREFERRED_CREATE_ORDER = (
     "create_VM_OpenWrt_router.py",
-    "create_VM_client_browser_pipe.py",
 )
 DEFAULT_SKIP_CREATE_SCRIPTS = frozenset()
 VERIFY_SCRIPT = "verify_lab_from_host.py"
@@ -64,37 +63,6 @@ def discover_create_scripts(*, include_todo: bool) -> list[Path]:
             continue
         runnable.append(path)
     return runnable
-
-
-def wait_for_client_vm_running(timeout_s: float, *, poll_s: float = 2.0) -> bool:
-    """Wait until VirtualBox reports the client VM as running."""
-    paths = get_system_paths(OPENWRT_CLIENT_VM_NAME)
-    vboxmanage = find_vboxmanage(paths)
-    if not vboxmanage:
-        print("[!] VBoxManage not found; cannot wait for client VM state.")
-        return False
-
-    deadline = time.monotonic() + timeout_s
-    last_state: str | None = None
-    while True:
-        state = get_vm_state(vboxmanage, OPENWRT_CLIENT_VM_NAME)
-        if state == "running":
-            print(f"[wait] {OPENWRT_CLIENT_VM_NAME} is running.")
-            return True
-
-        if state != last_state:
-            print(f"[wait] {OPENWRT_CLIENT_VM_NAME} state: {state or 'not registered'}")
-            last_state = state
-
-        remaining_s = deadline - time.monotonic()
-        if remaining_s <= 0:
-            print(
-                f"[!] Timed out after {timeout_s:.0f}s waiting for "
-                f"{OPENWRT_CLIENT_VM_NAME} to be running."
-            )
-            return False
-
-        time.sleep(min(poll_s, remaining_s))
 
 
 def main() -> int:
@@ -155,101 +123,12 @@ def main() -> int:
 
     failures: list[tuple[str, int]] = []
 
-    def run_client_pipe_step(
-        script: Path,
-        *,
-        dry_run: bool,
-        vm_running_timeout_s: float,
-        boot_grace_s: float,
-        serial_ready_timeout_s: float,
-    ) -> int:
-        """Start the client VM synchronously, then open serial in a separate terminal."""
-        setup_cmd = [sys.executable, str(script), "--no-connect-serial", "--recreate"]
-        check_cmd = [
-            sys.executable,
-            str(script),
-            "--serial-check-only",
-            "--serial-ready-timeout",
-            str(serial_ready_timeout_s),
-        ]
-        serial_cmd = [sys.executable, str(script), "--serial-only"]
-
-        print()
-        print(f"=== {script.name} (VM setup, readiness check, then serial window) ===")
-        print("[run] " + " ".join(setup_cmd))
-        if dry_run:
-            print("[run] " + " ".join(check_cmd))
-            print("[run] " + " ".join(serial_cmd) + "  # new terminal")
-            return 0
-
-        rc = subprocess.run(setup_cmd, cwd=str(REPO_ROOT), check=False).returncode
-        if rc != 0:
-            return rc
-
-        if vm_running_timeout_s > 0 and not wait_for_client_vm_running(vm_running_timeout_s):
-            return 1
-
-        if boot_grace_s > 0:
-            print(
-                f"[wait] Giving {script.stem} {boot_grace_s:.0f}s after VM-running state "
-                "before serial probing..."
-            )
-            time.sleep(boot_grace_s)
-
-        print("[run] " + " ".join(check_cmd))
-        rc = subprocess.run(check_cmd, cwd=str(REPO_ROOT), check=False).returncode
-        if rc != 0:
-            print(
-                "[!] Client serial is not usable from WSL. The TCP endpoint may be reachable, "
-                "but no guest ttyS0 output was observed.\n"
-                "    Treating this as a VM setup failure because WSL serial control is required."
-            )
-            return rc
-
-        print("[run] " + " ".join(serial_cmd) + "  # new terminal")
-        if is_wsl_environment():
-            if spawn_wsl_interactive_terminal(
-                serial_cmd,
-                cwd=REPO_ROOT,
-                title="OpenWrt client serial",
-            ):
-                print("[+] Serial console opened in a new Windows terminal tab.")
-                return 0
-            print(
-                "[!] Could not open a new terminal tab. Attach manually:\n"
-                f"    {' '.join(serial_cmd)}"
-            )
-            return 0
-
-        flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-        try:
-            subprocess.Popen(
-                serial_cmd,
-                cwd=str(REPO_ROOT),
-                creationflags=flags,
-                start_new_session=(os.name != "nt"),
-            )
-            print("[+] Serial console started in a new terminal window.")
-            return 0
-        except Exception as exc:
-            print(f"[!] Failed to start serial console process: {type(exc).__name__}: {exc}")
-            return 1
-
     for script in scripts:
-        if script.name == "create_VM_client_browser_pipe.py":
-            rc = run_client_pipe_step(
-                script,
-                dry_run=args.dry_run,
-                vm_running_timeout_s=args.client_vm_running_timeout,
-                boot_grace_s=args.client_boot_grace,
-                serial_ready_timeout_s=args.client_serial_ready_timeout,
-            )
-        else:
-            command = [sys.executable, str(script)]
-            if script.name == "create_VM_OpenWrt_router.py":
-                command.extend(["--start-type", "gui", "--wan-mode", "nat"])
+        command = [sys.executable, str(script)]
+        if script.name == "create_VM_OpenWrt_router.py":
+            command.extend(["--start-type", "gui", "--wan-mode", "nat", "--start-alpine-client"])
 
-            rc = run_step(command, cwd=REPO_ROOT, dry_run=args.dry_run)
+        rc = run_step(command, cwd=REPO_ROOT, dry_run=args.dry_run)
 
         if rc != 0:
             failures.append((script.name, rc))
