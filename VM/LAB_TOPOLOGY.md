@@ -145,7 +145,7 @@ LAN client
 | Client `/etc/resolv.conf` | Expect `nameserver 192.168.1.1` (or systemd-resolved stub `127.0.0.53` with that uplink) |
 | Why not plain Mullvad `:53` | Mullvad public DNS **refuses** unencrypted UDP/TCP 53; DoT/DoH only |
 | Bootstrap | VBox `--natdnshostresolver2 on` on router WAN NAT so `apk`/`opkg` can install **stubby** before DoT is up |
-| Apply script | `VM/apply_mullvad_dot.sh` (also `/root/apply_mullvad_dot.sh` in the guest when injected) |
+| Apply script | `VM/apply_mullvad_dot.py` (also `/root/apply_mullvad_dot.py` in the guest when injected) |
 
 **OpenWrt checks:**
 
@@ -160,8 +160,8 @@ nslookup google.com 192.168.1.1
 **Manual apply if first-boot missed it:**
 
 ```sh
-sh /root/apply_mullvad_dot.sh
-# or paste from host: VM/apply_mullvad_dot.sh
+python3 /root/apply_mullvad_dot.py
+# or paste from host: VM/apply_mullvad_dot.py
 ```
 
 **Client checks:**

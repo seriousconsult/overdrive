@@ -472,7 +472,7 @@ def guest_serial_console_commands() -> list[str]:
             f"{SERIAL_BAUD}n8\"#' /etc/default/grub; "
             "else echo 'GRUB_CMDLINE_LINUX=\"console=tty0 console=ttyS0,"
             f"{SERIAL_BAUD}n8\"' >> /etc/default/grub; fi; "
-            "update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true; "
+            "update-grub || grub-mkconfig -o /boot/grub/grub.cfg; "
             "fi"
         ),
     ]
@@ -995,17 +995,48 @@ def prime_client_vdi_for_intnet_lab(
     lab_net_up_svc_host = work_root / "lab-net-up.service"
     lab_net_up_svc_host.write_text(LAB_NET_UP_SERVICE, encoding="utf-8", newline="\n")
 
-    print("Enabling guest ttyS0 serial login in the VDI...")
-    print(f"Setting guest hostname to {CLIENT_GUEST_HOSTNAME!r} and enabling ttyS0 serial login in the VDI...")
+    print(f"Setting guest hostname, enabling serial, and injecting network tools in a single step...")
 
     try:
+        commands = [
+            vc,
+            "-a",
+            vdi_linux,
+            "--hostname",
+            CLIENT_GUEST_HOSTNAME,
+        ]
+        # Add serial console commands
+        for command in guest_serial_console_commands():
+            commands.extend(("--run-command", command))
+
+        # Add network setup commands
+        commands.extend([
+            "--install",
+            "isc-dhcp-client,dnsutils,iputils-ping",
+            "--copy-in",
+            f"{script_host}:/usr/local/sbin",
+            "--copy-in",
+            f"{lab_net_up_host}:/usr/local/sbin",
+            "--copy-in",
+            f"{netplan_host}:/etc/netplan",
+            "--copy-in",
+            f"{lab_net_up_svc_host}:/etc/systemd/system",
+            "--run-command",
+            (
+                "mv /usr/local/sbin/lab_net_troubleshoot.sh "
+                "/usr/local/sbin/lab-net-troubleshoot && "
+                "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
+                "chmod 0755 /usr/local/sbin/lab-net-up && "
+                "chmod 0600 /etc/netplan/50-openwrt-lan.yaml && "
+                # Prefer our OpenWrt LAN DHCP netplan over cloud-init stubs.
+                "rm -f /etc/netplan/50-cloud-init.yaml /etc/netplan/00-installer-config.yaml && "
+                "systemctl enable systemd-networkd.service systemd-resolved.service lab-net-up.service && "
+                "ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || true"
+            ),
+        ])
+
         result = subprocess.run(
-            [vc, "-a", vdi_linux, "--hostname", CLIENT_GUEST_HOSTNAME]
-            + [
-                item
-                for command in guest_serial_console_commands()
-                for item in ("--run-command", command)
-            ],
+            commands,
             capture_output=True,
             text=True,
             env=virt_env,
@@ -1017,54 +1048,12 @@ def prime_client_vdi_for_intnet_lab(
             raise subprocess.CalledProcessError(result.returncode, result.args)
     except subprocess.CalledProcessError:
         raise RuntimeError(
-            "Could not enable serial-getty@ttyS0 in the guest image. "
-            "The client serial TCP socket may open, but WSL will not get a usable login prompt."
+            "VDI priming failed. This could be due to an issue with libguestfs on your system "
+            "or a problem with the guest image. The serial console and/or networking "
+            "may not work correctly in the client VM."
         )
 
-    print("Injecting lab network (netplan DHCP + lab-net-up + troubleshoot)...")
-    try:
-        result = subprocess.run(
-            [
-                vc,
-                "-a",
-                vdi_linux,
-                "--install",
-                "isc-dhcp-client,dnsutils,iputils-ping",
-                "--copy-in",
-                f"{script_host}:/usr/local/sbin",
-                "--copy-in",
-                f"{lab_net_up_host}:/usr/local/sbin",
-                "--copy-in",
-                f"{netplan_host}:/etc/netplan",
-                "--copy-in",
-                f"{lab_net_up_svc_host}:/etc/systemd/system",
-                "--run-command",
-                (
-                    "mv /usr/local/sbin/lab_net_troubleshoot.sh "
-                    "/usr/local/sbin/lab-net-troubleshoot && "
-                    "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
-                    "chmod 0755 /usr/local/sbin/lab-net-up && "
-                    "chmod 0600 /etc/netplan/50-openwrt-lan.yaml && "
-                    # Prefer our OpenWrt LAN DHCP netplan over cloud-init stubs.
-                    "rm -f /etc/netplan/50-cloud-init.yaml /etc/netplan/00-installer-config.yaml && "
-                    "systemctl enable systemd-networkd.service systemd-resolved.service lab-net-up.service && "
-                    "ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || true"
-                ),
-            ],
-            capture_output=True,
-            text=True,
-            env=virt_env,
-        )
-        if result.returncode != 0:
-            detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-            if detail:
-                print(detail)
-            raise subprocess.CalledProcessError(result.returncode, result.args)
-    except subprocess.CalledProcessError:
-        print(
-            "[!] Optional lab package/helper injection failed, but ttyS0 serial login was enabled."
-        )
-        return True
+    return True
 
     return True
 

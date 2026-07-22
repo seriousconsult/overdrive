@@ -39,10 +39,6 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from detections.common.common_vm import (
-    MULLVAD_DOT_PORT,
-    MULLVAD_DOT_RESOLVERS,
-    OPENWRT_LAN_DNS,
-    OPENWRT_STUBBY_LISTEN,
     ROUTER_SERIAL_PTY_LINK_PATH,
     ROUTER_SERIAL_TCP_PORT,
     ROUTER_SERIAL_UNIX_SOCKET_PATH,
@@ -68,6 +64,12 @@ from detections.common.common_vm import (
     vboxmanage_targets_windows,
     vm_is_registered,
     wsl_to_windows_path,
+)
+from VM.vm_config import (
+    MULLVAD_DOT_PORT,
+    MULLVAD_DOT_RESOLVERS,
+    OPENWRT_LAN_DNS,
+    OPENWRT_STUBBY_LISTEN,
 )
 
 VM_NAME = OPENWRT_ROUTER_VM_NAME
@@ -276,18 +278,18 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
         extra = (
             f"Host copy of the apply script: {apply_path}\n"
             "Paste or scp onto OpenWrt if first-boot auto-setup did not run:\n"
-            "  sh /root/apply_mullvad_dot.sh\n"
+            "  python3 /root/apply_mullvad_dot.py\n"
             "Or paste the same script from the host file above.\n"
         )
     return (
         "\n--- DNS (Mullvad DoT) ---\n"
         f"Upstream: Mullvad DNS-over-TLS on port {MULLVAD_DOT_PORT}: {resolvers}\n"
         f"LAN clients: DHCP option 6 → {OPENWRT_LAN_DNS} (dnsmasq → stubby → Mullvad).\n"
-        "On first boot after WAN is up, OpenWrt runs apply_mullvad_dot.sh automatically\n"
+        "On first boot after WAN is up, OpenWrt runs apply_mullvad_dot.py automatically\n"
         "if the image was injected; log: /tmp/overdrive-mullvad-dot.log\n"
         f"{extra}"
         "Manual apply on OpenWrt console (after WAN works):\n"
-        "  sh /root/apply_mullvad_dot.sh\n"
+        "  python3 /root/apply_mullvad_dot.py\n"
         f"Verify on OpenWrt:  nslookup google.com {OPENWRT_LAN_DNS}\n"
         f"Verify on client:   dig @{OPENWRT_LAN_DNS} google.com +short\n"
         "  cat /etc/resolv.conf   # expect nameserver 192.168.1.1\n"
@@ -574,10 +576,16 @@ def setup_openwrt_vm(
     apply_helper = write_mullvad_dot_helpers(Path(vm_base))
     # Also keep a copy beside the script for easy access from the repo.
     write_mullvad_dot_helpers(Path(SCRIPT_DIR))
+    old_sh_in_script_dir = Path(SCRIPT_DIR) / "apply_mullvad_dot.sh"
+    if old_sh_in_script_dir.exists():
+        try:
+            old_sh_in_script_dir.unlink()
+        except OSError:
+            pass
     if not inject_mullvad_dot_into_openwrt_image(img_path):
         print(
             "[!] Image inject skipped/failed — after OpenWrt WAN is up, run on the router console:\n"
-            "      sh /root/apply_mullvad_dot.sh\n"
+            "      python3 /root/apply_mullvad_dot.py\n"
             f"    (host copy: {apply_helper})"
         )
 
@@ -592,7 +600,7 @@ def setup_openwrt_vm(
         print(
             "[!] Existing VDI may predate Mullvad DoT inject. "
             "Delete the VDI (or re-run after removing it) so convertfromraw picks up the patched image, "
-            "or run apply_mullvad_dot.sh on the OpenWrt console."
+            "or run apply_mullvad_dot.py on the OpenWrt console."
         )
 
     # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir (Windows path for VBoxManage.exe).
