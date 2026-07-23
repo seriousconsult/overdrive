@@ -433,9 +433,7 @@ def connect_router_serial_console(
 ) -> bool:
     """Attach this terminal to the OpenWrt serial console (reuse client TCP bridge)."""
     # Import lazily so --help / create paths stay light if client module is heavy.
-    if SCRIPT_DIR not in sys.path:
-        sys.path.insert(0, SCRIPT_DIR)
-    import create_VM_client_browser_pipe as client_serial  # noqa: PLC0415
+    from VM import create_VM_client_browser_pipe_alpine as client_serial
 
     if vboxmanage_targets_windows(vboxmanage):
         return client_serial.connect_tcp_serial_console(
