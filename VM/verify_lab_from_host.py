@@ -44,10 +44,10 @@ CLIENT_VM = OPENWRT_CLIENT_VM_NAME
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 
 
-def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool) -> list[str]:
+def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool, vm_name: str, port: int) -> list[str]:
     """Verify the client VM serial console endpoint is configured and accepts a host connection."""
     errs: list[str] = []
-    expected_mode, expected_endpoint = serial_uart_mode_and_endpoint(vbox)
+    expected_mode, expected_endpoint = serial_uart_mode_and_endpoint(vbox, tcp_port=port)
     uart1 = info.get("uart1", "")
     uartmode1 = info.get("uartmode1", "")
 
@@ -60,27 +60,27 @@ def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool) -> 
         return errs
 
     if vboxmanage_targets_windows(vbox):
-        ok, detail = probe_tcp_serial(SERIAL_TCP_HOST, SERIAL_TCP_PORT)
+        ok, detail = probe_tcp_serial(SERIAL_TCP_HOST, port)
         if ok:
-            print(f"  [+] {CLIENT_VM} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{SERIAL_TCP_PORT}")
+            print(f"  [+] {vm_name} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{port}")
             print(
                 "      Socket-level check only; this does not prove guest ttyS0 output. "
-                "Run: python VM/create_VM_client_browser_pipe.py --serial-check-only"
+                f"Run: python VM/{'create_VM_client_browser_pipe_alpine.py' if vm_name == 'OpenWrt_LAN_Client_Alpine' else 'create_VM_client_browser_pipe.py'} --serial-only"
             )
         else:
             errs.append(
                 "client serial TCP endpoint did not accept a client. "
                 f"Probe output: {detail}"
             )
-            print(f"  [!] {CLIENT_VM} serial TCP probe failed: {detail}")
+            print(f"  [!] {vm_name} serial TCP probe failed: {detail}")
     else:
         if os.path.exists(expected_endpoint):
-            print(f"  [+] {CLIENT_VM} serial socket exists: {expected_endpoint}")
+            print(f"  [+] {vm_name} serial socket exists: {expected_endpoint}")
         else:
             errs.append(f"client serial socket does not exist: {expected_endpoint}")
 
     if verbose:
-        print(f"  [{CLIENT_VM}] uart1={uart1!r} uartmode1={uartmode1!r}")
+        print(f"  [{vm_name}] uart1={uart1!r} uartmode1={uartmode1!r}")
     return errs
 
 
@@ -166,7 +166,7 @@ def check_router(info: dict[str, str], verbose: bool) -> list[str]:
     return errs
 
 
-def check_client(info: dict[str, str], verbose: bool) -> list[str]:
+def check_client(info: dict[str, str], verbose: bool, vm_name: str) -> list[str]:
     errs: list[str] = []
     nic1 = info.get("nic1", "")
     int1 = info.get("intnet1", "")
@@ -180,7 +180,7 @@ def check_client(info: dict[str, str], verbose: bool) -> list[str]:
 
     if verbose:
         print(
-            f"  [{CLIENT_VM}] nic1={nic1!r} intnet1={int1!r}"
+            f"  [{vm_name}] nic1={nic1!r} intnet1={int1!r}"
         )
     return errs
 
@@ -191,9 +191,16 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
     This is the 'stronger' loop that checks for physical-link issues.
     """
     all_errs = []
+    
+    client_vm = CLIENT_VM
+    client_port = SERIAL_TCP_PORT
+    if not vm_registered(vbox, CLIENT_VM) and vm_registered(vbox, "OpenWrt_LAN_Client_Alpine"):
+        client_vm = "OpenWrt_LAN_Client_Alpine"
+        client_port = 2325
+
     target_vms = [
         (ROUTER_VM, "router"),
-        (CLIENT_VM, "client")
+        (client_vm, "client")
     ]
     
     # Track MACs to find hidden collisions
@@ -241,8 +248,8 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
         if vm == ROUTER_VM:
             all_errs.extend(check_router(info, verbose))
         else:
-            all_errs.extend(check_client(info, verbose))
-            all_errs.extend(check_client_serial_pipe(vbox, info, verbose))
+            all_errs.extend(check_client(info, verbose, vm))
+            all_errs.extend(check_client_serial_pipe(vbox, info, verbose, vm, client_port))
 
     return all_errs
 

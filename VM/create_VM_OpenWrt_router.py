@@ -88,6 +88,7 @@ _MULLVAD_RESOLVER_UCI = "\n".join(
     f"uci add stubby resolver\n"
     f"uci set stubby.@resolver[-1].address='{ip}'\n"
     f"uci set stubby.@resolver[-1].tls_auth_name='{name}'\n"
+    f"uci set stubby.@resolver[-1].port='{MULLVAD_DOT_PORT}'\n"
     f"uci set stubby.@resolver[-1].tls_port='{MULLVAD_DOT_PORT}'"
     for ip, name in MULLVAD_DOT_RESOLVERS
 )
@@ -106,24 +107,14 @@ echo "--- [debug] Initial DNS config (/etc/resolv.conf) ---"
 cat /etc/resolv.conf || echo "not found"
 echo "-----------------------------------------------------"
 
-if command -v opkg >/dev/null 2>&1; then
-    echo "[overdrive] Found opkg. Updating packages..."
-    PKG_OK=0
-    for i in $(seq 1 5); do
-        if opkg update; then
-            PKG_OK=1
-            break
-        fi
-        echo "opkg update failed, retrying ($i/5)..."
-        sleep 5
-    done
-    if [ "$PKG_OK" -ne 1 ]; then
-        echo "[!!] FATAL: opkg update failed."
-        exit 1
-    fi
-    echo "[overdrive] Installing stubby..."
-    opkg install stubby ca-bundle || echo "[!!] opkg install stubby failed"
-elif command -v apk >/dev/null 2>&1; then
+echo "[overdrive] Syncing system time via NTP before configuring Mullvad DoT..."
+echo "[overdrive] Time before NTP sync: \$(date)"
+/etc/init.d/sysntpd stop || true
+ntpd -n -q -p 162.159.200.1 || ntpd -n -q -p 216.239.35.0 || ntpd -n -q -p 0.openwrt.pool.ntp.org || ntpd -n -q -p pool.ntp.org || echo "[!!] NTP sync failed, continuing..."
+/etc/init.d/sysntpd start || true
+echo "[overdrive] Time after NTP sync: \$(date)"
+
+if command -v apk >/dev/null 2>&1; then
     echo "[overdrive] Found apk. Updating packages..."
     PKG_OK=0
     for i in $(seq 1 5); do
@@ -138,8 +129,25 @@ elif command -v apk >/dev/null 2>&1; then
         echo "[!!] FATAL: apk update failed."
         exit 1
     fi
-    echo "[overdrive] Installing stubby..."
-    apk add stubby ca-bundle || echo "[!!] apk add stubby failed"
+    echo "[overdrive] Installing stubby and certs..."
+    apk add stubby ca-certificates || echo "[!!] apk add stubby failed"
+elif command -v opkg >/dev/null 2>&1; then
+    echo "[overdrive] Found opkg. Updating packages..."
+    PKG_OK=0
+    for i in $(seq 1 5); do
+        if opkg update; then
+            PKG_OK=1
+            break
+        fi
+        echo "opkg update failed, retrying ($i/5)..."
+        sleep 5
+    done
+    if [ "$PKG_OK" -ne 1 ]; then
+        echo "[!!] FATAL: opkg update failed."
+        exit 1
+    fi
+    echo "[overdrive] Installing stubby and certs..."
+    opkg install stubby ca-certificates || echo "[!!] opkg install stubby failed"
 else
     echo "[!!] FATAL: Neither opkg nor apk found."
     exit 1
@@ -152,13 +160,14 @@ echo "-------------------------------------"
 echo "[overdrive] Configuring stubby..."
 while uci -q delete stubby.@resolver[0]; do :; done
 {_MULLVAD_RESOLVER_UCI}
-uci set stubby.global.manual='0'
+uci set stubby.global.manual='1'
 uci set stubby.global.trigger='wan'
 uci set stubby.global.tls_authentication='1'
 uci set stubby.global.round_robin_upstreams='1'
+uci set stubby.global.tls_ca_file='/etc/ssl/certs/ca-certificates.crt'
+uci set stubby.global.ca_file='/etc/ssl/certs/ca-certificates.crt'
 uci -q delete stubby.global.listen_address
 uci add_list stubby.global.listen_address='127.0.0.1@5453'
-uci add_list stubby.global.listen_address='0::1@5453'
 uci commit stubby || echo "[!!] uci commit stubby failed"
 echo "--- [debug] stubby config verification ---"
 uci show stubby
@@ -168,10 +177,15 @@ echo "[overdrive] Configuring dnsmasq..."
 uci -q delete dhcp.@dnsmasq[0].server
 uci add_list dhcp.@dnsmasq[0].server='{OPENWRT_STUBBY_LISTEN}'
 uci set dhcp.@dnsmasq[0].noresolv='1'
-uci set dhcp.@dnsmasq[0].localuse='1'
+uci -q delete dhcp.@dnsmasq[0].resolvfile
+uci set dhcp.@dnsmasq[0].localuse='0'
 uci -q delete dhcp.lan.dhcp_option
 uci add_list dhcp.lan.dhcp_option='6,{OPENWRT_LAN_DNS}'
 uci commit dhcp || echo "[!!] uci commit dhcp failed"
+
+echo "[overdrive] Forcing local resolver to use dnsmasq..."
+echo "nameserver 127.0.0.1" > /tmp/resolv.conf
+
 echo "--- [debug] dnsmasq config verification ---"
 uci show dhcp.@dnsmasq[0]
 echo "-------------------------------------------"
@@ -191,8 +205,8 @@ echo "--- [debug] Process check ---"
 ps w | grep -e 'stubby' -e 'dnsmasq' | grep -v grep || echo "stubby/dnsmasq not running"
 echo "-------------------------------"
 
-echo "--- [debug] Final DNS test from router via stubby ---"
-nslookup google.com 127.0.0.1:5453 || echo "[!!] DNS test via stubby FAILED"
+echo "--- [debug] Final DNS test from router via dnsmasq -> stubby ---"
+nslookup google.com 127.0.0.1 || echo "[!!] DNS test via dnsmasq/stubby FAILED"
 echo "-----------------------------------------------------"
 
 touch "$DONE"
@@ -224,7 +238,7 @@ start() {
 		done
 		/root/apply_mullvad_dot.sh >>/tmp/overdrive-mullvad-dot.log 2>&1 \\
 			|| echo "[overdrive] Mullvad DoT setup failed; see /tmp/overdrive-mullvad-dot.log" >&2
-	)
+	) &
 }
 
 stop() {
@@ -336,18 +350,18 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
         extra = (
             f"Host copy of the apply script: {apply_path}\n"
             "Paste or scp onto OpenWrt if first-boot auto-setup did not run:\n"
-            "  python3 /root/apply_mullvad_dot.py\n"
+            "  /root/apply_mullvad_dot.sh\n"
             "Or paste the same script from the host file above.\n"
         )
     return (
         "\n--- DNS (Mullvad DoT) ---\n"
         f"Upstream: Mullvad DNS-over-TLS on port {MULLVAD_DOT_PORT}: {resolvers}\n"
         f"LAN clients: DHCP option 6 → {OPENWRT_LAN_DNS} (dnsmasq → stubby → Mullvad).\n"
-        "On first boot after WAN is up, OpenWrt runs apply_mullvad_dot.py automatically\n"
+        "On first boot after WAN is up, OpenWrt runs apply_mullvad_dot.sh automatically\n"
         "if the image was injected; log: /tmp/overdrive-mullvad-dot.log\n"
         f"{extra}"
         "Manual apply on OpenWrt console (after WAN works):\n"
-        "  python3 /root/apply_mullvad_dot.py\n"
+        "  /root/apply_mullvad_dot.sh\n"
         f"Verify on OpenWrt:  nslookup google.com {OPENWRT_LAN_DNS}\n"
         f"Verify on client:   dig @{OPENWRT_LAN_DNS} google.com +short\n"
         "  cat /etc/resolv.conf   # expect nameserver 192.168.1.1\n"

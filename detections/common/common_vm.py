@@ -742,6 +742,39 @@ def spawn_serial_console_window(
     # Avoid parentheses in titles — they confuse cmd/start if any fallback uses it.
     safe_title = title.replace("(", "").replace(")", "").strip()
 
+    # --- Terminate any existing serial console windows / python sessions first ---
+    print(f"[*] Closing any existing serial console windows for {safe_title}...")
+    if os.name == "nt" or _windows_cmd_available():
+        # Close WT/CMD windows matching the title
+        taskkill_cmd = "taskkill.exe" if os.name != "nt" else "taskkill"
+        subprocess.run([taskkill_cmd, "/F", "/FI", f"WINDOWTITLE eq {safe_title}"], capture_output=True, check=False)
+        # Also kill background python processes running the target script
+        script_pattern = script.name
+        ps_cmd = (
+            f"Get-Process -Name python* -ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.CommandLine -like '*{script_pattern}*' -and $_.Id -ne {os.getpid()} }} | "
+            f"Stop-Process -Force"
+        )
+        if os.name == "nt":
+            subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, check=False)
+        elif is_wsl_environment():
+            subprocess.run(["powershell.exe", "-Command", ps_cmd], capture_output=True, check=False)
+
+    if platform.system().lower() == "linux" or is_wsl_environment():
+        # Terminate Linux/WSL python instances of this script
+        my_pid = os.getpid()
+        script_pattern = script.name
+        try:
+            out = subprocess.check_output(["pgrep", "-f", script_pattern]).decode().strip()
+            for pid_str in out.split():
+                if pid_str.isdigit():
+                    pid = int(pid_str)
+                    if pid != my_pid:
+                        subprocess.run(["kill", "-9", str(pid)], capture_output=True, check=False)
+        except Exception:
+            pass
+    time.sleep(1.0)
+
     # --- Path A: WSL host → new wt window running Linux Python ---
     if is_wsl_environment():
         py = sys.executable or "python3"
