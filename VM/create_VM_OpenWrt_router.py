@@ -7,9 +7,10 @@ on ``eth1``. VirtualBox presents adapters in order as ``eth0``, ``eth1``. So **N
 leg (internal network ``openwrt-lan``) and **NIC2** is **WAN** (bridged or NAT). Client VMs use
 ``--nic1 intnet`` on the same intnet name.
 
-**DNS:** After first boot (once WAN is up), the router installs **stubby**, forwards LAN DNS
-through **dnsmasq → stubby → Mullvad DoT** (``dns.mullvad.net`` / ``base.dns.mullvad.net``), and
-DHCP advertises OpenWrt ``192.168.1.1`` to clients.
+**DNS:** Before convert, the script downloads stubby ``.apk`` deps (OpenWrt 25.12 uses
+**apk**, not opkg) and injects them with ``apply_mullvad_dot.sh`` into the image. After
+start, serial runs that script once (no upload/retry loop) and **requires**
+``whoami.akamai.net`` proves Mullvad (anycast ``194.242.2.x`` or PoP ``*.mullvad.net``).
 
 **Serial console:** COM1 / ``ttyS0`` at 115200 baud (stock OpenWrt already uses
 ``console=ttyS0``). On Windows VirtualBox this is exposed as TCP port **2324** (client uses
@@ -84,137 +85,270 @@ IMAGE_NAME = OPENWRT_IMAGE_NAME
 VDI_NAME = OPENWRT_VDI_NAME
 
 # Written into the OpenWrt image (uci-defaults + init.d) and also printed for manual apply.
+_MULLVAD_STUBBY_YAML_UPSTREAMS = "\n".join(
+    f"  - address_data: {ip}\n"
+    f"    tls_auth_name: \"{name}\"\n"
+    f"    tls_port: {MULLVAD_DOT_PORT}"
+    for ip, name in MULLVAD_DOT_RESOLVERS
+)
+
 _MULLVAD_RESOLVER_UCI = "\n".join(
     f"uci add stubby resolver\n"
     f"uci set stubby.@resolver[-1].address='{ip}'\n"
     f"uci set stubby.@resolver[-1].tls_auth_name='{name}'\n"
-    f"uci set stubby.@resolver[-1].port='{MULLVAD_DOT_PORT}'\n"
     f"uci set stubby.@resolver[-1].tls_port='{MULLVAD_DOT_PORT}'"
     for ip, name in MULLVAD_DOT_RESOLVERS
 )
 
 APPLY_MULLVAD_DOT_SH = f"""#!/bin/sh
 # Overdrive lab: Mullvad DNS-over-TLS via stubby; LAN clients use OpenWrt as DNS.
-set -x # Print every command
+# Idempotent: safe to re-run. Force with: FORCE=1 /root/apply_mullvad_dot.sh
+# Use DEBUG=1 for shell tracing (default set -x flooded serial logs).
+[ "${{DEBUG:-0}}" = "1" ] && set -x
 
 DONE=/etc/overdrive-mullvad-dot.done
-if [ -f "$DONE" ]; then
-    echo "[overdrive] Mullvad DoT setup already completed."
+
+# whoami.akamai.net returns the recursive resolver's source IP as seen by Akamai.
+# Mullvad publishes anycast 194.242.2.x; whoami often returns the PoP unicast behind
+# that anycast (e.g. 193.148.18.30 = us-nyc-dns-601.mullvad.net), NOT 194.242.2.x.
+# ISP/VBox NAT (e.g. Verizon 71.x) means dnsmasq is NOT going through stubby→Mullvad.
+parse_whoami_ip() {{
+  # Last public IPv4 in nslookup/dig output (skip 127.x / 10.x / 192.168.x answers).
+  echo "$1" | grep -Eo '([0-9]{{1,3}}\\.){{3}}[0-9]{{1,3}}' | awk '
+    $0 !~ /^127\\./ && $0 !~ /^10\\./ && $0 !~ /^192\\.168\\./ && $0 !~ /^172\\.(1[6-9]|2[0-9]|3[0-1])\\./ {{ ip=$0 }}
+    END {{ print ip }}
+  '
+}}
+
+verify_mullvad_upstream() {{
+  local out ip
+  if command -v dig >/dev/null 2>&1; then
+    out="$(dig +time=3 +tries=2 +short @127.0.0.1 whoami.akamai.net A 2>/dev/null || true)"
+  else
+    out="$(nslookup whoami.akamai.net 127.0.0.1 2>/dev/null || true)"
+  fi
+  echo "$out"
+  ip="$(parse_whoami_ip "$out")"
+  case "$ip" in
+    194.242.2.*)
+      echo "[overdrive] Upstream whoami=$ip (Mullvad anycast) — OK"
+      return 0
+      ;;
+    "")
+      echo "[!!] Could not parse whoami.akamai.net via 127.0.0.1"
+      return 1
+      ;;
+    71.*|96.*)
+      echo "[!!] Upstream whoami=$ip — ISP/VBox DNS, not Mullvad."
+      return 1
+      ;;
+  esac
+  # PoP unicast behind Mullvad anycast (e.g. 193.148.18.30). Require Mullvad stubby config.
+  if grep -q 'dns.mullvad.net' /etc/stubby/stubby.yml 2>/dev/null; then
+    echo "[overdrive] Upstream whoami=$ip (Mullvad DoT PoP via stubby.yml) — OK"
+    return 0
+  fi
+  echo "[!!] Upstream whoami=$ip but stubby.yml missing dns.mullvad.net."
+  return 1
+}}
+
+if [ -f "$DONE" ] && [ "${{FORCE:-0}}" != "1" ]; then
+  if grep -q 'dns.mullvad.net' /etc/stubby/stubby.yml 2>/dev/null \\
+    && grep -q '127.0.0.1#5453\\|127.0.0.1@5453' /etc/config/dhcp 2>/dev/null \\
+    && verify_mullvad_upstream; then
+    echo "[overdrive] Mullvad DoT already configured (use FORCE=1 to re-apply)."
     exit 0
+  fi
+  echo "[overdrive] DONE marker present but Mullvad upstream not verified; re-applying..."
+  rm -f "$DONE"
 fi
 
-echo "--- [debug] Initial DNS config (/etc/resolv.conf) ---"
-cat /etc/resolv.conf || echo "not found"
-echo "-----------------------------------------------------"
+echo "--- [debug] Initial DNS (/etc/resolv.conf) ---"
+cat /etc/resolv.conf 2>/dev/null || true
+ls -la /tmp/resolv.conf.d 2>/dev/null || true
 
-echo "[overdrive] Syncing system time via NTP before configuring Mullvad DoT..."
-echo "[overdrive] Time before NTP sync: \$(date)"
-/etc/init.d/sysntpd stop || true
-ntpd -n -q -p 162.159.200.1 || ntpd -n -q -p 216.239.35.0 || ntpd -n -q -p 0.openwrt.pool.ntp.org || ntpd -n -q -p pool.ntp.org || echo "[!!] NTP sync failed, continuing..."
-/etc/init.d/sysntpd start || true
-echo "[overdrive] Time after NTP sync: \$(date)"
-
-if command -v apk >/dev/null 2>&1; then
-    echo "[overdrive] Found apk. Updating packages..."
-    PKG_OK=0
-    for i in $(seq 1 5); do
-        if apk update; then
-            PKG_OK=1
-            break
-        fi
-        echo "apk update failed, retrying ($i/5)..."
-        sleep 5
-    done
-    if [ "$PKG_OK" -ne 1 ]; then
-        echo "[!!] FATAL: apk update failed."
-        exit 1
-    fi
-    echo "[overdrive] Installing stubby and certs..."
-    apk add stubby ca-certificates || echo "[!!] apk add stubby failed"
-elif command -v opkg >/dev/null 2>&1; then
-    echo "[overdrive] Found opkg. Updating packages..."
-    PKG_OK=0
-    for i in $(seq 1 5); do
-        if opkg update; then
-            PKG_OK=1
-            break
-        fi
-        echo "opkg update failed, retrying ($i/5)..."
-        sleep 5
-    done
-    if [ "$PKG_OK" -ne 1 ]; then
-        echo "[!!] FATAL: opkg update failed."
-        exit 1
-    fi
-    echo "[overdrive] Installing stubby and certs..."
-    opkg install stubby ca-certificates || echo "[!!] opkg install stubby failed"
+echo "[overdrive] Syncing time (TLS needs correct clock)..."
+/etc/init.d/sysntpd stop 2>/dev/null || true
+# BusyBox ntpd can hang; bound it so serial apply cannot stall forever.
+if command -v timeout >/dev/null 2>&1; then
+  timeout 20 ntpd -n -q -p 1.1.1.1 || timeout 20 ntpd -n -q -p 9.9.9.9 || true
 else
-    echo "[!!] FATAL: Neither opkg nor apk found."
-    exit 1
+  ntpd -n -q -p 1.1.1.1 || ntpd -n -q -p 9.9.9.9 || true
+fi
+/etc/init.d/sysntpd start 2>/dev/null || true
+
+install_stubby() {{
+  if command -v stubby >/dev/null 2>&1; then
+    echo "[overdrive] stubby already installed: $(command -v stubby)"
+    return 0
+  fi
+  # Prefer offline APKs injected into the image (no apk update / mirror fetch).
+  if [ -d /root/overdrive-apks ] && ls /root/overdrive-apks/*.apk >/dev/null 2>&1; then
+    echo "[overdrive] Installing stubby from offline APKs in /root/overdrive-apks..."
+    # OpenWrt 25.12+: apk replaces opkg. Local files need --allow-untrusted.
+    apk add --allow-untrusted /root/overdrive-apks/*.apk || return 1
+    command -v stubby >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  if command -v apk >/dev/null 2>&1; then
+    echo "[overdrive] No offline APKs; apk update + add stubby (needs WAN DNS)..."
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 120 apk update || return 1
+      timeout 180 apk add stubby ca-bundle ca-certificates || return 1
+    else
+      apk update || return 1
+      apk add stubby ca-bundle ca-certificates || return 1
+    fi
+  elif command -v opkg >/dev/null 2>&1; then
+    echo "[overdrive] opkg update (legacy OpenWrt < 25.12)..."
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 180 opkg update || return 1
+      timeout 180 opkg install stubby ca-bundle ca-certificates || return 1
+    else
+      opkg update || return 1
+      opkg install stubby ca-bundle ca-certificates || return 1
+    fi
+  else
+    echo "[!!] FATAL: neither apk nor opkg found"
+    return 1
+  fi
+}}
+
+install_stubby || {{
+  echo "[!!] FATAL: could not install stubby"
+  exit 1
+}}
+
+echo "[overdrive] Writing /etc/stubby/stubby.yml for Mullvad DoT..."
+mkdir -p /etc/stubby
+cat > /etc/stubby/stubby.yml << 'STUBBY_EOF'
+# Generated by overdrive apply_mullvad_dot.sh — Mullvad DNS-over-TLS only.
+resolution_type: GETDNS_RESOLUTION_STUB
+dns_transport_list:
+  - GETDNS_TRANSPORT_TLS
+tls_authentication: GETDNS_AUTHENTICATION_REQUIRED
+tls_query_padding_blocksize: 128
+edns_client_subnet_private: 1
+round_robin_upstreams: 1
+idle_timeout: 10000
+listen_addresses:
+  - 127.0.0.1@5453
+upstream_recursive_servers:
+{_MULLVAD_STUBBY_YAML_UPSTREAMS}
+STUBBY_EOF
+
+# Prefer the packaged CA bundle if present.
+if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+  printf '\\ntls_ca_file: "/etc/ssl/certs/ca-certificates.crt"\\n' >> /etc/stubby/stubby.yml
+elif [ -f /etc/ssl/cert.pem ]; then
+  printf '\\ntls_ca_file: "/etc/ssl/cert.pem"\\n' >> /etc/stubby/stubby.yml
 fi
 
-echo "--- [debug] Stubby binary check ---"
-which stubby || echo "[!!] stubby not found in PATH after install"
-echo "-------------------------------------"
+echo "--- [debug] stubby.yml ---"
+cat /etc/stubby/stubby.yml
 
-echo "[overdrive] Configuring stubby..."
+# manual=1 → use stubby.yml (NOT UCI). Earlier bug: manual=1 + UCI Mullvad = Cloudflare defaults.
+echo "[overdrive] Pointing OpenWrt stubby init at stubby.yml (manual=1)..."
 while uci -q delete stubby.@resolver[0]; do :; done
 {_MULLVAD_RESOLVER_UCI}
 uci set stubby.global.manual='1'
 uci set stubby.global.trigger='wan'
 uci set stubby.global.tls_authentication='1'
 uci set stubby.global.round_robin_upstreams='1'
-uci set stubby.global.tls_ca_file='/etc/ssl/certs/ca-certificates.crt'
-uci set stubby.global.ca_file='/etc/ssl/certs/ca-certificates.crt'
 uci -q delete stubby.global.listen_address
 uci add_list stubby.global.listen_address='127.0.0.1@5453'
-uci commit stubby || echo "[!!] uci commit stubby failed"
-echo "--- [debug] stubby config verification ---"
-uci show stubby
-echo "------------------------------------------"
+uci commit stubby
 
-echo "[overdrive] Configuring dnsmasq..."
+echo "[overdrive] dnsmasq → stubby ONLY; ignore WAN/VBox resolv (noresolv)..."
 uci -q delete dhcp.@dnsmasq[0].server
 uci add_list dhcp.@dnsmasq[0].server='{OPENWRT_STUBBY_LISTEN}'
 uci set dhcp.@dnsmasq[0].noresolv='1'
-uci -q delete dhcp.@dnsmasq[0].resolvfile
-uci set dhcp.@dnsmasq[0].localuse='0'
+# Keep a resolvfile path that cannot reintroduce ISP DNS if noresolv is ignored.
+uci set dhcp.@dnsmasq[0].resolvfile='/tmp/resolv.conf.overdrive-empty'
+: > /tmp/resolv.conf.overdrive-empty
+uci set dhcp.@dnsmasq[0].localuse='1'
 uci -q delete dhcp.lan.dhcp_option
 uci add_list dhcp.lan.dhcp_option='6,{OPENWRT_LAN_DNS}'
-uci commit dhcp || echo "[!!] uci commit dhcp failed"
+uci commit dhcp
 
-echo "[overdrive] Forcing local resolver to use dnsmasq..."
-echo "nameserver 127.0.0.1" > /tmp/resolv.conf
-
-echo "--- [debug] dnsmasq config verification ---"
-uci show dhcp.@dnsmasq[0]
-echo "-------------------------------------------"
-
-echo "[overdrive] Disabling ISP DNS..."
+echo "[overdrive] Disable WAN plaintext DNS (peerdns) and reload network..."
 uci -q delete network.wan.dns
 uci set network.wan.peerdns='0'
-uci commit network || echo "[!!] uci commit network failed"
+uci commit network
+# Critical: peerdns=0 does nothing until network reloads; otherwise VBox NAT DNS
+# (host→ISP) stays in /tmp/resolv.conf.d/resolv.conf.auto and dnsmasq may use it.
+/etc/init.d/network reload 2>/dev/null || ubus call network reload 2>/dev/null || true
+sleep 2
 
-echo "[overdrive] Restarting services..."
-/etc/init.d/stubby enable || echo "[!!] stubby enable failed"
-/etc/init.d/stubby restart || echo "[!!] stubby restart failed"
-/etc/init.d/dnsmasq restart || echo "[!!] dnsmasq restart failed"
-sleep 5
+# Router itself must query local dnsmasq (which forwards to stubby → Mullvad DoT).
+mkdir -p /tmp/resolv.conf.d
+: > /tmp/resolv.conf.overdrive-empty
+# Neutralize auto resolv from WAN DHCP / natdnshostresolver.
+rm -f /tmp/resolv.conf.d/resolv.conf.auto
+echo "# overdrive: ISP resolv disabled; use dnsmasq→stubby" > /tmp/resolv.conf.d/resolv.conf.auto
+rm -f /tmp/resolv.conf
+echo "nameserver 127.0.0.1" > /tmp/resolv.conf
+if [ -L /etc/resolv.conf ]; then
+  :
+else
+  echo "nameserver 127.0.0.1" > /etc/resolv.conf
+fi
 
-echo "--- [debug] Process check ---"
-ps w | grep -e 'stubby' -e 'dnsmasq' | grep -v grep || echo "stubby/dnsmasq not running"
-echo "-------------------------------"
+/etc/init.d/stubby enable
+/etc/init.d/stubby restart
+/etc/init.d/dnsmasq restart
+sleep 4
 
-echo "--- [debug] Final DNS test from router via dnsmasq -> stubby ---"
-nslookup google.com 127.0.0.1 || echo "[!!] DNS test via dnsmasq/stubby FAILED"
-echo "-----------------------------------------------------"
+echo "--- [debug] listeners / processes ---"
+netstat -lnu 2>/dev/null | grep -E '5453|:53' || ss -uln 2>/dev/null | grep -E '5453|:53' || true
+ps w | grep -E 'stubby|dnsmasq' | grep -v grep || true
+echo "--- [debug] dnsmasq UCI ---"
+uci get dhcp.@dnsmasq[0].noresolv; uci get dhcp.@dnsmasq[0].server
+uci get network.wan.peerdns
+
+echo "--- [debug] DNS via dnsmasq ---"
+if ! nslookup google.com 127.0.0.1; then
+  echo "[!!] DNS via dnsmasq FAILED — check /tmp/overdrive-mullvad-dot.log and stubby"
+  exit 1
+fi
+
+# Prove stubby is answering on 5453 (DoT path), not just VBox/WAN DNS.
+echo "--- [debug] stubby :5453 ---"
+if command -v dig >/dev/null 2>&1; then
+  dig +time=3 +tries=1 @127.0.0.1 -p 5453 google.com +short || {{
+    echo "[!!] stubby on 5453 did not answer — DoT path broken"
+    exit 1
+  }}
+elif command -v nslookup >/dev/null 2>&1; then
+  nslookup -port=5453 google.com 127.0.0.1 || {{
+    echo "[!!] stubby on 5453 did not answer — DoT path broken"
+    exit 1
+  }}
+else
+  echo "[!!] neither dig nor nslookup available to probe stubby"
+  exit 1
+fi
+
+grep -q 'dns.mullvad.net' /etc/stubby/stubby.yml || {{
+  echo "[!!] stubby.yml missing Mullvad — abort"
+  exit 1
+}}
+
+echo "--- [debug] whoami (Mullvad anycast 194.242.2.x or PoP *.mullvad.net) ---"
+verify_mullvad_upstream || {{
+  echo "[!!] Resolving works but upstream is not Mullvad — refusing to mark DONE"
+  echo "     Check: uci get dhcp.@dnsmasq[0].noresolv; uci get dhcp.@dnsmasq[0].server"
+  echo "     Check: ps | grep stubby; cat /etc/stubby/stubby.yml"
+  exit 1
+}}
 
 touch "$DONE"
-echo "[overdrive] Mullvad DoT script finished."
+echo "[overdrive] Mullvad DoT active: client → {OPENWRT_LAN_DNS} → stubby → Mullvad :{MULLVAD_DOT_PORT}"
 """
 
 OVERDRIVE_MULLVAD_INIT_D = """#!/bin/sh /etc/rc.common
-# One-shot: after WAN is up, install stubby and switch DNS to Mullvad DoT.
+# After WAN is up, install stubby and switch DNS to Mullvad DoT.
+# Retries until whoami proves Mullvad (or attempts exhausted).
 START=99
 STOP=10
 
@@ -223,10 +357,8 @@ boot() {
 }
 
 start() {
-	[ -f /etc/overdrive-mullvad-dot.done ] && return 0
 	[ -x /root/apply_mullvad_dot.sh ] || return 1
 	(
-		# Wait for WAN connectivity (VBox NAT DNS / peerdns bootstrap).
 		i=0
 		while [ "$i" -lt 90 ]; do
 			if ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 \\
@@ -236,8 +368,16 @@ start() {
 			i=$((i + 1))
 			sleep 2
 		done
-		/root/apply_mullvad_dot.sh >>/tmp/overdrive-mullvad-dot.log 2>&1 \\
-			|| echo "[overdrive] Mullvad DoT setup failed; see /tmp/overdrive-mullvad-dot.log" >&2
+		attempt=1
+		while [ "$attempt" -le 3 ]; do
+			echo "[overdrive] Mullvad DoT apply attempt $attempt" >>/tmp/overdrive-mullvad-dot.log
+			if FORCE=1 /root/apply_mullvad_dot.sh >>/tmp/overdrive-mullvad-dot.log 2>&1; then
+				exit 0
+			fi
+			attempt=$((attempt + 1))
+			sleep 10
+		done
+		echo "[overdrive] Mullvad DoT setup FAILED after retries; see /tmp/overdrive-mullvad-dot.log" >&2
 	) &
 }
 
@@ -281,15 +421,230 @@ def write_mullvad_dot_helpers(dest_dir: Path) -> Path:
     return apply_path
 
 
-def inject_mullvad_dot_into_openwrt_image(img_path: str) -> bool:
+# OpenWrt 25.12+ ships apk packages (.apk), not .ipk. Versions come from index.json.
+_OPENWRT_APK_FEEDS = {
+    "packages": "https://downloads.openwrt.org/releases/{release}/packages/x86_64/packages",
+    "base": "https://downloads.openwrt.org/releases/{release}/packages/x86_64/base",
+    "targets": "https://downloads.openwrt.org/releases/{release}/targets/x86/64/packages",
+}
+
+# Curated closure for stubby (DEPENDS: libyaml + getdns + ca-certs) and getdns/libunbound.
+_STUBBY_APK_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("packages", "stubby"),
+    ("packages", "getdns"),
+    ("packages", "libyaml"),
+    ("packages", "libunbound"),
+    ("base", "ca-bundle"),
+    ("base", "ca-certificates"),
+    ("base", "libopenssl"),
+    ("base", "libevent2"),
+    ("base", "libmnl"),
+)
+
+
+def _openwrt_release_from_url(url: str = OPENWRT_URL) -> str:
+    import re
+
+    m = re.search(r"/releases/([^/]+)/", url)
+    if not m:
+        raise RuntimeError(f"Cannot parse OpenWrt release from URL: {url}")
+    return m.group(1)
+
+
+def fetch_openwrt_stubby_apks(*, cache_dir: Path | None = None) -> Path:
     """
-    Best-effort: place apply script + init.d + uci-defaults into the OpenWrt rootfs.
-    Uses guestfish when available. Returns True on success.
+    Download stubby + dependency .apk files for the OpenWrt release in OPENWRT_URL.
+    Returns the directory containing the .apk files (cached on disk).
+
+    OpenWrt 25.12 apk filenames are often ABI-suffixed (e.g. libopenssl → libopenssl3-….apk),
+    so we resolve the real filename from each feed's directory listing.
+    """
+    import json
+    import re
+
+    release = _openwrt_release_from_url()
+    dest = cache_dir or (Path(SCRIPT_DIR) / ".cache" / f"openwrt-{release}-stubby-apks")
+    dest.mkdir(parents=True, exist_ok=True)
+
+    def _list_apk_hrefs(feed_url: str) -> set[str]:
+        html = urllib.request.urlopen(feed_url + "/", timeout=60).read().decode(
+            "utf-8", "replace"
+        )
+        return set(re.findall(r'href="([^"]+\.apk)"', html))
+
+    def _resolve_apk_filename(hrefs: set[str], name: str, version: str) -> str:
+        exact = f"{name}-{version}.apk"
+        if exact in hrefs:
+            return exact
+        # ABI forms: libopenssl3-VER.apk  /  libevent2-7-VER.apk
+        abi1 = re.compile(rf"^{re.escape(name)}\d+-{re.escape(version)}\.apk$")
+        abi2 = re.compile(rf"^{re.escape(name)}-\d+-{re.escape(version)}\.apk$")
+        for h in sorted(hrefs):
+            if abi1.match(h) or abi2.match(h):
+                return h
+        raise RuntimeError(
+            f"No .apk file for {name}-{version} in feed listing "
+            f"(tried exact and ABI-suffixed names)"
+        )
+
+    indexes: dict[str, dict[str, str]] = {}
+    hrefs_by_feed: dict[str, set[str]] = {}
+    for feed, tmpl in _OPENWRT_APK_FEEDS.items():
+        feed_url = tmpl.format(release=release)
+        idx_url = feed_url + "/index.json"
+        print(f"[overdrive] Fetching package index {feed}...")
+        with urllib.request.urlopen(idx_url, timeout=60) as resp:
+            data = json.load(resp)
+        indexes[feed] = {k: str(v) for k, v in data["packages"].items()}
+        print(f"[overdrive] Listing {feed} package files...")
+        hrefs_by_feed[feed] = _list_apk_hrefs(feed_url)
+
+    # libevent2 often pulls core; include both so offline apk add is self-contained.
+    packages = list(_STUBBY_APK_PACKAGES)
+    if ("base", "libevent2-core") not in packages:
+        packages.append(("base", "libevent2-core"))
+
+    paths: list[Path] = []
+    for feed, name in packages:
+        ver = indexes.get(feed, {}).get(name)
+        if not ver:
+            raise RuntimeError(
+                f"Package {name!r} not found in OpenWrt {release} feed {feed!r}"
+            )
+        filename = _resolve_apk_filename(hrefs_by_feed[feed], name, ver)
+        local = dest / filename
+        url = f"{_OPENWRT_APK_FEEDS[feed].format(release=release)}/{filename}"
+        if local.is_file() and local.stat().st_size > 0:
+            print(f"[overdrive]   cached {filename}")
+        else:
+            print(f"[overdrive]   downloading {filename}...")
+            urllib.request.urlretrieve(url, local)
+        paths.append(local)
+
+    print(f"[+] Offline stubby APKs ready ({len(paths)} packages) in {dest}")
+    return dest
+
+
+def _libguestfs_env() -> dict[str, str]:
+    """Environment for guestfish/virt-customize (WSL-friendly, same as Alpine priming)."""
+    import glob
+    import re
+    import tarfile
+    import urllib.request
+
+    env = os.environ.copy()
+    env.setdefault("LIBGUESTFS_BACKEND", "direct")
+
+    # Prefer a fixed appliance — WSL supermin often exits 1 without this.
+    def _find_appliance() -> str | None:
+        candidates = [
+            "/usr/lib64/guestfs/appliance",
+            "/usr/lib/guestfs/appliance",
+            "/usr/local/lib/guestfs/appliance",
+        ]
+        for c in candidates:
+            d = Path(c)
+            if (d / "README.fixed").is_file() and all(
+                (d / x).is_file() for x in ("kernel", "initrd", "root")
+            ):
+                return str(d)
+        for cr in (
+            Path.home() / ".cache" / "libguestfs" / "appliance",
+            Path.home() / ".cache" / "guestfs" / "appliance",
+        ):
+            if not cr.exists():
+                continue
+            for d in cr.glob("**/"):
+                if not d.is_dir():
+                    continue
+                if (d / "README.fixed").is_file() and all(
+                    (d / x).is_file() for x in ("kernel", "initrd", "root")
+                ):
+                    return str(d)
+        return None
+
+    appliance = _find_appliance()
+    if appliance is None:
+        try:
+            cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            index_url = "https://download.libguestfs.org/binaries/appliance/"
+            index_html = urllib.request.urlopen(index_url, timeout=60).read().decode(
+                "utf-8", errors="replace"
+            )
+            versions = re.findall(r"(appliance-\d+(?:\.\d+)+)\.tar\.xz", index_html)
+            if versions:
+
+                def verkey(s: str) -> tuple[int, ...]:
+                    return tuple(int(x) for x in s.replace("appliance-", "").split("."))
+
+                latest = max(versions, key=verkey)
+                tar_name = f"{latest}.tar.xz"
+                tar_path = cache_dir / tar_name
+                extract_root = cache_dir / latest
+                if not any(
+                    (p / "README.fixed").is_file() for p in [extract_root, *extract_root.glob("**/")]
+                    if p.is_dir()
+                ):
+                    if not tar_path.exists():
+                        print(f"[libguestfs] Downloading fixed appliance: {tar_name} ...")
+                        urllib.request.urlretrieve(f"{index_url}{tar_name}", tar_path)
+                    print(f"[libguestfs] Extracting fixed appliance into {extract_root} ...")
+                    if extract_root.exists():
+                        shutil.rmtree(extract_root)
+                    extract_root.mkdir(parents=True, exist_ok=True)
+                    with tarfile.open(tar_path, mode="r:xz") as tf:
+                        tf.extractall(path=extract_root)
+                for d in [extract_root, *extract_root.glob("**/")]:
+                    if (
+                        d.is_dir()
+                        and (d / "README.fixed").is_file()
+                        and all((d / x).is_file() for x in ("kernel", "initrd", "root"))
+                    ):
+                        appliance = str(d)
+                        break
+        except Exception as exc:
+            print(f"[!] Could not download libguestfs fixed appliance: {exc}")
+
+    if appliance:
+        env["LIBGUESTFS_PATH"] = appliance
+        print(f"[libguestfs] Using fixed appliance: LIBGUESTFS_PATH={appliance}")
+    else:
+        # Last resort: point supermin at a real host kernel (WSL).
+        boot_kernels = sorted(glob.glob("/boot/vmlinuz*"))
+        if boot_kernels:
+            kernel = max(boot_kernels, key=lambda p: os.path.getmtime(p))
+            m = re.sub(r"^/boot/vmlinuz-?", "", os.path.basename(kernel))
+            env["SUPERMIN_KERNEL"] = kernel
+            mod_dir = f"/lib/modules/{m}"
+            if Path(mod_dir).is_dir():
+                env["SUPERMIN_MODULES"] = mod_dir
+            print(f"[libguestfs] Using SUPERMIN_KERNEL={kernel}")
+
+    return env
+
+
+def inject_mullvad_dot_into_openwrt_image(
+    img_path: str,
+    *,
+    apk_dir: Path | None = None,
+) -> bool:
+    """
+    Place apply script + init.d + uci-defaults (+ optional offline stubby APKs)
+    into the OpenWrt rootfs. Tries guestfish, then virt-customize.
     """
     guestfish = shutil.which("guestfish")
-    if not guestfish:
-        print("[!] guestfish not found; skipping image inject of Mullvad DoT scripts.")
+    virt_customize = shutil.which("virt-customize")
+    if not guestfish and not virt_customize:
+        print("[!] guestfish/virt-customize not found; cannot inject Mullvad DoT scripts.")
         return False
+
+    apk_files: list[Path] = []
+    if apk_dir is not None:
+        apk_files = sorted(Path(apk_dir).glob("*.apk"))
+        if not apk_files:
+            print(f"[!] No .apk files in {apk_dir}")
+            return False
 
     with tempfile.TemporaryDirectory(prefix="overdrive_owrt_dns_") as tmp:
         tmp_path = Path(tmp)
@@ -299,8 +654,18 @@ def inject_mullvad_dot_into_openwrt_image(img_path: str) -> bool:
         apply.write_text(APPLY_MULLVAD_DOT_SH, encoding="utf-8", newline="\n")
         initd.write_text(OVERDRIVE_MULLVAD_INIT_D, encoding="utf-8", newline="\n")
         uci_def.write_text(UCI_DEFAULTS_ENABLE_MULLVAD, encoding="utf-8", newline="\n")
+        env = _libguestfs_env()
 
-        gf_script = f"""\
+        apk_upload_lines = ""
+        if apk_files:
+            apk_upload_lines = "mkdir-p /root/overdrive-apks\n"
+            for apk in apk_files:
+                apk_upload_lines += (
+                    f"upload {apk.as_posix()} /root/overdrive-apks/{apk.name}\n"
+                )
+
+        if guestfish:
+            gf_script = f"""\
 run
 list-filesystems
 # Prefer second ext partition (rootfs on combined images); fall back to first.
@@ -312,35 +677,532 @@ mkdir-p /etc/rc.d
 upload {apply.as_posix()} /root/apply_mullvad_dot.sh
 upload {initd.as_posix()} /etc/init.d/overdrive-mullvad-dot
 upload {uci_def.as_posix()} /etc/uci-defaults/99-overdrive-mullvad-dot
-chmod 0755 /root/apply_mullvad_dot.sh
+{apk_upload_lines}chmod 0755 /root/apply_mullvad_dot.sh
 chmod 0755 /etc/init.d/overdrive-mullvad-dot
 chmod 0755 /etc/uci-defaults/99-overdrive-mullvad-dot
 ln-sf ../init.d/overdrive-mullvad-dot /etc/rc.d/S99overdrive-mullvad-dot
+# Prove files landed (guestfish download fails the run if missing).
+download /root/apply_mullvad_dot.sh {tmp_path.as_posix()}/_verify_apply.sh
 sync
 umount /
 """
-        print(f"Injecting Mullvad DoT first-boot scripts into {img_path}...")
-        result = subprocess.run(
-            [guestfish, "--rw", "-a", img_path],
-            input=gf_script,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            # Retry with sda1 in case partition layout differs
-            gf_script_sda1 = gf_script.replace("mount /dev/sda2 /", "mount /dev/sda1 /")
+            print(
+                f"Injecting Mullvad DoT scripts"
+                f"{f' + {len(apk_files)} APKs' if apk_files else ''} "
+                f"into {img_path} (guestfish)..."
+            )
             result = subprocess.run(
                 [guestfish, "--rw", "-a", img_path],
-                input=gf_script_sda1,
+                input=gf_script,
                 capture_output=True,
                 text=True,
+                env=env,
             )
-        if result.returncode != 0:
+            if result.returncode != 0:
+                gf_script_sda1 = gf_script.replace("mount /dev/sda2 /", "mount /dev/sda1 /")
+                result = subprocess.run(
+                    [guestfish, "--rw", "-a", img_path],
+                    input=gf_script_sda1,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+            if result.returncode == 0 and (tmp_path / "_verify_apply.sh").is_file():
+                print("[+] Mullvad DoT scripts injected into OpenWrt image (guestfish).")
+                return True
             detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
             print(f"[!] guestfish inject failed:\n{detail}")
+
+        if virt_customize:
+            print(
+                f"Injecting Mullvad DoT scripts"
+                f"{f' + {len(apk_files)} APKs' if apk_files else ''} "
+                f"into {img_path} (virt-customize)..."
+            )
+            cmd = [
+                virt_customize,
+                "-a",
+                img_path,
+                "--mkdir",
+                "/root",
+                "--mkdir",
+                "/root/overdrive-apks",
+                "--mkdir",
+                "/etc/init.d",
+                "--mkdir",
+                "/etc/uci-defaults",
+                "--mkdir",
+                "/etc/rc.d",
+                "--upload",
+                f"{apply.as_posix()}:/root/apply_mullvad_dot.sh",
+                "--upload",
+                f"{initd.as_posix()}:/etc/init.d/overdrive-mullvad-dot",
+                "--upload",
+                f"{uci_def.as_posix()}:/etc/uci-defaults/99-overdrive-mullvad-dot",
+            ]
+            for apk in apk_files:
+                cmd.extend(
+                    ["--upload", f"{apk.as_posix()}:/root/overdrive-apks/{apk.name}"]
+                )
+            cmd.extend(
+                [
+                    "--chmod",
+                    "0755:/root/apply_mullvad_dot.sh",
+                    "--chmod",
+                    "0755:/etc/init.d/overdrive-mullvad-dot",
+                    "--chmod",
+                    "0755:/etc/uci-defaults/99-overdrive-mullvad-dot",
+                    "--link",
+                    "/etc/init.d/overdrive-mullvad-dot:/etc/rc.d/S99overdrive-mullvad-dot",
+                ]
+            )
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            if result.returncode == 0:
+                print("[+] Mullvad DoT scripts injected into OpenWrt image (virt-customize).")
+                return True
+            detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+            print(f"[!] virt-customize inject failed:\n{detail}")
+
+    return False
+
+
+def _open_router_serial_socket(*, timeout_s: float = 60.0) -> "socket.socket":
+    """Connect to the OpenWrt COM1 TCP serial endpoint."""
+    import socket
+
+    from detections.common.common_vm import serial_tcp_host_candidates
+
+    last_err: OSError | None = None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for host in serial_tcp_host_candidates(SERIAL_TCP_HOST):
+            try:
+                sock = socket.create_connection((host, ROUTER_SERIAL_TCP_PORT), timeout=2.0)
+                sock.settimeout(0.5)
+                return sock
+            except OSError as exc:
+                last_err = exc
+        time.sleep(0.5)
+    raise RuntimeError(f"Could not open router serial TCP :{ROUTER_SERIAL_TCP_PORT}: {last_err}")
+
+
+def _serial_drain(sock, *, wait_s: float = 0.3) -> str:
+    """Read whatever is already pending on the serial socket."""
+    buf = bytearray()
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            chunk = sock.recv(8192)
+            if chunk:
+                buf.extend(chunk)
+                deadline = time.monotonic() + wait_s
+            else:
+                break
+        except OSError:
+            time.sleep(0.05)
+    return buf.decode("utf-8", errors="replace")
+
+
+def _serial_exchange(sock, payload: str, *, wait_s: float = 2.0) -> str:
+    """Send CRLF-terminated text and read available reply."""
+    sock.sendall(payload.encode("utf-8", errors="replace"))
+    return _serial_drain(sock, wait_s=wait_s)
+
+
+# OpenWrt ash + VBox serial wraps ~80 cols and corrupts long typed lines.
+_SERIAL_MAX_CMD = 76
+
+
+def _serial_line_has_marker(buf: str, marker: str) -> bool:
+    """True if marker appears as its own output line (not inside local-echoed ``echo MARKER``)."""
+    for line in buf.replace("\r", "\n").splitlines():
+        if line.strip() == marker:
+            return True
+    return False
+
+
+def _serial_run_marked(sock, command: str, *, marker: str, wait_s: float = 15.0) -> str:
+    """Run a short command; wait until marker appears as its own line.
+
+    Must not match the local echo of ``echo <marker>`` (substring match is wrong).
+    """
+    if len(command) > _SERIAL_MAX_CMD:
+        raise ValueError(
+            f"serial command too long ({len(command)}>{_SERIAL_MAX_CMD}): {command!r}"
+        )
+    if len(marker) > 12:
+        raise ValueError(f"serial marker too long: {marker!r}")
+    _serial_drain(sock, wait_s=0.2)
+    # Send command and marker on SEPARATE lines so wrap cannot glue/corrupt them.
+    sock.sendall(f"{command}\r".encode("utf-8", errors="replace"))
+    time.sleep(0.15)
+    sock.sendall(f"echo {marker}\r".encode("utf-8", errors="replace"))
+    buf = ""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        buf += _serial_drain(sock, wait_s=0.4)
+        if _serial_line_has_marker(buf, marker):
+            break
+    return buf
+
+
+def _serial_status_digit(sock, *, check_cmd: str, marker: str) -> str:
+    """Run check_cmd that writes a single digit to /tmp/st, then cat it.
+
+    Never trust echoed ``echo HAVE`` / ``echo OK`` on serial — local echo always
+    contains those strings even when the guest command failed.
+    """
+    _serial_run_marked(sock, "rm -f /tmp/st", marker=f"{marker}0", wait_s=3.0)
+    _serial_run_marked(sock, check_cmd, marker=f"{marker}1", wait_s=5.0)
+    out = _serial_run_marked(sock, "cat /tmp/st", marker=f"{marker}2", wait_s=3.0)
+    digit = "?"
+    for line in out.replace("\r", "\n").splitlines():
+        s = line.strip()
+        if s.isdigit() and len(s) <= 3:
+            digit = s
+    return digit
+
+
+def _guest_has_apply_script(sock) -> bool:
+    """True if /root/apply_mullvad_dot.sh exists and contains Mullvad apply markers."""
+    # grep exit code 0 => found. Write $? so we don't rely on echoed OK/HAVE.
+    digit = _serial_status_digit(
+        sock,
+        check_cmd="grep -q verify_mullvad /root/apply_mullvad_dot.sh; echo $? >/tmp/st",
+        marker="HV",
+    )
+    return digit == "0"
+
+
+def _serial_output_is_mullvad_whoami(sock, who_out: str) -> bool:
+    """True if whoami shows Mullvad anycast or a public IP via Mullvad-configured stubby."""
+    import re
+
+    if re.search(r"\b194\.242\.2\.\d+\b", who_out):
+        m = re.search(r"\b194\.242\.2\.\d+\b", who_out)
+        print(f"[overdrive] whoami anycast {m.group(0)} — Mullvad OK")
+        return True
+
+    candidates: list[str] = []
+    for ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", who_out):
+        if ip.startswith(("127.", "10.", "192.168.", "0.")):
+            continue
+        if re.match(r"172\.(1[6-9]|2\d|3[0-1])\.", ip):
+            continue
+        # Common ISP / VBox host-resolver leftovers (not Mullvad).
+        if ip.startswith(("71.", "96.")):
+            print(f"[overdrive] whoami {ip} looks like ISP/VBox DNS — not Mullvad")
             return False
-    print("[+] Mullvad DoT scripts injected into OpenWrt image.")
+        if ip not in candidates:
+            candidates.append(ip)
+
+    if not candidates:
+        return False
+
+    # Confirm stubby is aimed at Mullvad; whoami then returns PoP unicast (e.g. 193.148.18.30),
+    # not necessarily 194.242.2.x. PTR via stubby is often NXDOMAIN, so do not require it.
+    digit = _serial_status_digit(
+        sock,
+        check_cmd="grep -q dns.mullvad.net /etc/stubby/stubby.yml; echo $? >/tmp/st",
+        marker="CF",
+    )
+    if digit != "0":
+        print("[overdrive] stubby.yml missing dns.mullvad.net — not Mullvad")
+        return False
+
+    print(f"[overdrive] whoami {candidates[0]} via Mullvad stubby config — OK")
     return True
+
+
+def _wait_for_openwrt_shell(sock, *, timeout_s: float = 180.0) -> None:
+    """Nudge the serial console until an ash/root prompt appears."""
+    deadline = time.monotonic() + timeout_s
+    collected = ""
+    while time.monotonic() < deadline:
+        collected += _serial_exchange(sock, "\r", wait_s=1.0)
+        lower = collected.lower()
+        if "please press enter" in lower or "press enter to activate" in lower:
+            collected += _serial_exchange(sock, "\r", wait_s=1.0)
+        if any(p in collected for p in ("root@OpenWrt", "root@openwrt", "# ")):
+            # Clear any partial line.
+            _serial_exchange(sock, "\r", wait_s=0.5)
+            return
+        time.sleep(1.0)
+    raise RuntimeError(
+        "OpenWrt serial shell did not appear in time. "
+        f"Last output:\n{collected[-1500:]}"
+    )
+
+
+def _serial_upload_b64_file(sock, *, remote_path: str, data: bytes) -> None:
+    """Upload bytes to remote_path via short base64 printf chunks (no long lines).
+
+    Never deletes ``remote_path`` until a verified decode succeeds (writes via temp).
+    """
+    import base64
+    import re
+
+    expected = len(data)
+    b64 = base64.b64encode(data).decode("ascii")
+    tmp_b64 = "/tmp/od.b64"
+    tmp_out = "/tmp/od.new"
+    _serial_run_marked(sock, f"rm -f {tmp_b64} {tmp_out}", marker="UP0", wait_s=3.0)
+    # printf '%s' '<chunk>' >> /tmp/od.b64  must stay <= _SERIAL_MAX_CMD.
+    chunk_size = 40
+    chunks = [b64[i : i + chunk_size] for i in range(0, len(b64), chunk_size)]
+    for i, piece in enumerate(chunks, start=1):
+        cmd = f"printf '%s' '{piece}' >> {tmp_b64}"
+        if len(cmd) > _SERIAL_MAX_CMD:
+            raise ValueError(f"upload chunk cmd too long: {len(cmd)}")
+        # Unique markers so a stale "U" line cannot satisfy the next chunk.
+        marker = f"U{i % 1000}"
+        _serial_run_marked(sock, cmd, marker=marker, wait_s=5.0)
+        if i == 1 or i % 50 == 0 or i == len(chunks):
+            print(f"[overdrive]   upload chunk {i}/{len(chunks)}")
+
+    def _remote_size(path: str) -> int:
+        out = _serial_run_marked(sock, f"wc -c {path}", marker="SZ", wait_s=5.0)
+        m = re.search(rf"(\d+)\s+{re.escape(path)}", out)
+        if m:
+            return int(m.group(1))
+        for line in out.replace("\r", "\n").splitlines():
+            m2 = re.match(r"^\s*(\d+)\s", line)
+            if m2:
+                return int(m2.group(1))
+        return -1
+
+    b64_size = _remote_size(tmp_b64)
+    if b64_size != len(b64):
+        raise RuntimeError(
+            f"Serial upload incomplete: b64 size={b64_size} expected={len(b64)}"
+        )
+
+    # BusyBox base64 decodes stdin — do NOT pass the filename as an arg.
+    _serial_run_marked(
+        sock,
+        f"base64 -d < {tmp_b64} > {tmp_out}",
+        marker="D1",
+        wait_s=15.0,
+    )
+    size = _remote_size(tmp_out)
+    if size != expected:
+        _serial_run_marked(
+            sock,
+            f"base64 -D < {tmp_b64} > {tmp_out}",
+            marker="D4",
+            wait_s=15.0,
+        )
+        size = _remote_size(tmp_out)
+
+    if size != expected:
+        raise RuntimeError(
+            f"Serial upload decode failed: size={size} expected={expected}. "
+            "Rely on image inject instead."
+        )
+
+    digit = _serial_status_digit(
+        sock,
+        check_cmd=f"grep -q verify_mullvad {tmp_out}; echo $? >/tmp/st",
+        marker="D3",
+    )
+    if digit != "0":
+        raise RuntimeError(
+            f"Serial upload content check failed (grep_exit={digit})"
+        )
+
+    # Atomic replace — existing remote_path kept until this succeeds.
+    _serial_run_marked(sock, f"mv -f {tmp_out} {remote_path}", marker="MV", wait_s=3.0)
+    _serial_run_marked(sock, f"chmod 0755 {remote_path}", marker="D2", wait_s=3.0)
+    print(f"[overdrive]   upload OK ({size} bytes)")
+
+
+def ensure_mullvad_dot_over_serial(
+    *,
+    timeout_s: float = 240.0,
+    vboxmanage: str | None = None,
+    allow_serial_upload: bool = False,
+) -> None:
+    """
+    After VM start: run image-injected apply_mullvad_dot.sh once, require Mullvad whoami.
+
+    Offline stubby APKs must already be in the image (/root/overdrive-apks). Serial upload
+    of the script is optional last-resort only — never used for multi-MB package installs.
+    """
+    import re
+    import socket
+
+    print(
+        f"[overdrive] Waiting for OpenWrt serial and applying Mullvad DoT "
+        f"(timeout {int(timeout_s)}s)..."
+    )
+
+    if vboxmanage:
+        try:
+            endpoint = router_serial_endpoint(vboxmanage)
+            refresh_live_router_serial(vboxmanage, endpoint)
+            time.sleep(2.0)
+        except Exception as exc:
+            print(f"[!] Could not refresh serial backend before apply: {exc}")
+
+    sock = _open_router_serial_socket(timeout_s=min(90.0, timeout_s))
+    try:
+        _wait_for_openwrt_shell(sock, timeout_s=min(180.0, timeout_s))
+
+        # Stop any first-boot background apply so we own a single run.
+        _serial_run_marked(sock, "killall apply_mullvad_dot.sh", marker="K1", wait_s=3.0)
+
+        wan_deadline = time.monotonic() + min(120.0, timeout_s)
+        while time.monotonic() < wan_deadline:
+            out = _serial_run_marked(
+                sock,
+                "ping -c1 -W2 1.1.1.1 >/dev/null && echo WAN_OK",
+                marker="WAN",
+                wait_s=6.0,
+            )
+            if _serial_line_has_marker(out, "WAN_OK"):
+                print("[overdrive] WAN reachable from OpenWrt.")
+                break
+            print("[overdrive]   waiting for WAN...")
+            time.sleep(2.0)
+        else:
+            print("[!] WAN not confirmed; continuing apply anyway...")
+
+        # Fast path first — does not need apply script (survives a bad serial upload).
+        who0 = _serial_run_marked(
+            sock,
+            "nslookup whoami.akamai.net 127.0.0.1",
+            marker="WHO0",
+            wait_s=20.0,
+        )
+        if _serial_output_is_mullvad_whoami(sock, who0):
+            _serial_run_marked(
+                sock,
+                "touch /etc/overdrive-mullvad-dot.done",
+                marker="DONE0",
+                wait_s=3.0,
+            )
+            print("[+] Mullvad DoT already active on OpenWrt.")
+            return
+
+        if not _guest_has_apply_script(sock):
+            if not allow_serial_upload:
+                raise RuntimeError(
+                    "/root/apply_mullvad_dot.sh missing on guest and DNS is not Mullvad yet. "
+                    "Recreate the router (guestfish injects the script + offline APKs)."
+                )
+            print("[overdrive] Guest missing apply script; uploading once over serial...")
+            try:
+                _serial_upload_b64_file(
+                    sock,
+                    remote_path="/root/apply_mullvad_dot.sh",
+                    data=APPLY_MULLVAD_DOT_SH.encode("utf-8"),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Serial upload of apply script failed. "
+                    "Recreate the router so guestfish injects the script + APKs."
+                ) from exc
+        else:
+            print("[overdrive] Using /root/apply_mullvad_dot.sh from image.")
+
+        apk_digit = _serial_status_digit(
+            sock,
+            check_cmd="ls /root/overdrive-apks/*.apk >/dev/null 2>&1; echo $? >/tmp/st",
+            marker="AK",
+        )
+        if apk_digit != "0":
+            print(
+                "[!] No offline APKs in /root/overdrive-apks — "
+                "apply will try apk update (slow, often fails)."
+            )
+        else:
+            print("[overdrive] Offline stubby APKs present on guest.")
+
+        # Capture exit code in the same line so $? is from apply, not from echo MARKER.
+        apply_cmd = "FORCE=1 /root/apply_mullvad_dot.sh >/tmp/a.log 2>&1; echo $? >/tmp/a.ex"
+        print("[overdrive] Running FORCE=1 /root/apply_mullvad_dot.sh ...")
+        apply_out = _serial_run_marked(
+            sock,
+            apply_cmd,
+            marker="APDONE",
+            wait_s=min(150.0, timeout_s),
+        )
+        if not _serial_line_has_marker(apply_out, "APDONE"):
+            print(f"[!] Apply did not finish cleanly:\n{apply_out[-2000:]}")
+
+        exit_digit = _serial_status_digit(
+            sock,
+            check_cmd="cp /tmp/a.ex /tmp/st 2>/dev/null || echo 9 >/tmp/st",
+            marker="EX",
+        )
+        log_tail = _serial_run_marked(sock, "tail -30 /tmp/a.log", marker="LG", wait_s=10.0)
+        print(f"[overdrive] Apply exit={exit_digit}")
+        print(log_tail[-1500:])
+
+        who = _serial_run_marked(
+            sock,
+            "nslookup whoami.akamai.net 127.0.0.1",
+            marker="WHO",
+            wait_s=25.0,
+        )
+        if _serial_output_is_mullvad_whoami(sock, who):
+            # Guest apply may still exit non-zero if its verify only accepted 194.242.2.x;
+            # host accepts Mullvad anycast PoP unicast (*.mullvad.net PTR) too.
+            _serial_run_marked(
+                sock,
+                "touch /etc/overdrive-mullvad-dot.done",
+                marker="DONE1",
+                wait_s=3.0,
+            )
+            print("[+] Mullvad DoT verified on OpenWrt.")
+            return
+
+        # One cold-start retry (clock/WAN), still no upload loop.
+        print("[!] whoami not Mullvad yet; one retry after short delay...")
+        print(who[-1500:])
+        time.sleep(8.0)
+        apply_out = _serial_run_marked(
+            sock,
+            apply_cmd,
+            marker="AP2",
+            wait_s=min(120.0, timeout_s),
+        )
+        exit_digit = _serial_status_digit(
+            sock,
+            check_cmd="cp /tmp/a.ex /tmp/st 2>/dev/null || echo 9 >/tmp/st",
+            marker="EX2",
+        )
+        log_tail = _serial_run_marked(sock, "tail -40 /tmp/a.log", marker="LG2", wait_s=10.0)
+        print(f"[overdrive] Retry apply exit={exit_digit}")
+        print(log_tail[-2000:])
+        who = _serial_run_marked(
+            sock,
+            "nslookup whoami.akamai.net 127.0.0.1",
+            marker="WHO2",
+            wait_s=25.0,
+        )
+        if _serial_output_is_mullvad_whoami(sock, who):
+            _serial_run_marked(
+                sock,
+                "touch /etc/overdrive-mullvad-dot.done",
+                marker="DONE2",
+                wait_s=3.0,
+            )
+            print("[+] Mullvad DoT verified on OpenWrt.")
+            return
+
+        raise RuntimeError(
+            "OpenWrt Mullvad DoT was not verified after create.\n"
+            "Expected Mullvad DNS (anycast 194.242.2.x or PoP *.mullvad.net) "
+            "via dnsmasq→stubby.\n"
+            f"apply exit={exit_digit}\n{log_tail[-2500:]}\n{who[-1500:]}"
+        )
+    finally:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
 
 
 def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
@@ -357,13 +1219,17 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
         "\n--- DNS (Mullvad DoT) ---\n"
         f"Upstream: Mullvad DNS-over-TLS on port {MULLVAD_DOT_PORT}: {resolvers}\n"
         f"LAN clients: DHCP option 6 → {OPENWRT_LAN_DNS} (dnsmasq → stubby → Mullvad).\n"
-        "On first boot after WAN is up, OpenWrt runs apply_mullvad_dot.sh automatically\n"
-        "if the image was injected; log: /tmp/overdrive-mullvad-dot.log\n"
+        "create_VM_OpenWrt_router.py downloads stubby .apk deps, injects them + apply script\n"
+        "into the image, then after start runs apply once over serial and requires\n"
+        "Mullvad DNS (whoami anycast 194.242.2.x or PoP *.mullvad.net).\n"
+        "Log on router: /tmp/overdrive-mullvad-dot.log\n"
         f"{extra}"
-        "Manual apply on OpenWrt console (after WAN works):\n"
-        "  /root/apply_mullvad_dot.sh\n"
-        f"Verify on OpenWrt:  nslookup google.com {OPENWRT_LAN_DNS}\n"
-        f"Verify on client:   dig @{OPENWRT_LAN_DNS} google.com +short\n"
+        "Re-apply on OpenWrt console if needed:\n"
+        "  FORCE=1 /root/apply_mullvad_dot.sh\n"
+        "Verify on OpenWrt:  nslookup whoami.akamai.net 127.0.0.1\n"
+        "  # expect 194.242.2.x OR PTR of that IP is *.mullvad.net\n"
+        "  grep dns.mullvad.net /etc/stubby/stubby.yml\n"
+        f"Verify on client:   dig +short whoami.akamai.net\n"
         "  cat /etc/resolv.conf   # expect nameserver 192.168.1.1\n"
     )
 
@@ -644,34 +1510,38 @@ def setup_openwrt_vm(
     # Keep your existing downloader/converter flow:
     download_openwrt_image(OPENWRT_URL, img_path)
     apply_helper = write_mullvad_dot_helpers(Path(vm_base))
-    # Also keep a copy beside the script for easy access from the repo.
+    # Keep a copy beside the script for manual use.
     write_mullvad_dot_helpers(Path(SCRIPT_DIR))
-    old_sh_in_script_dir = Path(SCRIPT_DIR) / "apply_mullvad_dot.sh"
-    if old_sh_in_script_dir.exists():
-        try:
-            old_sh_in_script_dir.unlink()
-        except OSError:
-            pass
-    if not inject_mullvad_dot_into_openwrt_image(img_path):
-        print(
-            "[!] Image inject skipped/failed — after OpenWrt WAN is up, run on the router console:\n"
-            "      python3 /root/apply_mullvad_dot.py\n"
-            f"    (host copy: {apply_helper})"
+
+    apk_dir = fetch_openwrt_stubby_apks()
+    injected = inject_mullvad_dot_into_openwrt_image(img_path, apk_dir=apk_dir)
+    if not injected:
+        raise RuntimeError(
+            "Image inject failed (need guestfish/virt-customize + libguestfs). "
+            "Offline stubby APKs + apply script must be baked into the disk — "
+            "serial upload is too slow/fragile for OpenWrt 25.12 apk packages.\n"
+            f"Host apply script: {apply_helper}\n"
+            f"APK cache: {apk_dir}"
         )
 
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
     vms_root_for_vbox = wsl_to_windows_path(vms_root) if paths["is_wsl"] else vms_root
 
-    if not os.path.exists(vdi_path):
-        print("Converting raw image to VDI...")
-        run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
-    else:
-        print("VDI already exists; skipping conversion.")
-        print(
-            "[!] Existing VDI may predate Mullvad DoT inject. "
-            "Delete the VDI (or re-run after removing it) so convertfromraw picks up the patched image, "
-            "or run apply_mullvad_dot.py on the OpenWrt console."
-        )
+    # Always rebuild VDI from the (possibly just-injected) raw image.
+    if os.path.exists(vdi_path):
+        print(f"Removing stale VDI so convertfromraw uses the current image: {vdi_path}")
+        try:
+            os.remove(vdi_path)
+        except OSError as exc:
+            print(f"[!] Could not remove VDI ({exc}); attempting VBox closemedium...")
+            subprocess.run(
+                [vboxmanage, "closemedium", "disk", dst_path, "--delete"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+    print("Converting raw image to VDI...")
+    run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
 
     # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir (Windows path for VBoxManage.exe).
     if not vm_is_registered(vboxmanage, VM_NAME):
@@ -717,8 +1587,8 @@ def setup_openwrt_vm(
         wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
         wan_note = f"bridged → {bridge_interface!r} (WAN / uplink)"
     else:
-        # Host resolver is bootstrap only: so apk/opkg can resolve package mirrors
-        # before stubby + Mullvad DoT is installed on first boot.
+        # Host resolver is bootstrap only (NTP / WAN reachability before DoT).
+        # stubby packages are injected offline — no apk update over WAN required.
         wan_nic_args = [
             "--nic2",
             "nat",
@@ -791,11 +1661,29 @@ def setup_openwrt_vm(
     # IMPORTANT: Do not call get_vm_state() here; it is not imported and the VM may
     # already be running by the time this function executes.
     print(f"[+] VM start command issued for {VM_NAME!r} with --type {start_type!r}.")
+
+    # Apply + verify Mullvad DoT over serial before handing the console to the user.
+    # First-boot init is best-effort; this is the correctness guarantee for every create.
+    try:
+        ensure_mullvad_dot_over_serial(
+            timeout_s=240.0,
+            vboxmanage=vboxmanage,
+            allow_serial_upload=False,
+        )
+    except Exception as exc:
+        print(f"[!!] FATAL: Mullvad DoT not active after create: {exc}")
+        print(mullvad_dot_console_instructions(apply_helper))
+        print(router_serial_instructions(vboxmanage, serial_endpoint))
+        raise RuntimeError(
+            "Router VM started but DNS is not Mullvad DoT. "
+            "See /tmp/overdrive-mullvad-dot.log on the OpenWrt serial console."
+        ) from exc
+
     print(mullvad_dot_console_instructions(apply_helper))
     print(router_serial_instructions(vboxmanage, serial_endpoint))
 
     if connect_serial:
-        time.sleep(3)
+        time.sleep(1)
         # New window by default — keep the create/start shell free.
         spawned = spawn_serial_console_window(
             Path(__file__).resolve(),
@@ -889,6 +1777,11 @@ def main() -> None:
         help="After create/start, do not open a serial console window.",
     )
     parser.add_argument(
+        "--apply-mullvad-only",
+        action="store_true",
+        help="Do not recreate the VM; only upload/run Mullvad DoT apply over serial and verify.",
+    )
+    parser.add_argument(
         "--start-alpine-client",
         action="store_true",
         help="Start the Alpine client VM after the router is ready.",
@@ -905,6 +1798,21 @@ def main() -> None:
         return
     if args.enable_serial:
         enable_serial_on_existing_router()
+        return
+    if args.apply_mullvad_only:
+        paths = get_system_paths(VM_NAME)
+        vboxmanage = find_vboxmanage(paths)
+        if not vboxmanage:
+            raise RuntimeError(get_vboxmanage_install_hint())
+        if get_vm_state(vboxmanage, VM_NAME) != "running":
+            raise RuntimeError(f"{VM_NAME} is not running. Start it first.")
+        print("Close any OpenWrt serial window on TCP 2324 (this needs exclusive access).")
+        ensure_mullvad_dot_over_serial(
+            timeout_s=240.0,
+            vboxmanage=vboxmanage,
+            allow_serial_upload=False,
+        )
+        print("[+] Mullvad DoT OK. On Alpine: dig +short whoami.akamai.net  # Mullvad anycast or PoP")
         return
     setup_openwrt_vm(
         start_type=args.start_type,

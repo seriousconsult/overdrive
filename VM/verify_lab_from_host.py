@@ -44,7 +44,15 @@ CLIENT_VM = OPENWRT_CLIENT_VM_NAME
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 
 
-def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool, vm_name: str, port: int) -> list[str]:
+def check_client_serial_pipe(
+    vbox: str,
+    info: dict[str, str],
+    verbose: bool,
+    vm_name: str,
+    port: int,
+    *,
+    vm_running: bool,
+) -> list[str]:
     """Verify the client VM serial console endpoint is configured and accepts a host connection."""
     errs: list[str] = []
     expected_mode, expected_endpoint = serial_uart_mode_and_endpoint(vbox, tcp_port=port)
@@ -56,6 +64,13 @@ def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool, vm_
     if uartmode1 != f"{expected_mode},{expected_endpoint}":
         errs.append(
             f"client serial: expected uartmode1='{expected_mode},{expected_endpoint}', got {uartmode1!r}"
+        )
+        return errs
+
+    if not vm_running:
+        print(
+            f"  [i] {vm_name} is not running — serial TCP :{port} cannot accept connections yet "
+            f"(uartmode1={uartmode1!r} looks configured)."
         )
         return errs
 
@@ -84,20 +99,30 @@ def check_client_serial_pipe(vbox: str, info: dict[str, str], verbose: bool, vm_
     return errs
 
 
+def resolve_lab_client_vm(vbox: str) -> tuple[str, int]:
+    """Prefer the Alpine lab client; fall back to the legacy Ubuntu client name."""
+    alpine = "OpenWrt_LAN_Client_Alpine"
+    if vm_registered(vbox, alpine):
+        return alpine, 2325
+    if vm_registered(vbox, CLIENT_VM):
+        return CLIENT_VM, SERIAL_TCP_PORT
+    return alpine, 2325
+
+
 def check_advanced_nic(info: dict[str, str], vm_name: str) -> list[str]:
     """Checks for Promiscuous mode and Adapter Type."""
     errs = []
     # Check NIC 1 (usually the LAN in your setup)
     promisc = info.get("promisc1", "deny")
     adapter_type = info.get("nictype1", "")
-    
+
     if promisc == "deny":
         # Warning only, as it might work without it, but allow-vms is safer for bridges
         print(f"  [!] {vm_name} NIC1 Promiscuous mode is 'deny'. If bridge fails, set to 'allow-vms'.")
-    
+
     if "virtio" not in adapter_type.lower():
         print(f"  [i] {vm_name} NIC1 uses {adapter_type}. VirtIO is recommended for OpenWrt performance.")
-    
+
     return errs
 
 
@@ -191,18 +216,20 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
     This is the 'stronger' loop that checks for physical-link issues.
     """
     all_errs = []
-    
-    client_vm = CLIENT_VM
-    client_port = SERIAL_TCP_PORT
-    if not vm_registered(vbox, CLIENT_VM) and vm_registered(vbox, "OpenWrt_LAN_Client_Alpine"):
-        client_vm = "OpenWrt_LAN_Client_Alpine"
-        client_port = 2325
+
+    client_vm, client_port = resolve_lab_client_vm(vbox)
+    print(f"Lab client VM:         {client_vm} (serial TCP {client_port})")
+    if client_vm == "OpenWrt_LAN_Client_Alpine" and vm_registered(vbox, CLIENT_VM):
+        print(
+            f"  [i] Ignoring legacy {CLIENT_VM!r} (still registered but not the Alpine lab client)."
+        )
+    print()
 
     target_vms = [
         (ROUTER_VM, "router"),
-        (client_vm, "client")
+        (client_vm, "client"),
     ]
-    
+
     # Track MACs to find hidden collisions
     seen_macs: dict[str, str] = {}
 
@@ -249,7 +276,16 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
             all_errs.extend(check_router(info, verbose))
         else:
             all_errs.extend(check_client(info, verbose, vm))
-            all_errs.extend(check_client_serial_pipe(vbox, info, verbose, vm, client_port))
+            all_errs.extend(
+                check_client_serial_pipe(
+                    vbox,
+                    info,
+                    verbose,
+                    vm,
+                    client_port,
+                    vm_running=(st == "running"),
+                )
+            )
 
     return all_errs
 

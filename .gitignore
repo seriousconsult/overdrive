@@ -28,3 +28,4 @@ Thumbs.db
 # --- Other ---
 *.png
 TODO.md
+VM/.cache/

@@ -45,6 +45,7 @@ def get_linux_info():
             "socat": "socat",
             "minicom": "minicom",
             "nmap": "nmap",
+            "curl": "curl",
         }
     if shutil.which("apt"):
         return {
@@ -57,6 +58,7 @@ def get_linux_info():
             "socat": "socat",
             "minicom": "minicom",
             "nmap": "nmap",
+            "curl": "curl",
         }
     return None
 
@@ -153,8 +155,8 @@ def install_system_deps():
     else:
         print("[*] Chrome already installed.")
 
-    # 4) nmap / minicom / socat
-    for key in ["nmap", "minicom", "socat"]:
+    # 4) nmap / minicom / socat / curl
+    for key in ["nmap", "minicom", "socat", "curl"]:
         cmd = info[key]
         if not have_cmd(cmd):
             print(f"[*] Installing {cmd}...")

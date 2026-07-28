@@ -15,6 +15,9 @@ Serial console endpoint:
   The VM has COM1 wired to the guest's ``ttyS0`` login console at 115200 baud. This is useful when
   DHCP, graphics, SSH, or the browser environment is broken.
 
+  Boot is unattended: VDI priming rewrites extlinux to ``DEFAULT <label>`` + ``TOTALTIMEOUT``
+  (VirtualBox serial noise cancels plain ``TIMEOUT``, which otherwise waits forever for Enter).
+  After start, the script also sends a few CR nudges on the serial port.
   Which endpoint you connect to depends on the **host VirtualBox is actually running on**:
 
   * Windows host / Windows VirtualBox:
@@ -594,7 +597,7 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--root-password",
         "password:osboxes.org",
         "--run-command",
-        "mkdir -p /usr/local/sbin && echo 'my-alpine-client' > /etc/hostname && apk update && apk add bash bind-tools iputils socat",
+        "mkdir -p /usr/local/sbin && echo 'my-alpine-client' > /etc/hostname && apk update && apk add bash bind-tools iputils socat curl",
         "--copy-in",
         f"{interfaces_host}:/etc/network",
         "--copy-in",
@@ -612,11 +615,80 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
             "chmod 0755 /etc/init.d/lab-net-up && "
             "rc-update add lab-net-up default && "
             "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
-            "echo ttyS0 >> /etc/securetty || true"
+            "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
+            # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox
+            # serial noise cancels TIMEOUT so the menu waits forever for Enter.
+            # Boot the MENU DEFAULT / first LABEL directly + TOTALTIMEOUT.
+            "for f in /boot/extlinux.conf /boot/syslinux/syslinux.cfg /boot/syslinux.cfg "
+            "/media/*/boot/syslinux/syslinux.cfg; do "
+            "[ -f \"$f\" ] || continue; "
+            "DEF=$(awk 'BEGIN{l=\"\"} "
+            "tolower($1)==\"label\"{l=$2; next} "
+            "tolower($1)==\"menu\" && tolower($2)==\"default\"{print l; exit}' \"$f\"); "
+            "[ -n \"$DEF\" ] || DEF=$(awk 'tolower($1)==\"label\"{print $2; exit}' \"$f\"); "
+            "tmp=$(mktemp); "
+            "awk 'BEGIN{ignore=0} "
+            "tolower($1)==\"serial\"{next} "
+            "tolower($1)==\"timeout\"{next} "
+            "tolower($1)==\"totaltimeout\"{next} "
+            "tolower($1)==\"prompt\"{next} "
+            "tolower($1)==\"default\"{next} "
+            "tolower($1)==\"noescape\"{next} "
+            "tolower($1)==\"ui\"{next} "
+            "tolower($1)==\"menu\" && (tolower($2)==\"title\"||tolower($2)==\"hidden\"||tolower($2)==\"autoboot\"||tolower($2)==\"separator\"){next} "
+            "{print}' \"$f\" > \"$tmp\"; "
+            "{ "
+            "echo 'SERIAL 0 115200'; "
+            "echo 'PROMPT 0'; "
+            "echo 'NOESCAPE 1'; "
+            "echo 'TIMEOUT 5'; "
+            "echo 'TOTALTIMEOUT 20'; "
+            "[ -n \"$DEF\" ] && echo \"DEFAULT $DEF\"; "
+            "echo; "
+            "cat \"$tmp\"; "
+            "} > \"$f.new\"; "
+            "mv \"$f.new\" \"$f\"; rm -f \"$tmp\"; "
+            # Ensure kernel gets a serial console.
+            "grep -q 'console=ttyS0' \"$f\" || "
+            "sed -i -E 's/^([[:space:]]*(APPEND|append)[[:space:]].*)$/\\1 console=ttyS0,115200/' \"$f\"; "
+            "echo \"[overdrive] unattended bootloader: $f default=${DEF:-none}\"; "
+            "done"
         ),
     ]
     subprocess.run(commands, check=True, env=virt_env)
     return True
+
+
+def nudge_alpine_boot_menu(*, rounds: int = 8, interval_s: float = 1.0) -> None:
+    """Send Enter a few times on COM1 in case the boot menu is still waiting.
+
+    Primary fix is unattended extlinux (TOTALTIMEOUT + DEFAULT label). This is a
+    short, non-interactive safety net so create never depends on a human keypress.
+    """
+    import socket
+
+    print("[overdrive] Nudging Alpine serial boot (Enter) for unattended start...")
+    deadline = time.monotonic() + 20.0
+    last_err: OSError | None = None
+    while time.monotonic() < deadline:
+        for host in serial_tcp_host_candidates(SERIAL_TCP_HOST):
+            try:
+                with socket.create_connection((host, ALPINE_SERIAL_TCP_PORT), timeout=2.0) as sock:
+                    sock.settimeout(0.5)
+                    for _ in range(rounds):
+                        sock.sendall(b"\r")
+                        time.sleep(interval_s)
+                        try:
+                            while sock.recv(4096):
+                                pass
+                        except OSError:
+                            pass
+                print("[overdrive] Boot nudge sent.")
+                return
+            except OSError as exc:
+                last_err = exc
+        time.sleep(0.5)
+    print(f"[!] Could not nudge Alpine serial boot ({last_err}); relying on extlinux TOTALTIMEOUT.")
 
 
 def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_vdi_prime: bool = False) -> None:
@@ -664,8 +736,15 @@ def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_
     print(f"Starting {VM_NAME}...")
     run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
 
+    # Unattended: don't leave the Syslinux menu waiting for a human Enter.
+    time.sleep(2)
+    try:
+        nudge_alpine_boot_menu()
+    except Exception as exc:
+        print(f"[!] Boot nudge failed: {exc}")
+
     if connect_serial:
-        time.sleep(2)
+        time.sleep(1)
         extra_args = ["--force-interactive-serial", "--serial-port", str(ALPINE_SERIAL_TCP_PORT)]
         spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"LAN Alpine Client serial ({ALPINE_SERIAL_TCP_PORT})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
         if not spawned:
