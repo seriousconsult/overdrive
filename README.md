@@ -16,6 +16,26 @@ Batch runner extras: `0` means skipped due to `TODO`; `Error` means failed, time
 
 ## Run
 
+Initial setup:
+
+```bash
+python3 setup_virtual_env.py
+```
+
+Non-interactive setup for scripts/CI:
+
+```bash
+python3 setup_virtual_env.py --non-interactive
+```
+
+`--non-interactive` uses `sudo -n` for system packages and `setcap`, so it exits
+instead of prompting if passwordless sudo is not already configured. To avoid all
+privileged setup, use:
+
+```bash
+python3 setup_virtual_env.py --non-interactive --skip-system-deps --skip-capabilities
+```
+
 ```bash
 cd /path/to/overdrive
 source virtual_env/bin/activate   # optional

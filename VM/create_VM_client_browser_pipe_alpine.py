@@ -41,7 +41,7 @@ Serial console endpoint:
 
 
 Username: root
-Password: osboxes.org
+Password: configured by ALPINE_CLIENT_ROOT_PASSWORD in VM/vm_config.py
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ from detections.common.common_vm import (
     vm_is_registered,
     wsl_to_windows_path,
 )
+from VM.vm_config import ALPINE_CLIENT_ROOT_PASSWORD
 
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = "OpenWrt_LAN_Client_Alpine"
@@ -595,7 +596,7 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--hostname",
         CLIENT_GUEST_HOSTNAME,
         "--root-password",
-        "password:osboxes.org",
+        f"password:{ALPINE_CLIENT_ROOT_PASSWORD}",
         "--run-command",
         "mkdir -p /usr/local/sbin && echo 'my-alpine-client' > /etc/hostname && apk update && apk add bash bind-tools iputils socat curl",
         "--copy-in",
