@@ -1,5 +1,24 @@
 # --- Security / Secrets ---
 .env
+*.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.kdbx
+*.age
+*.enc
+secrets.*
+credentials.*
 *.log
 *.pot
 *.pyc
@@ -19,13 +38,60 @@ share/
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 
 # OS generated files
 .DS_Store
 Thumbs.db
 
+# --- Run Outputs / Local Artifacts ---
+detection_results.*
+results/
+reports/
+artifacts/
+downloads/
+screenshots/
+*.har
+*.pcap
+*.pcapng
+*.cap
+
+# Browser/session state can contain cookies, history, profile IDs, and tokens.
+browser_profile*/
+chrome_profile*/
+firefox_profile*/
+selenium_profile*/
+user-data-dir*/
+Default/
+Local State
+Cookies
+History
+
+# --- VM / Lab Generated Artifacts ---
+VM/.cache/
+VM/vbox_logs/
+VM/apply_mullvad_dot.sh
+*.vdi
+*.vmdk
+*.vhd
+*.vhdx
+*.qcow2
+*.img
+*.img.gz
+*.iso
+*.ova
+*.ovf
+*.apk
+*.rpm
+*.deb
+*.sock
+*.pty
+
 # --- Other ---
 *.png
 TODO.md
-VM/.cache/

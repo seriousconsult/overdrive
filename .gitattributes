@@ -1,0 +1,24 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.tar binary
+*.apk binary
+*.deb binary
+*.rpm binary
+*.vdi binary
+*.vmdk binary
+*.vhd binary
+*.vhdx binary
+*.qcow2 binary
+*.img binary
+*.iso binary
+*.ova binary
+*.ovf binary

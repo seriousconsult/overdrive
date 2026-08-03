@@ -21,7 +21,7 @@ Serial console endpoint:
   Which endpoint you connect to depends on the **host VirtualBox is actually running on**:
 
   * Windows host / Windows VirtualBox:
-      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2323``. The script starts the VM 
+      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2323``. The script starts the VM
       and attaches from WSL using a native Python socket terminal.
 
   * WSL shell controlling Windows VirtualBox through ``VBoxManage.exe``:
@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import platform
 import shutil
@@ -75,6 +76,7 @@ from detections.common.common_vm import (
     get_system_paths,
     is_wsl_environment,
     OPENWRT_LAN_INTNET_NAME,
+    close_medium_best_effort,
     remove_existing_vm,
     resolve_vbox_settings_path,
     run_vboxmanage,
@@ -86,6 +88,7 @@ from detections.common.common_vm import (
     spawn_serial_console_window,
     vboxmanage_targets_windows,
     vm_is_registered,
+    wait_after_disk_operation,
     wsl_to_windows_path,
 )
 from VM.vm_config import ALPINE_CLIENT_ROOT_PASSWORD
@@ -95,6 +98,8 @@ VM_NAME = "OpenWrt_LAN_Client_Alpine"
 CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
 CLIENT_GUEST_HOSTNAME = "my-alpine-client"
+CLIENT_VDI_SIZE_MIB = 4096
+CLIENT_ROOT_DEVICE = "/dev/sda"
 
 ALPINE_SERIAL_TCP_PORT = 2325
 
@@ -221,6 +226,82 @@ def require_vdi_prime_tools(*, skip_prime: bool) -> str:
     return vc
 
 
+def _libguestfs_env() -> dict[str, str]:
+    virt_env = os.environ.copy()
+    if is_wsl_environment():
+        virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
+    virt_env.setdefault("TMPDIR", "/tmp")
+
+    supermin_env = _pick_supermin_kernel_env()
+    if supermin_env:
+        virt_env.update(supermin_env)
+        print(f"[libguestfs] Using supermin kernel override: SUPERMIN_KERNEL={supermin_env.get('SUPERMIN_KERNEL')}")
+    else:
+        fixed_dir = _find_existing_fixed_appliance_dir()
+        if fixed_dir:
+            virt_env["LIBGUESTFS_PATH"] = fixed_dir
+            print(f"[libguestfs] Using existing fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
+        else:
+            cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
+            fixed_dir = _download_latest_fixed_appliance(cache_dir)
+            virt_env["LIBGUESTFS_PATH"] = fixed_dir
+            print(f"[libguestfs] Downloaded & using fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
+
+    return virt_env
+
+
+def _vdi_virtual_size_bytes(vdi_linux: str) -> int | None:
+    qemu_img = shutil.which("qemu-img")
+    if not qemu_img:
+        return None
+    try:
+        result = subprocess.run(
+            [qemu_img, "info", "-U", "--output=json", vdi_linux],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        info = json.loads(result.stdout)
+        size = info.get("virtual-size")
+        return int(size) if size is not None else None
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+
+def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mib: int = CLIENT_VDI_SIZE_MIB) -> None:
+    """Grow the tiny whole-disk Alpine ext4 VDI before installing packages."""
+    target_bytes = target_mib * 1024 * 1024
+    current_bytes = _vdi_virtual_size_bytes(vdi_linux)
+    if current_bytes is None:
+        print(f"Could not determine VDI virtual size; requesting resize to {target_mib} MiB.")
+    elif current_bytes >= target_bytes:
+        print(f"Alpine client VDI virtual size is already at least {target_mib} MiB.")
+    else:
+        current_mib = current_bytes // (1024 * 1024)
+        print(f"Growing Alpine client VDI from {current_mib} MiB to {target_mib} MiB...")
+
+    if current_bytes is None or current_bytes < target_bytes:
+        vdi_for_vbox = wsl_to_windows_path(vdi_linux) if vboxmanage_targets_windows(vboxmanage) else vdi_linux
+        run_vboxmanage(vboxmanage, ["modifymedium", "disk", vdi_for_vbox, "--resize", str(target_mib)])
+        close_medium_best_effort(vboxmanage, vdi_linux)
+        wait_after_disk_operation(vboxmanage, seconds=2.0)
+
+    guestfish = shutil.which("guestfish")
+    if not guestfish:
+        raise RuntimeError(
+            "guestfish is required to expand the Alpine client filesystem.\n"
+            "Install it in WSL with:\n"
+            "  sudo apt install -y libguestfs-tools"
+        )
+
+    print(f"Expanding Alpine client filesystem on {CLIENT_ROOT_DEVICE}...")
+    subprocess.run(
+        [guestfish, "-a", vdi_linux, "run", ":", "resize2fs", CLIENT_ROOT_DEVICE],
+        check=True,
+        env=_libguestfs_env(),
+    )
+
+
 LAB_INTERFACES_ALPINE = """auto lo
 iface lo inet loopback
 
@@ -243,7 +324,7 @@ start() {
 }
 """
 
-LAB_NET_UP_SCRIPT = r"""#!/bin/bash
+LAB_NET_UP_SCRIPT = r"""#!/bin/sh
 # Bring up Ethernet NICs and request DHCP from OpenWrt when still unaddressed.
 set -u
 ok=0
@@ -264,7 +345,7 @@ ip -4 route show default 2>/dev/null | grep -q . && exit 0
 [ "$ok" -eq 1 ]
 """
 
-LAB_NET_TROUBLESHOOT_SCRIPT = r"""#!/bin/bash
+LAB_NET_TROUBLESHOOT_SCRIPT = r"""#!/bin/sh
 # Installed by create_VM_client_browser_pipe_alpine.py
 set -u
 echo "================================================================"
@@ -326,6 +407,88 @@ if command -v dig >/dev/null 2>&1; then
   dig +time=2 +tries=1 +short @192.168.1.1 google.com 2>&1 || true
   echo ""
 fi
+"""
+
+CLIENT_PACKAGE_INSTALL_SCRIPT = r"""#!/bin/sh
+# Required package install for the Alpine lab client.
+#
+# Package mirror/DNS failures should stop VM creation. Details are left in
+# the guest image for inspection if virt-customize fails:
+#   cat /root/overdrive-package-install.log
+set -u
+
+LOG=/root/overdrive-package-install.log
+: > "$LOG"
+
+say() {
+  echo "[overdrive] $*"
+  echo "[overdrive] $*" >> "$LOG"
+}
+
+run_logged() {
+  echo "+ $*" >> "$LOG"
+  "$@" >> "$LOG" 2>&1
+}
+
+install_pkg() {
+  pkg="$1"
+  if apk info -e "$pkg" >/dev/null 2>&1; then
+    say "package already installed: $pkg"
+    return 0
+  fi
+  if run_logged apk add --no-cache "$pkg"; then
+    say "installed package: $pkg"
+    return 0
+  fi
+  say "WARNING: failed to install package: $pkg"
+  return 1
+}
+
+say "updating Alpine package indexes"
+run_logged apk update || say "WARNING: apk update failed; continuing with any cached indexes"
+
+FAILED=""
+for pkg in bash bind-tools curl iproute2 iputils net-tools nmap python3 py3-pip py3-requests socat tcpdump; do
+  install_pkg "$pkg" || FAILED="$FAILED $pkg"
+done
+
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 -c 'import requests' >/dev/null 2>&1; then
+    install_pkg py3-requests || FAILED="$FAILED py3-requests"
+  fi
+
+  if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
+    if install_pkg py3-scapy; then
+      :
+    elif command -v pip3 >/dev/null 2>&1; then
+      run_logged pip3 install --break-system-packages scapy \
+        || run_logged pip3 install scapy \
+        || FAILED="$FAILED scapy"
+    else
+      say "WARNING: pip3 missing; Scapy install skipped"
+      FAILED="$FAILED scapy"
+    fi
+  fi
+
+  if ! python3 -c 'import requests' >/dev/null 2>&1; then
+    say "ERROR: Python requests is not importable after package install"
+    FAILED="$FAILED requests-import"
+  fi
+  if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
+    say "ERROR: Scapy is not importable after package install"
+    FAILED="$FAILED scapy-import"
+  fi
+else
+  say "ERROR: python3 missing; Python local_host tools will not run"
+  FAILED="$FAILED python3"
+fi
+
+if [ -n "$FAILED" ]; then
+  say "ERROR: required package install failed:$FAILED"
+  exit 1
+fi
+say "package install phase complete"
+exit 0
 """
 
 
@@ -557,24 +720,7 @@ def connect_serial_console(vboxmanage: str, endpoint: str, *, force_interactive:
 
 def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_prime: bool) -> bool:
     vc = require_vdi_prime_tools(skip_prime=skip_prime)
-    virt_env = os.environ.copy()
-    if is_wsl_environment():
-        virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
-
-    supermin_env = _pick_supermin_kernel_env()
-    if supermin_env:
-        virt_env.update(supermin_env)
-        print(f"[libguestfs] Using supermin kernel override: SUPERMIN_KERNEL={supermin_env.get('SUPERMIN_KERNEL')}")
-    else:
-        fixed_dir = _find_existing_fixed_appliance_dir()
-        if fixed_dir:
-            virt_env["LIBGUESTFS_PATH"] = fixed_dir
-            print(f"[libguestfs] Using existing fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
-        else:
-            cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
-            fixed_dir = _download_latest_fixed_appliance(cache_dir)
-            virt_env["LIBGUESTFS_PATH"] = fixed_dir
-            print(f"[libguestfs] Downloaded & using fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
+    virt_env = _libguestfs_env()
 
     interfaces_host = work_root / "interfaces"
     interfaces_host.write_text(LAB_INTERFACES_ALPINE, encoding="utf-8", newline="\n")
@@ -588,6 +734,26 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
     lab_net_up_init_host = work_root / "lab-net-up.init"
     lab_net_up_init_host.write_text(LAB_NET_UP_INIT_ALPINE, encoding="utf-8", newline="\n")
 
+    package_script_host = work_root / "install-client-packages.sh"
+    package_script_host.write_text(CLIENT_PACKAGE_INSTALL_SCRIPT, encoding="utf-8", newline="\n")
+
+    local_host_payload_host = work_root / "local_host"
+    if local_host_payload_host.exists():
+        shutil.rmtree(local_host_payload_host)
+    detections_payload_host = work_root / "detections"
+    if detections_payload_host.exists():
+        shutil.rmtree(detections_payload_host)
+    shutil.copytree(
+        Path(REPO_ROOT) / "local_host",
+        local_host_payload_host,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    shutil.copytree(
+        Path(REPO_ROOT) / "detections",
+        detections_payload_host,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+
     print("Injecting custom configuration and packages into Alpine image...")
     commands = [
         vc,
@@ -598,7 +764,14 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--root-password",
         f"password:{ALPINE_CLIENT_ROOT_PASSWORD}",
         "--run-command",
-        "mkdir -p /usr/local/sbin && echo 'my-alpine-client' > /etc/hostname && apk update && apk add bash bind-tools iputils socat curl",
+        (
+            "mkdir -p /usr/local/sbin /root && "
+            "echo 'my-alpine-client' > /etc/hostname"
+        ),
+        "--copy-in",
+        f"{package_script_host}:/root",
+        "--run-command",
+        "sh /root/install-client-packages.sh",
         "--copy-in",
         f"{interfaces_host}:/etc/network",
         "--copy-in",
@@ -607,6 +780,10 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         f"{lab_net_up_host}:/usr/local/sbin",
         "--copy-in",
         f"{lab_net_up_init_host}:/etc/init.d",
+        "--copy-in",
+        f"{local_host_payload_host}:/root",
+        "--copy-in",
+        f"{detections_payload_host}:/root",
         "--run-command",
         (
             "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
@@ -614,6 +791,7 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
             "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
             "chmod 0755 /usr/local/sbin/lab-net-up && "
             "chmod 0755 /etc/init.d/lab-net-up && "
+            "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
             "rc-update add lab-net-up default && "
             "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
             "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
@@ -720,6 +898,7 @@ def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_
         print("Converting base Alpine image into VDI format...")
         run_vboxmanage(vboxmanage, ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"])
 
+    expand_client_vdi_for_packages(vboxmanage, vdi_wsl)
     prime_client_vdi_for_intnet_lab(vdi_wsl, Path(download_dir), skip_prime=skip_vdi_prime)
 
     run_vboxmanage(vboxmanage, ["createvm", "--name", VM_NAME, "--ostype", "Linux_64", "--basefolder", vms_root_for_vbox, "--register"])

@@ -163,7 +163,7 @@ def windows_to_wsl_path(path: str | Path) -> str:
         return proc.stdout.strip()
     except Exception:
         return path_str
-    
+
 
 def wsl_to_windows_path(path: str | Path) -> str:
     """Convert a WSL-style POSIX path to a Windows path when possible."""
