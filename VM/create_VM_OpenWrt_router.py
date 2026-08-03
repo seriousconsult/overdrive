@@ -569,6 +569,10 @@ def _guest_has_apply_script(sock) -> bool:
     return digit == "0"
 
 
+def _remove_guest_apply_script(sock, marker: str) -> None:
+    _serial_run_marked(sock, "rm -f /root/apply_mullvad_dot.sh", marker=marker, wait_s=3.0)
+
+
 def _serial_output_is_mullvad_whoami(sock, who_out: str) -> bool:
     """True if whoami shows Mullvad anycast or a public IP via Mullvad-configured stubby."""
     import re
@@ -776,6 +780,7 @@ def ensure_mullvad_dot_over_serial(
                 marker="DONE0",
                 wait_s=3.0,
             )
+            _remove_guest_apply_script(sock, marker="RMAPP0")
             print("[+] Mullvad DoT already active on OpenWrt.")
             return
 
@@ -849,6 +854,7 @@ def ensure_mullvad_dot_over_serial(
                 marker="DONE1",
                 wait_s=3.0,
             )
+            _remove_guest_apply_script(sock, marker="RMAPP1")
             print("[+] Mullvad DoT verified on OpenWrt.")
             return
 
@@ -883,6 +889,7 @@ def ensure_mullvad_dot_over_serial(
                 marker="DONE2",
                 wait_s=3.0,
             )
+            _remove_guest_apply_script(sock, marker="RMAPP2")
             print("[+] Mullvad DoT verified on OpenWrt.")
             return
 
@@ -917,10 +924,10 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
         "create_VM_OpenWrt_router.py downloads stubby .apk deps, injects them + apply script\n"
         "into the image, then after start runs apply once over serial and requires\n"
         "Mullvad DNS (whoami anycast 194.242.2.x or PoP *.mullvad.net).\n"
+        "After successful verification, /root/apply_mullvad_dot.sh is removed from OpenWrt.\n"
         "Log on router: /tmp/overdrive-mullvad-dot.log\n"
         f"{extra}"
-        "Re-apply on OpenWrt console if needed:\n"
-        "  FORCE=1 /root/apply_mullvad_dot.sh\n"
+        "Recreate the router if Mullvad DoT needs to be applied from scratch again.\n"
         "Verify on OpenWrt:  nslookup whoami.akamai.net 127.0.0.1\n"
         "  # expect 194.242.2.x OR PTR of that IP is *.mullvad.net\n"
         "  grep dns.mullvad.net /etc/stubby/stubby.yml\n"

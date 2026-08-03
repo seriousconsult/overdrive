@@ -147,8 +147,27 @@ def parse_nmap_forensic_digest(xml_text: str) -> list[str]:
 
     hosts = root.findall("host")
     if not hosts:
-        tail = " - ".join(provenance) if provenance else ""
-        return [f"(No host in XML){' - ' + tail if tail else ''}"]
+        lines.append("--- Nmap digest (forensic) ---")
+        if provenance:
+            lines.append("Provenance: " + " - ".join(provenance))
+        finished = root.find("runstats/finished")
+        hosts_stats = root.find("runstats/hosts")
+        if finished is not None:
+            summary = (finished.get("summary") or "").strip()
+            if summary:
+                lines.append("Nmap summary: " + summary)
+            if finished.get("exit"):
+                lines.append("Nmap exit: " + (finished.get("exit") or "").strip())
+        if hosts_stats is not None:
+            stats = []
+            for attr in ("up", "down", "total"):
+                value = (hosts_stats.get(attr) or "").strip()
+                if value:
+                    stats.append(f"{attr}={value}")
+            if stats:
+                lines.append("Host stats: " + " ".join(stats))
+        lines.append("No host element in nmap XML. Check firewall rules, route to target, and raw nmap stderr.")
+        return lines
 
     lines.append("--- Nmap digest (forensic) ---")
     if provenance:
@@ -247,9 +266,9 @@ def run_router_nmap_summary(ip: str) -> None:
     if not nmap_bin:
         print("nmap: not found in PATH; install nmap (e.g. apt install nmap).", file=sys.stderr)
         return
-    cmd = [nmap_bin, "-p-", "-A", "-T4", "-v", "-oX", "-", ip]
-    print("\n--- nmap (full TCP, OS/service/scripts; can take many minutes) ---", file=sys.stderr)
-    print(f"Running: nmap -p- -A -T4 -v -oX - {ip}", file=sys.stderr)
+    cmd = [nmap_bin, "--unprivileged", "-Pn", "-p-", "-A", "-T4", "-oX", "-", ip]
+    print("\n--- nmap (no ping, full TCP, OS/service/scripts; can take many minutes) ---", file=sys.stderr)
+    print(f"Running: nmap --unprivileged -Pn -p- -A -T4 {ip}", file=sys.stderr)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace")
     except OSError as exc:

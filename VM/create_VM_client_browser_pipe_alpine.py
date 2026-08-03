@@ -91,6 +91,11 @@ from detections.common.common_vm import (
     wait_after_disk_operation,
     wsl_to_windows_path,
 )
+from VM.alpine_client_hardening import (
+    CLIENT_FIREWALL_INIT_ALPINE,
+    CLIENT_FIREWALL_SCRIPT,
+    CLIENT_HARDENING_SCRIPT,
+)
 from VM.vm_config import ALPINE_CLIENT_ROOT_PASSWORD
 
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
@@ -313,7 +318,7 @@ LAB_NET_UP_INIT_ALPINE = """#!/sbin/openrc-run
 description="OpenWrt lab LAN: link up + DHCP"
 
 depend() {
-    need localmount
+    need localmount client-firewall
     after bootmisc
 }
 
@@ -448,7 +453,7 @@ say "updating Alpine package indexes"
 run_logged apk update || say "WARNING: apk update failed; continuing with any cached indexes"
 
 FAILED=""
-for pkg in bash bind-tools curl iproute2 iputils net-tools nmap python3 py3-pip py3-requests socat tcpdump; do
+for pkg in bash bind-tools curl iproute2 iptables iputils net-tools nmap python3 py3-pip py3-requests socat tcpdump; do
   install_pkg "$pkg" || FAILED="$FAILED $pkg"
 done
 
@@ -734,6 +739,15 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
     lab_net_up_init_host = work_root / "lab-net-up.init"
     lab_net_up_init_host.write_text(LAB_NET_UP_INIT_ALPINE, encoding="utf-8", newline="\n")
 
+    client_firewall_host = work_root / "client-firewall"
+    client_firewall_host.write_text(CLIENT_FIREWALL_SCRIPT, encoding="utf-8", newline="\n")
+
+    client_firewall_init_host = work_root / "client-firewall.init"
+    client_firewall_init_host.write_text(CLIENT_FIREWALL_INIT_ALPINE, encoding="utf-8", newline="\n")
+
+    hardening_script_host = work_root / "harden-client.sh"
+    hardening_script_host.write_text(CLIENT_HARDENING_SCRIPT, encoding="utf-8", newline="\n")
+
     package_script_host = work_root / "install-client-packages.sh"
     package_script_host.write_text(CLIENT_PACKAGE_INSTALL_SCRIPT, encoding="utf-8", newline="\n")
 
@@ -781,6 +795,12 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--copy-in",
         f"{lab_net_up_init_host}:/etc/init.d",
         "--copy-in",
+        f"{client_firewall_host}:/usr/local/sbin",
+        "--copy-in",
+        f"{client_firewall_init_host}:/etc/init.d",
+        "--copy-in",
+        f"{hardening_script_host}:/root",
+        "--copy-in",
         f"{local_host_payload_host}:/root",
         "--copy-in",
         f"{detections_payload_host}:/root",
@@ -788,10 +808,15 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         (
             "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
             "mv /etc/init.d/lab-net-up.init /etc/init.d/lab-net-up && "
+            "mv /etc/init.d/client-firewall.init /etc/init.d/client-firewall && "
             "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
             "chmod 0755 /usr/local/sbin/lab-net-up && "
+            "chmod 0755 /usr/local/sbin/client-firewall && "
             "chmod 0755 /etc/init.d/lab-net-up && "
+            "chmod 0755 /etc/init.d/client-firewall && "
+            "chmod 0755 /root/harden-client.sh && "
             "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
+            "sh /root/harden-client.sh && "
             "rc-update add lab-net-up default && "
             "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
             "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "

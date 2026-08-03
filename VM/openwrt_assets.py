@@ -274,6 +274,7 @@ verify_mullvad_upstream || {{
 
 touch "$DONE"
 echo "[overdrive] Mullvad DoT active: client → {OPENWRT_LAN_DNS} → stubby → Mullvad :{MULLVAD_DOT_PORT}"
+rm -f /root/apply_mullvad_dot.sh
 """
 
 OVERDRIVE_MULLVAD_INIT_D = """#!/bin/sh /etc/rc.common
@@ -287,6 +288,7 @@ boot() {
 }
 
 start() {
+	[ -f /etc/overdrive-mullvad-dot.done ] && [ ! -x /root/apply_mullvad_dot.sh ] && return 0
 	[ -x /root/apply_mullvad_dot.sh ] || return 1
 	(
 		i=0
