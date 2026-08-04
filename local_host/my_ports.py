@@ -40,6 +40,24 @@ class PortListener:
     process: str | None
 
 
+def _wsl_resolver_addresses() -> set[str]:
+    addresses: set[str] = set()
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return addresses
+
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if not line.startswith("nameserver "):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            addresses.add(normalize_address(parts[1]))
+    return addresses
+
+
 def _service_name(port: int | None, proto: str) -> str:
     if port is None:
         return ""
@@ -141,6 +159,8 @@ def _windows_process_map() -> dict[str, str]:
 
 def _is_network_accessible(binding: str) -> bool:
     host = normalize_address(binding)
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     if not host or host in {"*", "0.0.0.0", "::"}:
         return True
     try:
@@ -148,6 +168,55 @@ def _is_network_accessible(binding: str) -> bool:
     except ValueError:
         return False
     return not ip.is_loopback
+
+
+def _is_wsl_internal_dns(entry: PortListener, resolver_addresses: set[str]) -> bool:
+    if entry.local_port != 53:
+        return False
+
+    host = normalize_address(entry.local_address)
+    if host in {"*", "0.0.0.0", "::"}:
+        return False
+
+    if host == "10.255.255.254":
+        return True
+
+    if host not in resolver_addresses:
+        return False
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+
+    return not ip.is_loopback and (ip.is_private or ip.is_link_local)
+
+
+def _is_dhcp_client_socket(entry: PortListener) -> bool:
+    if entry.proto.lower() != "udp":
+        return False
+    if entry.local_port in {68, 546}:
+        return True
+    proc = (entry.process or "").lower()
+    return proc in {"dhclient", "dhcpcd", "udhcpc"} and (entry.state or "").upper() in {"", "-", "UNCONN"}
+
+
+def _listener_scope(entry: PortListener, *, wsl: bool, resolver_addresses: set[str]) -> str:
+    if _is_dhcp_client_socket(entry):
+        return "dhcp-client"
+    if wsl and _is_wsl_internal_dns(entry, resolver_addresses):
+        return "wsl-dns"
+    if _is_network_accessible(entry.local_address):
+        return "non-loopback"
+    return "loopback"
+
+
+def _format_local_address(host: str, port: int | None) -> str:
+    if port is None:
+        return host
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
 
 
 def _collect_linux_listeners() -> list[PortListener]:
@@ -228,27 +297,40 @@ def _collect_windows_listeners() -> list[PortListener]:
     return listeners
 
 
-def _format_listener(entry: PortListener) -> str:
+def _format_listener(entry: PortListener, *, scope: str | None = None) -> str:
     service = _service_name(entry.local_port, entry.proto)
     proto = entry.proto.upper()
-    addr = f"{entry.local_address}:{entry.local_port}" if entry.local_port is not None else entry.local_address
+    addr = _format_local_address(entry.local_address, entry.local_port)
     proc = entry.process or "(unknown)"
     pid = entry.pid or "-"
     state = entry.state or "-"
-    summary = f"{proto:<5} {addr:<24} {state:<12} {pid:<7} {proc:<20}"
+    if scope:
+        summary = f"{proto:<5} {addr:<40} {state:<12} {pid:<7} {proc:<20} {scope:<14}"
+    else:
+        summary = f"{proto:<5} {addr:<40} {state:<12} {pid:<7} {proc:<20}"
     if service:
         summary += f" ({service})"
     return summary
 
 
 def run_audit() -> int:
+    wsl = is_wsl_local()
+    resolver_addresses = _wsl_resolver_addresses() if wsl else set()
+
     if platform.system() == "Windows":
         listeners = _collect_windows_listeners()
     else:
         listeners = _collect_linux_listeners()
 
-    if is_wsl_local():
-        print("[WSL2] Running inside WSL — local port bindings reflect the Linux guest.")
+    if wsl:
+        print(
+            "[WSL2] Running inside WSL. These bindings are from the Linux guest namespace, "
+            "not a direct inventory of Windows or your LAN."
+        )
+        print(
+            "[WSL2] Port 53 on 10.255.255.254 or the WSL resolver address is treated as "
+            "internal DNS plumbing."
+        )
     print("\nLocal listening port inventory:\n")
     if not listeners:
         print("No listening TCP/UDP sockets detected.")
@@ -257,29 +339,57 @@ def run_audit() -> int:
         return 0
 
     listeners.sort(key=lambda e: (e.proto, e.local_address, e.local_port or 0))
-    print(f"{'PROTO':<5} {'LOCAL ADDRESS':<24} {'STATE':<12} {'PID':<7} PROCESS")
-    print("-" * 72)
-    for entry in listeners:
-        print(_format_listener(entry))
+    scopes = [
+        _listener_scope(entry, wsl=wsl, resolver_addresses=resolver_addresses)
+        for entry in listeners
+    ]
+    print(f"{'PROTO':<5} {'LOCAL ADDRESS':<40} {'STATE':<12} {'PID':<7} {'PROCESS':<20} SCOPE")
+    print("-" * 104)
+    for entry, scope in zip(listeners, scopes):
+        print(_format_listener(entry, scope=scope))
 
-    network_facing = [e for e in listeners if _is_network_accessible(e.local_address)]
-    loopback_only = [e for e in listeners if not _is_network_accessible(e.local_address)]
+    internal_wsl_dns = [e for e, scope in zip(listeners, scopes) if scope == "wsl-dns"]
+    dhcp_clients = [e for e, scope in zip(listeners, scopes) if scope == "dhcp-client"]
+    other_non_loopback = [e for e, scope in zip(listeners, scopes) if scope == "non-loopback"]
+    loopback_only = [e for e, scope in zip(listeners, scopes) if scope == "loopback"]
 
     print("\nSummary:\n")
     print(f"Total listening sockets: {len(listeners)}")
-    print(f"Network-facing listeners: {len(network_facing)}")
     print(f"Loopback-only listeners: {len(loopback_only)}")
+    print(f"Client DHCP sockets: {len(dhcp_clients)}")
+    if wsl:
+        print(f"WSL-internal DNS listeners: {len(internal_wsl_dns)}")
+        print(f"Other non-loopback service listeners: {len(other_non_loopback)}")
+    else:
+        print(f"Network-facing service listeners: {len(other_non_loopback)}")
 
-    if network_facing:
+    if other_non_loopback:
         score = 3
-        status = (
-            "At least one listener is bound to a network-facing address; alerting but not proof of an artificial host."
-        )
+        if wsl:
+            status = (
+                "At least one non-loopback listener remains after ignoring WSL internal DNS; "
+                "review manually because WSL reachability depends on Windows/WSL networking mode."
+            )
+        else:
+            status = (
+                "At least one service listener is bound to a network-facing address; "
+                "alerting but not proof of an artificial host."
+            )
     else:
         score = 1
-        status = (
-            "All services are bound to loopback-only addresses; no direct network-facing listeners detected."
-        )
+        if wsl and internal_wsl_dns:
+            status = (
+                "Only loopback and WSL-internal DNS listeners detected; this is normal WSL2 resolver behavior, "
+                "not evidence of external port exposure."
+            )
+        elif dhcp_clients:
+            status = (
+                "Only loopback and client DHCP sockets detected; no direct network-facing service listeners detected."
+            )
+        else:
+            status = (
+                "All services are bound to loopback-only addresses; no direct network-facing listeners detected."
+            )
 
     print(f"\nSCORE: {score}")
     print(f"STATUS: {status}")

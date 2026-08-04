@@ -126,13 +126,124 @@ remove_if_installed() {
   fi
 }
 
+matching_remote_service_pids() {
+  for proc in /proc/[0-9]*; do
+    [ -r "$proc/comm" ] || continue
+    comm="$(cat "$proc/comm" 2>/dev/null || true)"
+    case "$comm" in
+      sshd|dropbear) echo "${proc##*/}" ;;
+    esac
+  done
+}
+
+remove_matching_packages() {
+  prefix="$1"
+  apk info 2>/dev/null | while IFS= read -r pkg; do
+    case "$pkg" in
+      "$prefix"|"$prefix"-*) apk del "$pkg" ;;
+    esac
+  done
+}
+
+kill_matching_processes() {
+  pids="$(matching_remote_service_pids)"
+  [ -n "$pids" ] || return 0
+  kill $pids 2>/dev/null || true
+  sleep 1
+  pids="$(matching_remote_service_pids)"
+  [ -n "$pids" ] || return 0
+  kill -9 $pids 2>/dev/null || true
+}
+
+install_remote_service_guard() {
+  cat > /usr/local/sbin/overdrive-no-remote-services <<'GUARD'
+#!/bin/sh
+set -u
+
+disable_service() {
+  svc="$1"
+  rc-service "$svc" stop >/dev/null 2>&1 || true
+  for level in default boot sysinit shutdown nonetwork; do
+    rc-update del "$svc" "$level" >/dev/null 2>&1 || true
+    rm -f "/etc/runlevels/$level/$svc" 2>/dev/null || true
+  done
+}
+
+matching_remote_service_pids() {
+  for proc in /proc/[0-9]*; do
+    [ -r "$proc/comm" ] || continue
+    comm="$(cat "$proc/comm" 2>/dev/null || true)"
+    case "$comm" in
+      sshd|dropbear) echo "${proc##*/}" ;;
+    esac
+  done
+}
+
+remove_matching_packages() {
+  prefix="$1"
+  apk info 2>/dev/null | while IFS= read -r pkg; do
+    case "$pkg" in
+      "$prefix"|"$prefix"-*) apk del "$pkg" >/dev/null 2>&1 || true ;;
+    esac
+  done
+}
+
+for svc in sshd ssh dropbear; do
+  disable_service "$svc"
+done
+
+remove_matching_packages openssh
+remove_matching_packages dropbear
+
+pids="$(matching_remote_service_pids)"
+if [ -n "$pids" ]; then
+  kill $pids 2>/dev/null || true
+  sleep 1
+  pids="$(matching_remote_service_pids)"
+  [ -z "$pids" ] || kill -9 $pids 2>/dev/null || true
+fi
+GUARD
+
+  cat > /etc/init.d/overdrive-no-remote-services <<'INIT'
+#!/sbin/openrc-run
+description="Disable remote login daemons on the disposable lab client"
+
+depend() {
+    need localmount
+    after bootmisc net ssh sshd dropbear cloud-init cloud-final
+}
+
+start() {
+    ebegin "Removing remote login daemons"
+    /usr/local/sbin/overdrive-no-remote-services
+    eend $?
+}
+INIT
+
+  chmod 0755 /usr/local/sbin/overdrive-no-remote-services
+  chmod 0755 /etc/init.d/overdrive-no-remote-services
+  rc-update add overdrive-no-remote-services default
+}
+
 for svc in sshd ssh dropbear telnetd vsftpd lighttpd nginx apache2 crond chronyd ntpd; do
   disable_service "$svc"
 done
 
-for pkg in openssh openssh-server openssh-client openssh-keygen dropbear dropbear-scp dropbear-ssh telnet-bsd busybox-extras; do
+remove_matching_packages openssh
+remove_matching_packages dropbear
+
+for pkg in openssh openssh-client openssh-client-common openssh-client-default openssh-keygen openssh-server openssh-server-common openssh-server-pam openssh-sftp-server dropbear dropbear-scp dropbear-ssh telnet-bsd busybox-extras; do
   remove_if_installed "$pkg"
 done
+
+for svc in sshd ssh dropbear; do
+  disable_service "$svc"
+done
+
+install_remote_service_guard
+/usr/local/sbin/overdrive-no-remote-services
+
+kill_matching_processes
 
 for bin in ssh sshd scp sftp dropbear dbclient dropbearkey; do
   if command -v "$bin" >/dev/null 2>&1; then
@@ -140,6 +251,11 @@ for bin in ssh sshd scp sftp dropbear dbclient dropbearkey; do
     exit 1
   fi
 done
+
+if ss -tuln 2>/dev/null | awk '{print $5}' | grep -Eq '(^|[\]:])22$|:22$'; then
+  echo "[overdrive] ERROR: port 22 is still listening after hardening" >&2
+  exit 1
+fi
 
 rc-update add client-firewall boot
 rc-update add client-firewall default
