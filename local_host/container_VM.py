@@ -38,7 +38,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import requests
-from scapy.all import AsyncSniffer, Ether, IP, TCP  # type: ignore
 
 from detections.common.common_local import (
     is_wsl_local,
@@ -83,6 +82,17 @@ OUI_VENDOR_MAP = {
 # Ensure keys are 6 hex chars.
 OUI_VENDOR_MAP = {k: v for k, v in OUI_VENDOR_MAP.items()
                   if isinstance(k, str) and re.fullmatch(r"[0-9a-fA-F]{6}", k)}
+
+KNOWN_VIRTUALIZATION_PRODUCTS = (
+    "virtualbox",
+    "vmware",
+    "kvm",
+    "qemu",
+    "hyper-v",
+    "xen",
+    "parallels",
+    "bhyve",
+)
 
 
 def oui_to_vendor(oui: str):
@@ -180,7 +190,11 @@ def check_wsl_networking_mode():
 
     # 2. Try the modern 'wslinfo' tool (Official method)
     try:
-        mode_cmd = subprocess.check_output(["wslinfo", "--networking-mode"], text=True).strip()
+        mode_cmd = subprocess.check_output(
+            ["wslinfo", "--networking-mode"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         results["mode"] = mode_cmd.upper()
         results["details"] = f"Detected via wslinfo: {mode_cmd}"
         return results
@@ -190,7 +204,11 @@ def check_wsl_networking_mode():
     # 3. Fallback: Heuristic Analysis of IP and Routes
     try:
         # Get default gateway
-        route_out = subprocess.check_output(["ip", "route", "show", "default"], text=True)
+        route_out = subprocess.check_output(
+            ["ip", "route", "show", "default"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
         # NAT usually has a default via 172.x.x.1
         # Mirrored/Bridged usually show the host's actual gateway or no NAT-style route
         
@@ -224,23 +242,74 @@ def compute_vm_container_score(
     mapped_obs: list,
     ttl_values: Counter,
 ) -> tuple[int, str, str]:
-    
+
     has_oui = bool(mapped_obs)
     found_ttl_sig = any(t in {63, 127, 254} for t in ttl_values)
+    vm_text = " ".join(str(x).lower() for x in vm_evid)
+    cont_text = " ".join(str(x).lower() for x in cont_evid)
+    observed_vendor_text = " ".join(str(v).lower() for v, _o, _c in mapped_obs)
 
-    # 1. Determine Score (network-driven)
+    has_dmi_virtual_vendor = any(vendor in vm_text for vendor in KNOWN_VIRTUALIZATION_PRODUCTS)
+    has_container_marker = bool(cont_evid) and any(
+        marker in cont_text
+        for marker in ("dockerenv", "container", "docker", "kubepods", "podman", "lxc", "kubernetes")
+    )
+    has_local_virtual_nic = bool(local_vendor)
+    has_observed_virtualbox = "virtualbox" in observed_vendor_text
+    has_observed_vm_oui = bool(mapped_obs)
+    observed_total = sum(int(count) for _vendor, _oui, count in mapped_obs)
+
+    # 1. Determine score. Explicit local VM/container markers should win over
+    # weaker traffic-only heuristics. VirtualBox/VMware/KVM/etc. in DMI or the
+    # local NIC OUI is direct self evidence, not merely an uncertain network hint.
     score = 1
-    if has_oui:
-        score = 3 if len(mapped_obs) == 1 else 4
+    score_reasons: list[str] = []
+
+    if has_container_marker:
+        score = 5
+        score_reasons.append("Local container runtime markers are present.")
+
+    if has_dmi_virtual_vendor:
+        score = 5
+        score_reasons.append("Local DMI identifies a virtualization platform.")
+
+    if has_local_virtual_nic:
+        score = 5
+        score_reasons.append(f"Local NIC OUI maps to {local_vendor}.")
+
+    if "hypervisor" in vm_text:
+        if score < 5:
+            score = 4
+        score_reasons.append("CPU advertises the hypervisor flag.")
+
+    if "/sys/hypervisor/type exists" in vm_text:
+        if score < 5:
+            score = 4
+        score_reasons.append("/sys/hypervisor/type exists.")
+
+    if has_observed_vm_oui:
+        # A dominant VirtualBox OUI on the captured interface is very strong for
+        # this local probe, especially when generated traffic is enabled.
+        if has_observed_virtualbox or observed_total >= 3:
+            if score < 5:
+                score = 5
+            score_reasons.append("Captured Ethernet source OUIs map to virtual NIC vendors.")
+        elif score < 4:
+            score = 4
+            score_reasons.append("A virtual NIC OUI was observed in local Ethernet traffic.")
 
     if found_ttl_sig:
-        if score >= 3:
+        if score >= 4:
             score = 5
-        else:
+        elif score < 3:
             score = 3
+        score_reasons.append("TTL hop signatures match common VM/router paths.")
 
     # 2. Network note (NO local info here)
     network_notes = []
+
+    if score_reasons:
+        network_notes.append("Evidence: " + " ".join(score_reasons))
 
     if has_oui:
         network_notes.append(
@@ -257,7 +326,7 @@ def compute_vm_container_score(
     # 3. Local info (returned separately)
     local_info = check_wsl_networking_mode()
     if local_info.get("is_wsl"):
-        score = max(score, 5)
+        score = 5
         network_notes.append(
             "Local: Running inside WSL, which is a virtualized environment."
         )
@@ -266,8 +335,10 @@ def compute_vm_container_score(
         local_note = f"Local Info: {local_info['details']}"
 
     alignment = "Clean"
-    if score >= 4:
-        alignment = "Likely Virtualized"
+    if score == 5:
+        alignment = "VM/Container detected"
+    elif score >= 4:
+        alignment = "Likely virtualized"
     elif score == 3:
         alignment = "Uncertain"
 
@@ -285,6 +356,12 @@ def main():
     args = ap.parse_args()
 
     iface = args.iface or "eth0"
+    scapy_error = ""
+    try:
+        from scapy.all import AsyncSniffer, Ether, IP, TCP  # type: ignore
+    except Exception as exc:
+        AsyncSniffer = Ether = IP = TCP = None  # type: ignore[assignment]
+        scapy_error = f"{type(exc).__name__}: {exc}"
 
     local_mac = get_local_iface_mac(iface)
     local_oui = mac_to_oui(local_mac)
@@ -315,7 +392,7 @@ def main():
         if IP in pkt:
             ip_seen += 1
             # Capture TTLs from outbound packets (those matching your local MAC)
-            if pkt[Ether].src == local_mac:
+            if Ether in pkt and pkt[Ether].src == local_mac:
                 ttl_values[int(pkt[IP].ttl)] += 1
         if TCP in pkt:
             tcp_seen += 1
@@ -324,22 +401,24 @@ def main():
             if (flags & 0x02) and not (flags & 0x10):
                 syn_seen += 1
 
-    sniffer = AsyncSniffer(
-        iface=iface,
-        prn=pkt_handler,
-        store=False
-    )
-
-    sniffer.start()
+    sniffer = None
+    if AsyncSniffer is not None:
+        sniffer = AsyncSniffer(
+            iface=iface,
+            prn=pkt_handler,
+            store=False,
+        )
+        sniffer.start()
     try:
         if not args.no_generate:
             generate_traffic(target=args.target, count=args.gen_count)
         time.sleep(args.seconds)
     finally:
-        try:
-            sniffer.stop()
-        except Exception:
-            pass
+        if sniffer is not None:
+            try:
+                sniffer.stop()
+            except Exception:
+                pass
 
     top_ouis = seen_ouis.most_common(8)
 
@@ -382,6 +461,8 @@ def main():
     print(f"  ({unified_note})")
     print()
     print(f"L2/MAC OUI evidence: Ether frames observed: {ether_seen}")
+    if scapy_error:
+        print(f"Packet capture unavailable: {scapy_error}")
 
     if top_ouis:
         print("Top observed OUIs (from captured Ethernet src MACs):")

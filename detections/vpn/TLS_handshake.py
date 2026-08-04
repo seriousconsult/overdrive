@@ -10,7 +10,7 @@ Environment: Python httpx with HTTP/2; outbound HTTPS to tls.peet.ws required.
 
 Exit code: 0 after successful runs; 1 on HTTP or unexpected errors from tls.peet.ws.
 
-Note: run_all_detections uses the last SCORE line in combined output — phase-2 composite is final.
+Note: detections/run_detections.py uses the last SCORE line in combined output — phase-2 composite is final.
 """
 
 from __future__ import annotations

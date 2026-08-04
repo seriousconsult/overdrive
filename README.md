@@ -48,7 +48,7 @@ Useful commands:
 python3 run/run_all.py --skip-vms          # detections only
 python3 run/run_all.py --skip-detections   # VM setup/verification only
 python3 run/run_all.py --dry-run
-python3 run/run_all_detections.py
+python3 detections/run_detections.py
 python3 run/run_VMs.py
 ```
 
@@ -68,7 +68,7 @@ python3 run/run_VMs.py
 - `VM/create_VM_linux.py` is unfinished and skipped unless explicitly included by VM tooling.
 - `run/run_VMs.py` skips `VM/create_VM_client_browser_pipe.py` by default because it attaches to the serial console; pass `--include-client` to run it.
 - Third-party pages/APIs can be blocked, rate-limited, or changed upstream; expect some score `3` ambiguity.
-- Packet-capture probes need raw socket privileges: `detections/vpn/TCP_stack.py`, `detections/router/TTL.py`, `detections/router/NAT_OS.py`.
+- Packet-capture probes need raw socket privileges: `detections/vpn/TCP_stack.py`, `detections/router/TTL.py`, `detections/router/NAT_OS.py`, `detections/network/DHCP.py`, `detections/network/client_mac_exposure.py`.
 
 Optional capture setup:
 

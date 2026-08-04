@@ -17,7 +17,8 @@ from detections.common.common_runner import run_step
 RUN_DIR = Path(__file__).resolve().parent
 REPO_ROOT = RUN_DIR.parent
 RUN_VMS = RUN_DIR / "run_VMs.py"
-RUN_DETECTIONS = RUN_DIR / "run_detections.py"
+RUN_DETECTIONS = REPO_ROOT / "detections" / "run_detections.py"
+DIRTY_WORDS = REPO_ROOT / "dirty_words.py"
 
 
 def main() -> int:
@@ -40,6 +41,11 @@ def main() -> int:
         help="Run VM setup/verification only.",
     )
     parser.add_argument(
+        "--skip-dirty-words",
+        action="store_true",
+        help="Skip dirty_words.py identity/secret hygiene scan.",
+    )
+    parser.add_argument(
         "--keep-going",
         action="store_true",
         help="Run detections even if VM setup/verification fails.",
@@ -49,6 +55,12 @@ def main() -> int:
         action="append",
         default=[],
         help="Pass one argument through to run_VMs.py; repeat for multiple args.",
+    )
+    parser.add_argument(
+        "--dirty-words-arg",
+        action="append",
+        default=[],
+        help="Pass one argument through to dirty_words.py; repeat for multiple args.",
     )
     args = parser.parse_args()
 
@@ -75,6 +87,18 @@ def main() -> int:
         )
         if rc != 0:
             failures.append(("run_detections.py", rc))
+            if not args.keep_going:
+                return rc
+
+    if not args.skip_dirty_words:
+        rc = run_step(
+            [sys.executable, str(DIRTY_WORDS), *args.dirty_words_arg],
+            cwd=REPO_ROOT,
+            dry_run=args.dry_run,
+            name="Dirty words / identity hygiene scan",
+        )
+        if rc != 0:
+            failures.append(("dirty_words.py", rc))
             if not args.keep_going:
                 return rc
 

@@ -16,8 +16,11 @@ router/CPE evidence to a low exported SCORE because it supports a home setup.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import socket
+import ssl
 import subprocess
 import urllib3
 from typing import Any
@@ -29,7 +32,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_router_gateway import default_ipv4_gateway
+from detections.common.common_router_gateway import resolve_router_ipv4_and_iface
 from detections.common.common_router_upnp import extract_realm
 
 # --- Header: Server (substring match, lowercase) ---
@@ -181,6 +184,8 @@ BANNER_HEADERS = [
     "Location",
     "Content-Type",
     "Set-Cookie",
+    "X-Frame-Options",
+    "X-Content-Type-Options",
     "Refresh",
 ]
 
@@ -298,8 +303,13 @@ _BODY_MARKERS: list[tuple[int, re.Pattern[str], str]] = [
     (4, re.compile(r"zyxel|zywall", re.I), "Zyxel"),
     (4, re.compile(r"huawei|hilink", re.I), "Huawei"),
     (4, re.compile(r"vodafone|speedport", re.I), "ISP CPE"),
+    (4, re.compile(r"arris|surfboard|technicolor|sagemcom|sercomm", re.I), "ISP cable/fiber CPE"),
+    (4, re.compile(r"verizon|fios|cr1000a|g3100|mynetworksettings", re.I), "Verizon/FiOS CPE"),
+    (4, re.compile(r"eero|google\s+(nest\s+)?wifi|onhub", re.I), "mesh router"),
+    (4, re.compile(r"fortigate|fortinet|sophos|pfsense|opnsense", re.I), "firewall appliance"),
     (3, re.compile(r"wireless\s+router|wifi\s+router|broadband\s+router", re.I), "generic router UI"),
     (3, re.compile(r"router\s+login|gateway\s+login|admin\s+login", re.I), "login branding"),
+    (3, re.compile(r"wan\s+status|lan\s+status|wireless\s+settings|ssid|wps|port\s+forward", re.I), "router settings vocabulary"),
 ]
 
 # Common admin / login / firmware paths (multi-vendor).
@@ -312,13 +322,21 @@ DEFAULT_BANNER_PATHS: tuple[str, ...] = (
     "/web_login.html",
     "/cgi-bin/luci",
     "/cgi-bin/luci/",
+    "/cgi-bin/luci/admin/status/overview",
     "/admin/",
     "/admin/index.php",
     "/webpages/login.html",
+    "/webpages/index.html",
     "/home.asp",
+    "/main.html",
+    "/start.htm",
     "/goform/login",
+    "/goform/webLogin",
     "/userRpm/Login.htm",
+    "/userRpm/Index.htm",
     "/status",
+    "/status.htm",
+    "/status.html",
     "/portal",
     "/ui/",
     "/net/",
@@ -366,8 +384,8 @@ def score_location(location_value: str | None) -> tuple[int, list[str]]:
     if any(x in loc for x in ("/cgi-bin/luci", "/luci", "/webpages/", "/userRpm/", "/goform/")):
         return 4, hits
     if len(hits) >= 2:
-        return 4, hits
-    return 3, hits
+        return 3, hits
+    return 2, hits
 
 
 def score_realm(www_auth: str | None) -> tuple[int, list[str]]:
@@ -405,6 +423,8 @@ def score_realm(www_auth: str | None) -> tuple[int, list[str]]:
         return 5, hits
     if len(hits) >= 2:
         return 4, hits
+    if hits == ["admin"]:
+        return 2, hits
     return 3, hits
 
 
@@ -440,8 +460,62 @@ def score_body_fingerprint(body: str | None) -> tuple[int, list[str]]:
             if label not in reasons:
                 reasons.append(label)
     if best <= 1 and reasons:
-        return 2, reasons
+        return 1, []
     return best, reasons
+
+
+def fetch_tls_certificate_info(ip: str, port: int, timeout: float) -> dict[str, Any]:
+    """Fetch peer certificate metadata without requiring trust validation."""
+    info: dict[str, Any] = {"ok": False, "subject": "", "issuer": "", "sha256": "", "error": ""}
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=ip) as sock:
+                der = sock.getpeercert(binary_form=True)
+    except OSError as exc:
+        info["error"] = str(exc)
+        return info
+    if not der:
+        info["error"] = "no peer certificate"
+        return info
+
+    info["ok"] = True
+    info["sha256"] = hashlib.sha256(der).hexdigest()
+    pem = ssl.DER_cert_to_PEM_cert(der)
+    try:
+        proc = subprocess.run(
+            ["openssl", "x509", "-noout", "-subject", "-issuer", "-dates"],
+            input=pem,
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, timeout),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return info
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("subject="):
+            info["subject"] = line.partition("=")[2].strip()
+        elif line.startswith("issuer="):
+            info["issuer"] = line.partition("=")[2].strip()
+        elif line.startswith("notAfter="):
+            info["not_after"] = line.partition("=")[2].strip()
+    return info
+
+
+def score_tls_certificate(info: dict[str, Any]) -> tuple[int, list[str]]:
+    if not info.get("ok"):
+        return 1, []
+    text = f"{info.get('subject', '')} {info.get('issuer', '')}".lower()
+    hits = [m for m in ROUTER_REALM_MARKERS if m in text and m not in {"admin", "httpd"}]
+    if not hits:
+        return 2, [f"cert_sha256:{str(info.get('sha256', ''))[:16]}"]
+    strong = {"fritz", "avm", "netgear", "tplink", "tp-link", "asus", "mikrotik", "routeros", "openwrt", "luci", "zyxel", "d-link", "dlink", "linksys", "huawei", "unifi", "edgeos"}
+    if any(hit in strong for hit in hits):
+        return 4, hits + [f"cert_sha256:{str(info.get('sha256', ''))[:16]}"]
+    return 3, hits + [f"cert_sha256:{str(info.get('sha256', ''))[:16]}"]
 
 
 def combine_banner_scores(
@@ -455,7 +529,7 @@ def combine_banner_scores(
         return 1, []
     base = max(p[0] for p in parts)
     labels = [p[1] for p in parts if p[0] > 1]
-    if len(set(labels)) >= 2 and base >= 2:
+    if len(set(labels)) >= 2 and base >= 3:
         base = min(5, base + 1)
     detail: list[str] = []
     for _s, lab, d in parts:
@@ -545,7 +619,7 @@ def request_with_method(
         "combined_detail": combined_detail,
     }
     if method == "GET" and scan_body and body_snippet:
-        out["body_prefix"] = body_snippet[:280] + ("…" if len(body_snippet) > 280 else "")
+        out["body_prefix"] = body_snippet[:280] + ("..." if len(body_snippet) > 280 else "")
     return out
 
 
@@ -563,6 +637,13 @@ def probe(
 
     session = requests.Session()
     results: list[dict[str, Any]] = []
+    cert_info: dict[str, Any] | None = None
+    cert_part: tuple[int, str, list[str]] | None = None
+    if scheme == "https":
+        cert_info = fetch_tls_certificate_info(ip, port, timeout)
+        cert_score, cert_reasons = score_tls_certificate(cert_info)
+        if cert_score > 1:
+            cert_part = (cert_score, "tls-cert", cert_reasons)
 
     tried = 0
     for method in ["HEAD", "GET"]:
@@ -574,9 +655,7 @@ def probe(
             )
             results.append(r)
 
-            if method == "HEAD" and r.get("server"):
-                break
-            # Strong signal from headers alone — skip body GET if HEAD already high
+            # Strong signal from headers alone - skip body GET if HEAD already high
             if method == "HEAD" and int(r.get("score", 1)) >= 4:
                 break
 
@@ -592,7 +671,15 @@ def probe(
         if tried >= max_tries:
             break
 
-    cpe_score = max((r.get("score", 1) for r in results if isinstance(r, dict)), default=1)
+    if cert_part:
+        for r in results:
+            if not isinstance(r, dict) or "error" in r:
+                continue
+            r.setdefault("combined_detail", []).append(f"{cert_part[1]}:{'/'.join(cert_part[2][:5])}")
+            r.setdefault("signals", {})["tls_certificate"] = {"score": cert_part[0], "markers": cert_part[2]}
+            r["score"] = max(int(r.get("score", 1)), cert_part[0])
+
+    cpe_score = max((r.get("score", 1) for r in results if isinstance(r, dict)), default=cert_part[0] if cert_part else 1)
     final_score = cpe_confidence_to_host_score(int(cpe_score))
     return {
         "ip": ip,
@@ -600,6 +687,7 @@ def probe(
         "scheme": scheme,
         "path": path,
         "attempts": results,
+        "tls_certificate": cert_info,
         "cpe_score": cpe_score,
         "final_score": final_score,
     }
@@ -612,6 +700,10 @@ def _banner_status_line(results: list[dict[str, Any]], overall: int) -> str:
     for r in results:
         if int(r.get("cpe_score", 1)) <= 1:
             continue
+        cert = r.get("tls_certificate") or {}
+        if cert.get("ok") and (cert.get("subject") or cert.get("issuer")):
+            text = f"TLS {cert.get('subject') or cert.get('issuer')}"
+            return text[:200]
         for a in r.get("attempts") or []:
             if not isinstance(a, dict) or "error" in a:
                 continue
@@ -674,7 +766,12 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    target_ip = args.ip or default_ipv4_gateway()
+    target_ip = args.ip
+    if not target_ip:
+        try:
+            target_ip, _iface, _used_windows = resolve_router_ipv4_and_iface()
+        except Exception:
+            target_ip = None
     if not target_ip:
         print("--- Banner-only probe ---")
         print("Could not determine target IP (pass --ip or ensure `ip -4 route show default` works).")
@@ -738,7 +835,7 @@ def main() -> None:
                 if isinstance(a, dict) and "status_code" in a:
                     c = int(a["status_code"])
                     codes[c] = codes.get(c, 0) + 1
-        bits = ",".join(f"{k}×{v}" for k, v in sorted(codes.items())[:10])
+        bits = ",".join(f"{k}x{v}" for k, v in sorted(codes.items())[:10])
         print(f"probes={len(evidence['results'])} HTTP codes [{bits}] | {evidence['verdict']}")
     else:
         print(

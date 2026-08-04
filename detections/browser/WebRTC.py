@@ -271,7 +271,7 @@ def main():
             print("PASS: No private/local IP detected (RFC1918).")
 
         print(f"\nScore:{score}")
-        # First substantive line after Score is what run_all_detections.py prefers for HTML comments.
+        # First substantive line after Score is what detections/run_detections.py prefers for HTML comments.
         print(f"STATUS: {note}")
         print("  Scale: 1 = residential/browser-like signal  ·  5 = definitely artificial host")
 

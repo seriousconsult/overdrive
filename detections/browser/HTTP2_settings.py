@@ -1,375 +1,361 @@
 #!/usr/bin/env python3
-
-
-'''
-This is layer 7. Note that TCP fingerprinting may also occur and that is layer 2.
-
-When you connect via HTTP2, your client sends a SETTINGS frame and a WINDOW_UPDATE frame. 
-The specific values and the order in which they are sent are unique to different browsers.
-These are a fingerprint. So if the site is intended for browsers and your fingerprint is
-H2 Fingerprint: 1:4096;2:0;4:65535;5:16384;3:100;6:65536|16777216|0|m,a,s,p that matches 
-Python h2 / httpx libraries not chrome (Ex. 1:65536;3:1000;4:6291456;6:262144|15663105|0|m,a,s,p). 
-So it is obvious you are not an intended user. 
-
-While this doesn't detect the VPN "tunnel," it detects the software being used over the VPN.
-Most people using a VPN for privacy use a standard browser. However, people using VPNs for automated
-tasks (botting, scraping, account creation) often use Python or headless browsers. 
-These tools have very different HTTP2 signatures than a typical human's browser.
-
-1. Settings (The "Signature")
-    HEADER_TABLE_SIZE: How much memory the server should use to compress headers.
-    ENABLE_PUSH: Whether the client accepts "Server Push."
-    INITIAL_WINDOW_SIZE: How much data the client can receive before sending an acknowledgment.
-    MAX_FRAME_SIZE: The largest frame the client is willing to receive.
-2. Window Update
-    The value 12517377 is a massive tell. In HTTP2, the flow control window size is often set to a
-       specific number by different network libraries. If your "Browser" sends a window update that
-         matches a known Python-httpx or Go-http2 value, you get flagged.
-3. Pseudo-Header Order
-    Notice the list on the right: method, path, authority, scheme.
-    The "Gotcha": Google Chrome always sends these in a specific order (usually :method, :authority, 
-    :scheme, :path). If your script sends them in a different order (like putting path before authority),
-      the server knows you aren't actually using Chrome, regardless of what your User-Agent says.
-
-'''
-#!/usr/bin/env python3
 """
-HTTP/2 + TLS Fingerprint Consistency Check
+HTTP/2 SETTINGS fingerprint consistency check for the detected browser.
 
-What this does (useful + explicit):
-  1) Determines the local runtime environment (WSL/Linux, OS, python, httpx versions).
-  2) Performs a fresh HTTP/2 request to tls.peet.ws /api/all (unique query param).
-  3) Extracts observed fingerprints:
-       - server-observed user_agent
-       - HTTP/2 Akamai fingerprint (settings-derived)
-       - TLS JA3/JA4 and PeetPrint
-  4) Produces a heuristic verdict:
-       - Is the observed client stack consistent with THIS script (httpx on your machine)?
-       - If Akamai HTTP/2 SETTINGS look browser-like vs library-like, highlight it.
+This probe opens a real browser through Selenium and navigates to
+``tls.peet.ws/api/all`` so the observed HTTP/2/TLS fingerprints are the browser's
+transport stack, not Python's ``httpx`` stack. If no browser/webdriver is
+available, it fails gracefully with ``SCORE: 3``.
 
-Note:
-  - This is NOT definitive VPN detection.
-  - It’s a “does the network-observed stack match my actual client stack?” check.
+Score:
+  1 = coherent browser-like HTTP/2 fingerprint
+  2 = mostly browser-like with mild caveats
+  3 = inconclusive, no browser, or insufficient endpoint data
+  4 = suspicious mismatch/headless downgrade
+  5 = strong library/bot fingerprint
 """
 
-import time
-import platform
-import sys
-import ssl
+from __future__ import annotations
+
+import argparse
+import json
 import re
+import sys
+import time
+from pathlib import Path
+from typing import Any
 
-import httpx
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-
-def detect_runtime():
-    sysname = platform.system()
-    machine = platform.machine()
-
-    # WSL detection
-    is_wsl = False
-    try:
-        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
-            is_wsl = "microsoft" in f.read().lower()
-    except Exception:
-        is_wsl = False
-
-    if sysname.lower() == "linux" and is_wsl:
-        runtime = "WSL (Linux)"
-    elif sysname.lower() == "linux":
-        runtime = "Linux"
-    elif sysname.lower() == "windows":
-        runtime = "Windows"
-    elif sysname.lower() == "darwin":
-        runtime = "macOS"
-    else:
-        runtime = sysname
-
-    # Python/openssl info
-    pyver = sys.version.replace("\n", " ")
-    openssl_ver = getattr(ssl, "OPENSSL_VERSION", "unknown")
-
-    return {
-        "runtime": runtime,
-        "machine": machine,
-        "python": pyver,
-        "openssl": openssl_ver,
-    }
-
-
-def parse_akamai_fingerprint_settings(akamai_fp: str):
-    """
-    Akamai fingerprint format example:
-      1:4096;2:0;4:65535;5:16384;3:100;6:65536|16777216|0|m,a,s,p
-
-    The left part before first '|' lists SETTINGS IDs and values.
-    We'll parse a few keys heuristically:
-      header_table_size (SETTINGS id 1)
-      max_frame_size     (id 4 or 5 depending on how mapped; we’ll just report what we see)
-    """
-    if not akamai_fp:
-        return {}
-
-    left = akamai_fp.split("|", 1)[0]
-    # entries like "1:4096;2:0;4:65535"
-    parts = left.split(";")
-    kv = {}
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        if ":" not in part:
-            continue
-        k, v = part.split(":", 1)
-        k = k.strip()
-        v = v.strip()
-        if k.isdigit():
-            try:
-                kv[int(k)] = int(v)
-            except ValueError:
-                pass
-
-    # Common: SETTINGS[1] = HEADER_TABLE_SIZE
-    header_table_size = kv.get(1)
-    return {
-        "settings_raw_left": left,
-        "header_table_size": header_table_size,
-        "settings_kv": kv,
-    }
-
-
-def likely_browser_vs_library(header_table_size: int | None):
-    """
-    Very heuristic:
-      - Many browsers have larger header table sizes (often 65536).
-      - Some HTTP/2 library clients use smaller values (often 4096).
-    """
-    if header_table_size is None:
-        return "unknown"
-    if header_table_size >= 32768:
-        return "browser-like"
-    if header_table_size <= 8192:
-        return "library-like"
-    return "mixed"
-
-
-# Known Python/httpx JA3 hashes
-PYTHON_JA3_HASHES = {
-    "3adacb99ecb51ed59c4f6c4ed9a7dcaa",  # httpx
-    "764949511634563a62f4007f9c89420a",  # requests
-    "ee99e69123896791e84610996841edaa",  # urllib3
-}
-
-# Known browser JA3 hashes (common Chrome patterns)
-CHROME_JA3_HASHES = {
-    "4d22de3e6cc2e253afb74964d2a0a8e6",  # Chrome stable
-    "a2e132e1cf0c8e02c8c1a3c1c3a4e8c9",  # Chrome other
-}
-
-
-def calculate_browser_score(
-    ua_looks_like_httpx: bool,
-    http2_style: str,
-    ja3_hash: str,
-    header_table_size: int | None,
-    *,
-    observed_user_agent: str,
-) -> tuple[int, str]:
-    """
-    Suspicion score (1–5), aligned with the rest of Overdrive:
-      1 — Looks like a typical end-user browser stack (TLS + HTTP/2 fingerprints line up).
-      3 — Mixed / incomplete signals.
-      5 — Strong automation / library client (httpx/curl-class), or browser UA with library fingerprints.
-
-    This script runs httpx, so a honest “normal home Chrome user” outcome is not expected; low scores
-    should only appear if the *observed* network fingerprints look browser-coherent anyway.
-    """
-    risk = 2
-    reasons: list[str] = []
-
-    # Baseline: this check is executed by a Python httpx client in `main()`.
-    if ua_looks_like_httpx:
-        risk = 4
-        reasons.append("Observed UA names python-httpx/httpx (library client)")
-    else:
-        reasons.append("Observed UA does not name httpx (unexpected for this script; possible rewriting)")
-
-    if http2_style.startswith("library-like"):
-        risk += 1
-        reasons.append("HTTP/2 SETTINGS look library-like (Akamai heuristic)")
-    elif http2_style.startswith("browser-like"):
-        risk = max(1, risk - 1)
-        reasons.append("HTTP/2 SETTINGS look browser-like (unexpected for raw httpx; lower suspicion)")
-    else:
-        reasons.append("HTTP/2 SETTINGS inconclusive")
-
-    if ja3_hash:
-        if ja3_hash in PYTHON_JA3_HASHES:
-            risk += 1
-            reasons.append("JA3 matches catalogued Python HTTP stacks")
-        elif ja3_hash in CHROME_JA3_HASHES:
-            risk = max(1, risk - 1)
-            reasons.append("JA3 matches a common Chrome pattern")
-
-    if header_table_size is not None:
-        if header_table_size <= 4096:
-            risk += 1
-            reasons.append(f"SETTINGS header table size {header_table_size} is small (library-like)")
-        elif header_table_size >= 65536:
-            risk = max(1, risk - 1)
-            reasons.append(f"SETTINGS header table size {header_table_size} is large (browser-like)")
-
-    # If UA doesn't mention httpx but we're running httpx, treat as elevated inconsistency.
-    if not ua_looks_like_httpx:
-        risk += 1
-
-    risk = max(1, min(5, risk))
-
-    # Floors: this module is executed by httpx; "normal browser user" is not the default expectation.
-    min_risk = 1
-    if ua_looks_like_httpx or (ja3_hash and ja3_hash in PYTHON_JA3_HASHES):
-        min_risk = max(min_risk, 4)
-    if observed_user_agent.strip() and (not ua_looks_like_httpx):
-        # We ran httpx, but the observed UA string doesn't look like httpx — treat as rewrite/proxy oddity.
-        min_risk = max(min_risk, 4)
-    risk = max(risk, min_risk)
-    risk = max(1, min(5, risk))
-
-    descriptions = {
-        1: "Browser-like: fingerprints look coherent for a typical browser user (low automation signal).",
-        2: "Mostly browser-like: minor anomalies; still plausibly a real browser.",
-        3: "Mixed: incomplete or conflicting HTTP/2 / TLS signals.",
-        4: "Suspicious: library/automation-class HTTP/2 or TLS fingerprints (script/bot signal).",
-        5: "Strong automation: clear library client fingerprints (httpx/Python stack) — not a normal browser profile.",
-    }
-    detail = "; ".join(reasons[:3]) + (" …" if len(reasons) > 3 else "")
-    return risk, f"{descriptions[risk]} ({detail})"
-
-
-def main():
-    print("============================================================")
-    print("HTTP/2 Fingerprint Consistency Check (Observed vs Expected)")
-    print("============================================================\n")
-
-    rt = detect_runtime()
-    print("[1] Local runtime (expected)")
-    print("- Runtime: ", rt["runtime"])
-    print("- Machine: ", rt["machine"])
-    print("- Python:  ", rt["python"])
-    print("- OpenSSL: ", rt["openssl"])
-
-    # Print library versions
-    try:
-        import httpx as _httpx
-        try:
-            import httpcore as _httpcore  # type: ignore
-            httpcore_ver = getattr(_httpcore, "__version__", "unknown")
-        except Exception:
-            httpcore_ver = "unknown"
-
-        print("- httpx:   ", getattr(_httpx, "__version__", "unknown"))
-        print("- httpcore:", httpcore_ver)
-    except Exception:
-        print("- httpx:   (unknown)")
-
-    # Fresh request
-    url = f"https://tls.peet.ws/api/all?t={int(time.time())}"
-    print("\n[2] Observing network (tls.peet.ws)")
-    print("Request URL:", url)
-
-    # Important: use HTTP/2 and disable pooling for a “fresh” fingerprint
-    with httpx.Client(http2=True, limits=httpx.Limits(max_connections=1)) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-
-    # Extract observed fields
-    observed_user_agent = data.get("user_agent", "") or ""
-    negotiated_http_version = data.get("http_version", "") or resp.http_version
-    http2 = data.get("http2", {}) or {}
-    tls = data.get("tls", {}) or {}
-
-    akamai_fp = http2.get("akamai_fingerprint") or ""
-    akamai_fp_hash = http2.get("akamai_fingerprint_hash") or ""
-    settings = http2.get("settings")  # may be None in some cases
-
-    ja3_hash = tls.get("ja3_hash") or ""
-    ja4 = tls.get("ja4") or ""
-    ja4_r = tls.get("ja4_r") or ""
-    peetprint_hash = tls.get("peetprint_hash") or ""
-    peetprint = tls.get("peetprint") or ""
-
-    print("\n[3] Observed fingerprints (what the network stack reported)")
-    print("- Negotiated protocol: ", negotiated_http_version)
-    print("- Observed user_agent: ", repr(observed_user_agent))
-
-    print("\n--- HTTP/2 / Akamai ---")
-    print("- Akamai fingerprint:      ", akamai_fp if akamai_fp else "(empty)")
-    print("- Akamai fingerprint hash: ", akamai_fp_hash if akamai_fp_hash else "(empty)")
-    print("- HTTP/2 sent settings:   ", settings if settings is not None else "(not provided)")
-
-    print("\n--- TLS / Peet ---")
-    print("- JA3 hash:     ", ja3_hash if ja3_hash else "(empty)")
-    print("- JA4:          ", ja4 if ja4 else "(empty)")
-    print("- JA4 (raw):    ", ja4_r if ja4_r else "(empty)")
-    print("- PeetPrint hash:", peetprint_hash if peetprint_hash else "(empty)")
-
-    # Expected from THIS script: httpx adds a python-httpx UA
-    print("\n[4] Consistency verdict (heuristic, not VPN-proof)")
-    expected_substrings = ["python-httpx", "httpx"]
-    ua_looks_like_httpx = any(s in observed_user_agent.lower() for s in expected_substrings)
-
-    # Parse the HTTP/2 fingerprint settings
-    akamai_settings = parse_akamai_fingerprint_settings(akamai_fp)
-    header_table_size = akamai_settings.get("header_table_size")
-    http2_style = likely_browser_vs_library(header_table_size)
-
-    # Build verdict
-    verdict = "UNCERTAIN"
-    confidence = "low"
-
-    if ua_looks_like_httpx:
-        # UA matches the client we are running
-        if http2_style.startswith("library-like"):
-            verdict = "CONSISTENT with httpx/library HTTP/2 stack (heuristic)"
-            confidence = "high"
-        elif http2_style.startswith("browser-like"):
-            verdict = "UA matches httpx, but HTTP/2 settings look browser-like (possible proxy/translation/mismatch)"
-            confidence = "medium"
-        else:
-            verdict = "UA matches httpx; HTTP/2 settings are mixed/unknown (heuristic)"
-            confidence = "medium"
-    else:
-        # UA does not match expected local library behavior
-        if observed_user_agent:
-            verdict = "MISMATCH: UA does not look like httpx, but you ran httpx (possible proxy/rewriting)"
-            confidence = "high"
-        else:
-            verdict = "MISMATCH/LOW INFO: UA is empty; cannot validate library consistency"
-            confidence = "low"
-
-    print("- Expected client: python-httpx/httpx (THIS script)")
-    print("- UA looks like httpx? ", ua_looks_like_httpx)
-    print("- HTTP/2 style guess:", http2_style)
-    if header_table_size is not None:
-        print("  (Parsed SETTINGS header table size):", header_table_size)
-
-    print("- Verdict:", verdict)
-    print("- Confidence:", confidence)
-
-    # Calculate 1-5 score
-    print("\nScale: 1 = typical browser (low suspicion) · 5 = automation / library client (high suspicion)")
-    score, score_desc = calculate_browser_score(
-        ua_looks_like_httpx=ua_looks_like_httpx,
-        http2_style=http2_style,
-        ja3_hash=ja3_hash,
-        header_table_size=header_table_size,
-        observed_user_agent=observed_user_agent,
+try:
+    from detections.common.common_browser import (
+        DEFAULT_TIMEOUT,
+        build_driver_with_fallback,
+        extract_json_text_from_page,
+        print_browser_detection_header,
     )
 
-    print(f"\nSCORE: {score}")
-    print(f"STATUS: {score_desc}")
+    BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # Selenium may be absent on minimal clients.
+    DEFAULT_TIMEOUT = 25
+    build_driver_with_fallback = None  # type: ignore[assignment]
+    extract_json_text_from_page = None  # type: ignore[assignment]
+    BROWSER_HELPER_IMPORT_ERROR = exc
 
-    print("\n============================================================")
+    def print_browser_detection_header(title: str, *, width: int = 64) -> None:
+        bar = "=" * width
+        print(bar)
+        print(title)
+        print(bar)
+        print()
+
+
+DEFAULT_ENDPOINT = "https://tls.peet.ws/api/all"
+
+PYTHON_LIBRARY_UA_RE = re.compile(
+    r"\b(?:python|httpx|requests|urllib|aiohttp|curl|wget|httpie|okhttp|go-http-client)\b",
+    re.I,
+)
+HEADLESS_RE = re.compile(r"HeadlessChrome|PhantomJS|SlimerJS", re.I)
+CHROME_RE = re.compile(r"\b(?:HeadlessChrome|Chrome|Chromium|Edg|OPR)/(\d+)", re.I)
+FIREFOX_RE = re.compile(r"\bFirefox/(\d+)", re.I)
+SAFARI_RE = re.compile(r"\bVersion/(\d+).+Safari/", re.I)
+
+
+def parse_akamai_fingerprint_settings(akamai_fp: str) -> dict[str, Any]:
+    """
+    Parse Peet's Akamai HTTP/2 fingerprint.
+
+    Example:
+      ``1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0|m,a,s,p``
+    """
+    if not akamai_fp:
+        return {
+            "settings_raw_left": "",
+            "settings_kv": {},
+            "settings_order": [],
+            "window_update": None,
+            "priority": None,
+            "pseudo_header_order": "",
+        }
+
+    parts = akamai_fp.split("|")
+    left = parts[0] if parts else ""
+    kv: dict[int, int] = {}
+    order: list[int] = []
+    for item in left.split(";"):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        key, value = item.split(":", 1)
+        if not key.isdigit():
+            continue
+        try:
+            setting_id = int(key)
+            kv[setting_id] = int(value)
+            order.append(setting_id)
+        except ValueError:
+            continue
+
+    def _maybe_int(value: str | None) -> int | None:
+        try:
+            return int(value) if value not in (None, "") else None
+        except ValueError:
+            return None
+
+    return {
+        "settings_raw_left": left,
+        "settings_kv": kv,
+        "settings_order": order,
+        "window_update": _maybe_int(parts[1] if len(parts) > 1 else None),
+        "priority": _maybe_int(parts[2] if len(parts) > 2 else None),
+        "pseudo_header_order": parts[3] if len(parts) > 3 else "",
+        "header_table_size": kv.get(1),
+        "enable_push": kv.get(2),
+        "max_concurrent_streams": kv.get(3),
+        "initial_window_size": kv.get(4),
+        "max_frame_size": kv.get(5),
+        "max_header_list_size": kv.get(6),
+    }
+
+
+def browser_family_from_ua(user_agent: str) -> str:
+    ua = user_agent or ""
+    if PYTHON_LIBRARY_UA_RE.search(ua):
+        return "library"
+    if CHROME_RE.search(ua):
+        return "chromium"
+    if FIREFOX_RE.search(ua):
+        return "firefox"
+    if SAFARI_RE.search(ua) and "Chrome" not in ua and "Chromium" not in ua:
+        return "webkit"
+    return "unknown"
+
+
+def classify_http2_settings(parsed: dict[str, Any], user_agent: str) -> tuple[str, list[str]]:
+    """Return ``(style, reasons)`` for observed HTTP/2 SETTINGS."""
+    reasons: list[str] = []
+    kv: dict[int, int] = parsed.get("settings_kv") or {}
+    order: list[int] = parsed.get("settings_order") or []
+    family = browser_family_from_ua(user_agent)
+
+    if not kv:
+        return "unknown", ["No HTTP/2 SETTINGS fingerprint was provided by the endpoint."]
+
+    header_table = parsed.get("header_table_size")
+    initial_window = parsed.get("initial_window_size")
+    max_concurrent = parsed.get("max_concurrent_streams")
+    max_header_list = parsed.get("max_header_list_size")
+    max_frame = parsed.get("max_frame_size")
+    window_update = parsed.get("window_update")
+
+    browser_like_votes = 0
+    library_like_votes = 0
+
+    if header_table == 65536:
+        browser_like_votes += 2
+        reasons.append("SETTINGS_HEADER_TABLE_SIZE=65536 is common in Chromium-class browsers.")
+    elif header_table == 4096:
+        library_like_votes += 2
+        reasons.append("SETTINGS_HEADER_TABLE_SIZE=4096 is common in Python/Go/library clients.")
+    elif header_table is not None:
+        reasons.append(f"SETTINGS_HEADER_TABLE_SIZE={header_table} is not a strong standalone signal.")
+
+    if initial_window is not None:
+        if initial_window >= 1_000_000:
+            browser_like_votes += 2
+            reasons.append(f"Large INITIAL_WINDOW_SIZE={initial_window} is browser-like.")
+        elif initial_window <= 131_072:
+            library_like_votes += 1
+            reasons.append(f"Small INITIAL_WINDOW_SIZE={initial_window} is library-like or conservative.")
+
+    if max_concurrent in (100, 1000):
+        browser_like_votes += 1
+        reasons.append(f"MAX_CONCURRENT_STREAMS={max_concurrent} is plausible for mainstream browsers.")
+    elif max_concurrent is not None and max_concurrent <= 100:
+        library_like_votes += 1
+        reasons.append(f"MAX_CONCURRENT_STREAMS={max_concurrent} is common in generic H2 clients.")
+
+    if max_header_list in (262144, 65536):
+        browser_like_votes += 1
+        reasons.append(f"MAX_HEADER_LIST_SIZE={max_header_list} matches common browser/library ranges.")
+
+    if max_frame == 16384 and header_table == 4096:
+        library_like_votes += 1
+        reasons.append("MAX_FRAME_SIZE=16384 combined with 4096 header table is library-like.")
+
+    if window_update is not None:
+        if window_update >= 10_000_000:
+            browser_like_votes += 1
+            reasons.append(f"Large connection WINDOW_UPDATE={window_update} is often browser-like.")
+        elif window_update in (0, 65_535, 15_663_105):
+            reasons.append(f"WINDOW_UPDATE={window_update} is not decisive by itself.")
+
+    if order:
+        if order[:4] in ([1, 2, 3, 4], [1, 2, 4, 6], [1, 3, 4, 6]):
+            browser_like_votes += 1
+            reasons.append(f"SETTINGS order {order} is plausible for browser stacks.")
+        elif order[:3] == [1, 2, 4] and header_table == 4096:
+            library_like_votes += 1
+            reasons.append(f"SETTINGS order {order} plus 4096 table is typical of library stacks.")
+
+    if family == "firefox" and header_table in (65536, 131072):
+        browser_like_votes += 1
+    if family == "webkit" and header_table and header_table >= 65536:
+        browser_like_votes += 1
+
+    if browser_like_votes >= library_like_votes + 2:
+        return "browser-like", reasons
+    if library_like_votes >= browser_like_votes + 2:
+        return "library-like", reasons
+    return "mixed", reasons
+
+
+def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, Any] | None, str | None]:
+    if BROWSER_HELPER_IMPORT_ERROR is not None:
+        return None, (
+            "browser helpers unavailable: "
+            f"{type(BROWSER_HELPER_IMPORT_ERROR).__name__}: {BROWSER_HELPER_IMPORT_ERROR}"
+        )
+    if build_driver_with_fallback is None or extract_json_text_from_page is None:
+        return None, "browser helpers unavailable"
+
+    driver = None
+    try:
+        driver = build_driver_with_fallback()
+        sep = "&" if "?" in endpoint else "?"
+        driver.get(f"{endpoint}{sep}src=browser-h2&t={int(time.time())}")
+        raw = extract_json_text_from_page(driver, timeout=timeout)
+        if not raw:
+            return None, "Could not parse JSON from the browser observation page."
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None, "Browser observation returned JSON, but not an object."
+        return data, None
+    except Exception as exc:
+        return None, f"browser probe failed: {type(exc).__name__}: {exc}"
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def score_http2_browser_observation(data: dict[str, Any] | None, error: str | None) -> tuple[int, str, dict[str, Any]]:
+    if not data:
+        return 3, f"Could not obtain browser HTTP/2 observation. {error or 'No data returned.'}", {}
+
+    user_agent = str(data.get("user_agent") or "")
+    http_version = str(data.get("http_version") or "").lower()
+    http2 = data.get("http2") if isinstance(data.get("http2"), dict) else {}
+    tls = data.get("tls") if isinstance(data.get("tls"), dict) else {}
+    akamai_fp = str(http2.get("akamai_fingerprint") or "")
+    parsed = parse_akamai_fingerprint_settings(akamai_fp)
+    style, reasons = classify_http2_settings(parsed, user_agent)
+    family = browser_family_from_ua(user_agent)
+    is_headless = bool(HEADLESS_RE.search(user_agent))
+    is_library_ua = family == "library"
+    ja3_hash = str(tls.get("ja3_hash") or "")
+    ja4 = str(tls.get("ja4") or "")
+
+    details = {
+        "user_agent": user_agent,
+        "http_version": http_version,
+        "family": family,
+        "akamai_fingerprint": akamai_fp,
+        "akamai_fingerprint_hash": http2.get("akamai_fingerprint_hash") or "",
+        "parsed": parsed,
+        "style": style,
+        "style_reasons": reasons,
+        "ja3_hash": ja3_hash,
+        "ja4": ja4,
+    }
+
+    if is_library_ua:
+        return 5, "Observed User-Agent names a library client, not a browser.", details
+
+    if not user_agent.strip():
+        return 4, "Observed User-Agent is empty; this is unusual for a normal browser.", details
+
+    if "h2" not in http_version and not akamai_fp:
+        if family in ("chromium", "firefox", "webkit"):
+            return 3, "Browser was detected, but HTTP/2 fingerprint data was absent or downgraded.", details
+        return 4, "Unknown client family and no HTTP/2 fingerprint data was available.", details
+
+    if style == "library-like":
+        if family in ("chromium", "firefox", "webkit"):
+            return 4, "Browser-like UA with library-like HTTP/2 SETTINGS fingerprint.", details
+        return 5, "Non-browser or unknown UA with library-like HTTP/2 SETTINGS fingerprint.", details
+
+    if is_headless:
+        if style == "browser-like":
+            return 4, "HTTP/2 SETTINGS are browser-like, but User-Agent exposes HeadlessChrome automation.", details
+        return 5, "Headless browser with non-browser-like HTTP/2 SETTINGS.", details
+
+    if family in ("chromium", "firefox", "webkit") and style == "browser-like":
+        return 1, "HTTP/2 SETTINGS fingerprint is coherent for the detected browser family.", details
+
+    if family in ("chromium", "firefox", "webkit") and style == "mixed":
+        return 2, "Detected browser has mostly plausible but not fully distinctive HTTP/2 SETTINGS.", details
+
+    if style == "browser-like":
+        return 2, "HTTP/2 SETTINGS look browser-like, but the browser family could not be identified confidently.", details
+
+    return 3, "HTTP/2 SETTINGS fingerprint is inconclusive.", details
+
+
+def print_observation(details: dict[str, Any]) -> None:
+    if not details:
+        return
+    parsed = details.get("parsed") or {}
+    settings = parsed.get("settings_kv") or {}
+    print("Observed browser/network values:")
+    print(f"  User-Agent: {details.get('user_agent') or '-'}")
+    print(f"  Family: {details.get('family') or 'unknown'}")
+    print(f"  HTTP version: {details.get('http_version') or '-'}")
+    print(f"  HTTP/2 style: {details.get('style') or 'unknown'}")
+    print(f"  Akamai fingerprint: {details.get('akamai_fingerprint') or '-'}")
+    print(f"  Akamai hash: {details.get('akamai_fingerprint_hash') or '-'}")
+    print(f"  SETTINGS order: {parsed.get('settings_order') or '-'}")
+    print(f"  SETTINGS values: {settings or '-'}")
+    print(f"  Window update: {parsed.get('window_update')}")
+    print(f"  Pseudo-header order: {parsed.get('pseudo_header_order') or '-'}")
+    print(f"  JA3 hash: {details.get('ja3_hash') or '-'}")
+    print(f"  JA4: {details.get('ja4') or '-'}")
+    reasons = details.get("style_reasons") or []
+    if reasons:
+        print()
+        print("Fingerprint notes:")
+        for reason in reasons[:8]:
+            print(f"  - {reason}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check HTTP/2 SETTINGS for the detected browser.")
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="JSON observation endpoint.")
+    parser.add_argument("--timeout", type=int, default=max(25, DEFAULT_TIMEOUT), help="Browser wait timeout.")
+    args = parser.parse_args()
+
+    print_browser_detection_header("HTTP/2 SETTINGS Browser Fingerprint Check")
+    print(f"Endpoint: {args.endpoint}")
+    print("Method: Selenium browser navigation; no Python HTTP client fallback is scored.")
+    print()
+
+    data, error = fetch_browser_observation(args.endpoint, args.timeout)
+    score, status, details = score_http2_browser_observation(data, error)
+    print_observation(details)
+
+    if error and not data:
+        print(f"Browser probe error: {error}")
+        print()
+
+    print(f"SCORE: {score}")
+    print(f"STATUS: {status}")
+    print()
+    print("=" * 64)
     return score
 
 

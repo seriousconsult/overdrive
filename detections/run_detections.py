@@ -12,7 +12,9 @@ Scripts whose source contains a TODO marker (word TODO) are not executed;
 they are reported as score 0 with comment "TODO:".
 
 Scapy capture scripts (`detections/vpn/TCP_stack.py`, `detections/router/TTL.py`,
-`detections/router/NAT_OS.py`) run via ``sudo -n`` (non-interactive) so the suite can finish unattended.
+`detections/router/NAT_OS.py`, `detections/network/DHCP.py`,
+`detections/network/client_mac_exposure.py`) run via ``sudo -n`` (non-interactive)
+so the suite can finish unattended.
 If you don't want a password to be a blocker, either:
 
 - Grant **passwordless sudo** (NOPASSWD) for *only* the venv python + those scripts (see README), or
@@ -37,14 +39,14 @@ from detections.common.common_runner import file_matches_pattern
 # Longer capture + scapy startup
 SUDO_SCRIPT_TIMEOUT_SEC = 180
 
-# Repository root. This file lives under ``run/``.
+# Repository root. This file lives under ``detections/``.
 BASE_DIR = Path(__file__).resolve().parent.parent
 DETECTIONS_DIR = BASE_DIR / "detections"
 
 # Python files to skip globally (runner / tooling / package markers, not detection modules)
 EXCLUDE_SCRIPT_NAMES = frozenset(
     {
-        "run_all_detections.py",
+        "run_detections.py",
         "setup_virtual_env.py",
         "verify_lab_from_host.py",
         "__init__.py",
@@ -65,7 +67,7 @@ SKIP_SUBDIRS = frozenset(
 )
 
 # Scripts that need sudo (run with elevated privileges; Scapy capture on Linux/WSL)
-SUDO_SCRIPTS = frozenset({"TCP_stack.py", "TTL.py", "NAT_OS.py"})
+SUDO_SCRIPTS = frozenset({"TCP_stack.py", "TTL.py", "NAT_OS.py", "DHCP.py", "client_mac_exposure.py"})
 
 
 def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:

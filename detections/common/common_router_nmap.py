@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,6 +44,67 @@ COMMON_ROUTER_PORTS: frozenset[int] = frozenset(
         9100,
     }
 )
+
+ROUTER_NMAP_SAFE_SCRIPTS: tuple[str, ...] = (
+    "banner",
+    "http-title",
+    "http-server-header",
+    "ssl-cert",
+    "ssl-date",
+    "ssh-hostkey",
+    "smb-os-discovery",
+)
+
+
+def is_privileged_for_nmap() -> bool:
+    """Best-effort check for raw-socket nmap features on Unix-like systems."""
+    if os.name == "nt":
+        return False
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return False
+    try:
+        return geteuid() == 0
+    except OSError:
+        return False
+
+
+def build_router_nmap_command(nmap_bin: str, ip: str, *, privileged: bool | None = None) -> tuple[list[str], str]:
+    """
+    Build a router scan command compatible with the current privilege level.
+
+    ``-A`` expands to OS detection, version detection, script scan, and traceroute.
+    OS detection/traceroute need raw-socket privileges on Linux, so never combine
+    ``--unprivileged`` with ``-A``.
+    """
+    if privileged is None:
+        privileged = is_privileged_for_nmap()
+
+    if privileged:
+        return (
+            [nmap_bin, "-Pn", "-p-", "-A", "-T4", "-oX", "-", ip],
+            "privileged aggressive scan: full TCP, OS/service/scripts/traceroute",
+        )
+
+    scripts = ",".join(ROUTER_NMAP_SAFE_SCRIPTS)
+    return (
+        [
+            nmap_bin,
+            "--unprivileged",
+            "-Pn",
+            "-sT",
+            "-sV",
+            "--version-light",
+            "--script",
+            scripts,
+            "-p-",
+            "-T4",
+            "-oX",
+            "-",
+            ip,
+        ],
+        "unprivileged TCP connect scan: full TCP, service/version + safe router scripts; OS detection/traceroute skipped",
+    )
 
 
 def nmap_xml_for_etree(xml_text: str) -> str:
@@ -266,9 +329,10 @@ def run_router_nmap_summary(ip: str) -> None:
     if not nmap_bin:
         print("nmap: not found in PATH; install nmap (e.g. apt install nmap).", file=sys.stderr)
         return
-    cmd = [nmap_bin, "--unprivileged", "-Pn", "-p-", "-A", "-T4", "-oX", "-", ip]
-    print("\n--- nmap (no ping, full TCP, OS/service/scripts; can take many minutes) ---", file=sys.stderr)
-    print(f"Running: nmap --unprivileged -Pn -p- -A -T4 {ip}", file=sys.stderr)
+    cmd, profile_note = build_router_nmap_command(nmap_bin, ip)
+    print("\n--- nmap (router forensic digest; can take many minutes) ---", file=sys.stderr)
+    print(f"Profile: {profile_note}", file=sys.stderr)
+    print(f"Running: {shlex.join(cmd)}", file=sys.stderr)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace")
     except OSError as exc:

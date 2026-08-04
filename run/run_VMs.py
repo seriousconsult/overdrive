@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the VirtualBox lab setup scripts, then verify the lab wiring.
 
-This is intentionally separate from ``run_all_detections.py`` because VM
+This is intentionally separate from ``detections/run_detections.py`` because VM
 creation scripts mutate VirtualBox state and can start GUI guests.
 """
 

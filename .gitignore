@@ -51,6 +51,10 @@ Thumbs.db
 
 # --- Run Outputs / Local Artifacts ---
 detection_results.*
+dirty_words_detail_*.txt
+dirty_words_report.*
+dirty_words_results.*
+dirty_words*.json
 results/
 reports/
 artifacts/

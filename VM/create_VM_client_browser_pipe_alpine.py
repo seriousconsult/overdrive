@@ -453,7 +453,7 @@ say "updating Alpine package indexes"
 run_logged apk update || say "WARNING: apk update failed; continuing with any cached indexes"
 
 FAILED=""
-for pkg in bash bind-tools curl iproute2 iptables iputils net-tools nmap python3 py3-pip py3-requests socat tcpdump; do
+for pkg in bash bind-tools curl iproute2 iptables iputils net-tools nmap python3 py3-pip py3-requests py3-httpx py3-h2 socat tcpdump tzdata; do
   install_pkg "$pkg" || FAILED="$FAILED $pkg"
 done
 
@@ -475,6 +475,19 @@ if command -v python3 >/dev/null 2>&1; then
     fi
   fi
 
+  if ! python3 -c 'import httpx, h2' >/dev/null 2>&1; then
+    if install_pkg py3-httpx && install_pkg py3-h2; then
+      :
+    elif command -v pip3 >/dev/null 2>&1; then
+      run_logged pip3 install --break-system-packages 'httpx[http2]' \
+        || run_logged pip3 install 'httpx[http2]' \
+        || FAILED="$FAILED httpx"
+    else
+      say "WARNING: pip3 missing; httpx install skipped"
+      FAILED="$FAILED httpx"
+    fi
+  fi
+
   if ! python3 -c 'import requests' >/dev/null 2>&1; then
     say "ERROR: Python requests is not importable after package install"
     FAILED="$FAILED requests-import"
@@ -482,6 +495,10 @@ if command -v python3 >/dev/null 2>&1; then
   if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
     say "ERROR: Scapy is not importable after package install"
     FAILED="$FAILED scapy-import"
+  fi
+  if ! python3 -c 'import httpx, h2' >/dev/null 2>&1; then
+    say "ERROR: httpx with HTTP/2 support is not importable after package install"
+    FAILED="$FAILED httpx-import"
   fi
 else
   say "ERROR: python3 missing; Python local_host tools will not run"
@@ -494,6 +511,112 @@ if [ -n "$FAILED" ]; then
 fi
 say "package install phase complete"
 exit 0
+"""
+
+CLIENT_IP_TIMEZONE_SCRIPT = r"""#!/bin/sh
+# Set the Alpine client's timezone to the timezone reported for its current egress IP.
+#
+# This intentionally changes only the local timezone presentation
+# (/etc/localtime + /etc/timezone). The system clock remains UTC internally.
+set -u
+
+LOG=/var/log/overdrive-ip-timezone.log
+TZDIR=/usr/share/zoneinfo
+
+log() {
+  echo "[overdrive-tz] $*"
+  echo "[overdrive-tz] $*" >> "$LOG"
+}
+
+valid_tz() {
+  tz="$1"
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /*|*..*|*//*|*\\*|UTC|Etc/UTC|Etc/GMT*) return 1 ;;
+  esac
+  [ -f "$TZDIR/$tz" ]
+}
+
+fetch_timezone() {
+  python3 <<'PY'
+import json
+import urllib.error
+import urllib.request
+
+URLS = (
+    "http://ip-api.com/json/?fields=status,message,timezone,query",
+    "https://ipapi.co/json/",
+)
+
+for url in URLS:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "overdrive-alpine-timezone/1.0", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.load(response)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+        continue
+    if not isinstance(data, dict):
+        continue
+    if data.get("status") == "fail":
+        continue
+    tz = str(data.get("timezone") or "").strip()
+    if "/" in tz:
+        print(tz)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+sync_timezone() {
+  : > "$LOG"
+  if [ ! -d "$TZDIR" ]; then
+    log "tzdata zoneinfo directory missing: $TZDIR"
+    return 1
+  fi
+
+  attempts="${1:-18}"
+  i=1
+  while [ "$i" -le "$attempts" ]; do
+    tz="$(fetch_timezone 2>>"$LOG" || true)"
+    if valid_tz "$tz"; then
+      cp "$TZDIR/$tz" /etc/localtime
+      echo "$tz" > /etc/timezone
+      log "timezone set to $tz from current egress IP"
+      date >> "$LOG" 2>&1 || true
+      return 0
+    fi
+    [ -n "$tz" ] && log "rejected timezone value: $tz"
+    sleep 5
+    i=$((i + 1))
+  done
+
+  log "could not determine a valid IP timezone after $attempts attempts"
+  return 1
+}
+
+case "${1:-sync}" in
+  sync) sync_timezone "${2:-18}" ;;
+  once) sync_timezone 1 ;;
+  *) echo "usage: $0 {sync|once} [attempts]" >&2; exit 2 ;;
+esac
+"""
+
+CLIENT_IP_TIMEZONE_INIT_ALPINE = """#!/sbin/openrc-run
+description="Set client timezone from current egress IP"
+
+depend() {
+    need net
+    after lab-net-up networking
+}
+
+start() {
+    ebegin "Syncing timezone to egress IP"
+    /usr/local/sbin/overdrive-ip-timezone sync 18
+    eend $?
+}
 """
 
 
@@ -751,6 +874,12 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
     package_script_host = work_root / "install-client-packages.sh"
     package_script_host.write_text(CLIENT_PACKAGE_INSTALL_SCRIPT, encoding="utf-8", newline="\n")
 
+    timezone_script_host = work_root / "overdrive-ip-timezone"
+    timezone_script_host.write_text(CLIENT_IP_TIMEZONE_SCRIPT, encoding="utf-8", newline="\n")
+
+    timezone_init_host = work_root / "overdrive-ip-timezone.init"
+    timezone_init_host.write_text(CLIENT_IP_TIMEZONE_INIT_ALPINE, encoding="utf-8", newline="\n")
+
     local_host_payload_host = work_root / "local_host"
     if local_host_payload_host.exists():
         shutil.rmtree(local_host_payload_host)
@@ -799,6 +928,10 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--copy-in",
         f"{client_firewall_init_host}:/etc/init.d",
         "--copy-in",
+        f"{timezone_script_host}:/usr/local/sbin",
+        "--copy-in",
+        f"{timezone_init_host}:/etc/init.d",
+        "--copy-in",
         f"{hardening_script_host}:/root",
         "--copy-in",
         f"{local_host_payload_host}:/root",
@@ -809,15 +942,19 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
             "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
             "mv /etc/init.d/lab-net-up.init /etc/init.d/lab-net-up && "
             "mv /etc/init.d/client-firewall.init /etc/init.d/client-firewall && "
+            "mv /etc/init.d/overdrive-ip-timezone.init /etc/init.d/overdrive-ip-timezone && "
             "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
             "chmod 0755 /usr/local/sbin/lab-net-up && "
             "chmod 0755 /usr/local/sbin/client-firewall && "
+            "chmod 0755 /usr/local/sbin/overdrive-ip-timezone && "
             "chmod 0755 /etc/init.d/lab-net-up && "
             "chmod 0755 /etc/init.d/client-firewall && "
+            "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
             "chmod 0755 /root/harden-client.sh && "
             "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
             "sh /root/harden-client.sh && "
             "rc-update add lab-net-up default && "
+            "rc-update add overdrive-ip-timezone default && "
             "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
             "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
             # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox

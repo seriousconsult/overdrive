@@ -79,7 +79,7 @@ def _status_ident_line(
     xml_bodies: list[tuple[str, str, dict[str, str]]],
 ) -> str:
     """
-    One line for STATUS: after SCORE (run_all_detections / HTML comment) — model, manufacturer, or SSDP SERVER.
+    One line for STATUS: after SCORE (detections/run_detections HTML comment) — model, manufacturer, or SSDP SERVER.
     """
     if not responses:
         return "No SSDP"
