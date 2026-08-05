@@ -90,7 +90,7 @@ OPENWRT_VDI_NAME = "openwrt.vdi"
 OSBOXES_URL = "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24.04/64bit.7z/download"
 OSBOXES_ARCHIVE_NAME = "ubuntu_osboxes_2404.7z"
 OSBOXES_LOGIN_USER = "osboxes"
-OSBOXES_LOGIN_PASSWORD_HINT = "osboxes.org"
+OSBOXES_LOGIN_PASSWORD_HINT = "configured by OSBOXES_LOGIN_PASSWORD in VM/.env"
 CLIENT_VDI_NAME = "client_browser.vdi"
 
 

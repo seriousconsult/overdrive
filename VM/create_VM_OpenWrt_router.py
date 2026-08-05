@@ -75,6 +75,7 @@ from VM.vm_config import (
     MULLVAD_DOT_PORT,
     MULLVAD_DOT_RESOLVERS,
     OPENWRT_LAN_DNS,
+    openwrt_root_password,
 )
 
 try:
@@ -617,11 +618,23 @@ def _wait_for_openwrt_shell(sock, *, timeout_s: float = 180.0) -> None:
     """Nudge the serial console until an ash/root prompt appears."""
     deadline = time.monotonic() + timeout_s
     collected = ""
+    sent_login = False
+    sent_password = False
     while time.monotonic() < deadline:
         collected += _serial_exchange(sock, "\r", wait_s=1.0)
-        lower = collected.lower()
+        lower = collected[-800:].lower()
         if "please press enter" in lower or "press enter to activate" in lower:
             collected += _serial_exchange(sock, "\r", wait_s=1.0)
+            lower = collected[-800:].lower()
+        if "login:" in lower and not sent_login:
+            collected += _serial_exchange(sock, "root\r", wait_s=1.0)
+            sent_login = True
+            sent_password = False
+            continue
+        if "password:" in lower and not sent_password:
+            collected += _serial_exchange(sock, openwrt_root_password() + "\r", wait_s=1.0)
+            sent_password = True
+            continue
         if any(p in collected for p in ("root@OpenWrt", "root@openwrt", "# ")):
             # Clear any partial line.
             _serial_exchange(sock, "\r", wait_s=0.5)
@@ -633,7 +646,83 @@ def _wait_for_openwrt_shell(sock, *, timeout_s: float = 180.0) -> None:
     )
 
 
-def _serial_upload_b64_file(sock, *, remote_path: str, data: bytes) -> None:
+def _serial_wait_for_text(sock, needles: tuple[str, ...], *, timeout_s: float) -> str:
+    """Read serial output until any lowercase needle appears."""
+    buf = ""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        buf += _serial_drain(sock, wait_s=0.4)
+        lower = buf.lower()
+        if any(needle in lower for needle in needles):
+            return buf
+    raise RuntimeError(
+        f"Timed out waiting for serial text {needles!r}. Last output:\n{buf[-1200:]}"
+    )
+
+
+def _serial_wait_for_shell_prompt(sock, *, timeout_s: float) -> str:
+    """Read serial output until the OpenWrt shell prompt returns."""
+    buf = ""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        buf += _serial_drain(sock, wait_s=0.4)
+        if any(p in buf for p in ("root@OpenWrt", "root@openwrt", "# ")):
+            return buf
+    raise RuntimeError(f"Timed out waiting for OpenWrt shell prompt. Last output:\n{buf[-1200:]}")
+
+
+def _serial_read_status_digit(sock, *, marker: str) -> str:
+    out = _serial_run_marked(sock, "cat /tmp/st", marker=marker, wait_s=3.0)
+    digit = "?"
+    for line in out.replace("\r", "\n").splitlines():
+        s = line.strip()
+        if s.isdigit() and len(s) <= 3:
+            digit = s
+    return digit
+
+
+def _set_openwrt_root_password(sock) -> None:
+    """Set OpenWrt root password from VM/.env over the existing serial shell."""
+    password = openwrt_root_password()
+    if any(ch in password for ch in "\r\n\0"):
+        raise RuntimeError("OPENWRT_ROOT_PASSWORD must not contain newlines or NUL bytes.")
+    if len(password) > _SERIAL_MAX_CMD:
+        raise RuntimeError(
+            "OPENWRT_ROOT_PASSWORD is too long for the OpenWrt serial console; "
+            f"use {_SERIAL_MAX_CMD} characters or fewer."
+        )
+
+    _serial_run_marked(sock, "rm -f /tmp/st", marker="PW0", wait_s=3.0)
+    _serial_drain(sock, wait_s=0.2)
+    sock.sendall(b"passwd root; echo $? >/tmp/st\r")
+    _serial_wait_for_text(
+        sock,
+        ("new password", "password:"),
+        timeout_s=8.0,
+    )
+    sock.sendall(f"{password}\r".encode("utf-8", errors="replace"))
+    _serial_wait_for_text(
+        sock,
+        ("retype", "again", "confirm", "repeat"),
+        timeout_s=8.0,
+    )
+    sock.sendall(f"{password}\r".encode("utf-8", errors="replace"))
+    out = _serial_wait_for_shell_prompt(sock, timeout_s=12.0)
+    digit = _serial_read_status_digit(sock, marker="PW2")
+    if digit != "0":
+        raise RuntimeError(f"Failed to set OpenWrt root password (exit={digit}).\n{out[-1000:]}")
+    _serial_run_marked(sock, "rm -f /tmp/st", marker="PWC", wait_s=3.0)
+    print("[overdrive] OpenWrt root password set from VM/.env.")
+
+
+def _serial_upload_b64_file(
+    sock,
+    *,
+    remote_path: str,
+    data: bytes,
+    verify_grep: str | None = "verify_mullvad",
+    chmod_mode: str = "0755",
+) -> None:
     """Upload bytes to remote_path via short base64 printf chunks (no long lines).
 
     Never deletes ``remote_path`` until a verified decode succeeds (writes via temp).
@@ -699,19 +788,20 @@ def _serial_upload_b64_file(sock, *, remote_path: str, data: bytes) -> None:
             "Rely on image inject instead."
         )
 
-    digit = _serial_status_digit(
-        sock,
-        check_cmd=f"grep -q verify_mullvad {tmp_out}; echo $? >/tmp/st",
-        marker="D3",
-    )
-    if digit != "0":
-        raise RuntimeError(
-            f"Serial upload content check failed (grep_exit={digit})"
+    if verify_grep:
+        digit = _serial_status_digit(
+            sock,
+            check_cmd=f"grep -q {verify_grep} {tmp_out}; echo $? >/tmp/st",
+            marker="D3",
         )
+        if digit != "0":
+            raise RuntimeError(
+                f"Serial upload content check failed (grep_exit={digit})"
+            )
 
     # Atomic replace — existing remote_path kept until this succeeds.
     _serial_run_marked(sock, f"mv -f {tmp_out} {remote_path}", marker="MV", wait_s=3.0)
-    _serial_run_marked(sock, f"chmod 0755 {remote_path}", marker="D2", wait_s=3.0)
+    _serial_run_marked(sock, f"chmod {chmod_mode} {remote_path}", marker="D2", wait_s=3.0)
     print(f"[overdrive]   upload OK ({size} bytes)")
 
 
@@ -746,6 +836,7 @@ def ensure_mullvad_dot_over_serial(
     sock = _open_router_serial_socket(timeout_s=min(90.0, timeout_s))
     try:
         _wait_for_openwrt_shell(sock, timeout_s=min(180.0, timeout_s))
+        _set_openwrt_root_password(sock)
 
         # Stop any first-boot background apply so we own a single run.
         _serial_run_marked(sock, "killall apply_mullvad_dot.sh", marker="K1", wait_s=3.0)

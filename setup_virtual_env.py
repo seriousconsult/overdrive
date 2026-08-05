@@ -11,10 +11,12 @@ Bootstrap a project-local Python virtual environment for Overdrive automation.
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import venv
 from pathlib import Path
@@ -32,6 +34,35 @@ PY_DEPS = [
     "scapy",
     "zeroconf",
 ]
+
+APT_LOCK_TIMEOUT_SECONDS = 180
+APT_LOCK_WAIT_SECONDS = 60
+APT_LOCK_POLL_SECONDS = 2
+APT_LOCK_REPORT_SECONDS = 15
+APT_LOCK_MAX_ATTEMPTS = 5
+APT_UPDATE_MAX_AGE_SECONDS = 24 * 60 * 60
+APT_LOCK_PATHS = (
+    "/var/lib/apt/lists/lock",
+    "/var/cache/apt/archives/lock",
+    "/var/lib/dpkg/lock-frontend",
+    "/var/lib/dpkg/lock",
+)
+APT_LOCK_PROCESS_NAMES = {
+    "apt",
+    "apt-get",
+    "apt.systemd.daily",
+    "dpkg",
+    "unattended-upgr",
+    "unattended-upgrades",
+    "packagekitd",
+}
+
+
+class AptLockError(subprocess.CalledProcessError):
+    """Raised when apt/dpkg is still locked after polite waiting."""
+
+
+APT_UPDATED = False
 
 def get_linux_info():
     if shutil.which("dnf"):
@@ -93,23 +124,234 @@ def run_cmd(
     subprocess.run(cmd, check=True, env=env)
 
 
+def apt_base_command(args: list[str]) -> list[str]:
+    apt_bin = "apt-get" if have_cmd("apt-get") else "apt"
+    return [
+        apt_bin,
+        "-o",
+        f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_SECONDS}",
+        "-o",
+        f"APT::Get::Lock::Timeout={APT_LOCK_TIMEOUT_SECONDS}",
+        *args,
+    ]
+
+
+def package_name_needs_apt_index(package: str) -> bool:
+    return not package.startswith("/") and not package.endswith(".deb")
+
+
+def apt_lists_are_fresh() -> bool:
+    lists_dir = Path("/var/lib/apt/lists")
+    try:
+        newest = max(
+            path.stat().st_mtime
+            for path in lists_dir.iterdir()
+            if path.is_file() and path.name != "lock"
+        )
+    except (OSError, ValueError):
+        return False
+    return time.time() - newest <= APT_UPDATE_MAX_AGE_SECONDS
+
+
+def ensure_apt_updated_for(packages: list[str], *, non_interactive: bool) -> None:
+    global APT_UPDATED
+
+    if APT_UPDATED:
+        return
+    if not any(package_name_needs_apt_index(package) for package in packages):
+        return
+    if apt_lists_are_fresh():
+        print("[*] apt package lists are fresh; skipping apt-get update.")
+        return
+
+    print(f"[*] apt-get update (waits up to {APT_LOCK_WAIT_SECONDS}s for apt locks)")
+    run_apt(["update"], non_interactive=non_interactive)
+    APT_UPDATED = True
+
+
+def active_package_processes() -> list[str]:
+    found: list[str] = []
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return found
+
+    for proc_dir in proc_root.iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        try:
+            comm = (proc_dir / "comm").read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            continue
+        if comm not in APT_LOCK_PROCESS_NAMES:
+            continue
+        try:
+            cmdline_raw = (proc_dir / "cmdline").read_bytes()
+            cmdline = cmdline_raw.replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
+        except OSError:
+            cmdline = comm
+        found.append(f"pid={proc_dir.name} {cmdline or comm}")
+    return found
+
+
+def proc_cmdline(pid: int) -> str:
+    proc_dir = Path("/proc") / str(pid)
+    try:
+        cmdline_raw = (proc_dir / "cmdline").read_bytes()
+        cmdline = cmdline_raw.replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
+        if cmdline:
+            return cmdline
+    except OSError:
+        pass
+    try:
+        return (proc_dir / "comm").read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return "(process exited)"
+
+
+def passive_package_watchers() -> list[str]:
+    watchers: list[str] = []
+    for line in active_package_processes():
+        if "unattended-upgrade-shutdown" in line:
+            watchers.append(line)
+    return watchers
+
+
+def apt_lock_holder_pids(*, non_interactive: bool) -> set[int]:
+    existing_locks = [path for path in APT_LOCK_PATHS if Path(path).exists()]
+    if not existing_locks or not have_cmd("fuser"):
+        return set()
+
+    commands = [["fuser", *existing_locks]]
+    if not is_root() and have_cmd("sudo"):
+        try:
+            commands.append(add_sudo(["fuser", *existing_locks], non_interactive=non_interactive))
+        except RuntimeError:
+            pass
+
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+        except OSError:
+            continue
+        if proc.returncode != 0:
+            continue
+        pids = {int(match) for match in re.findall(r"\b\d+\b", proc.stdout)}
+        if pids:
+            return pids
+    return set()
+
+
+def apt_lock_holder_details(*, non_interactive: bool) -> str:
+    details: list[str] = []
+    holder_pids = sorted(apt_lock_holder_pids(non_interactive=non_interactive))
+    if holder_pids:
+        details.append(
+            "apt/dpkg lock holders:\n"
+            + "\n".join(f"  pid={pid} {proc_cmdline(pid)}" for pid in holder_pids)
+        )
+
+    watchers = passive_package_watchers()
+    if watchers:
+        details.append(
+            "Package watcher processes not treated as lock holders:\n"
+            + "\n".join(f"  {line}" for line in watchers)
+        )
+
+    return "\n".join(details)
+
+
+def apt_likely_locked(*, non_interactive: bool) -> bool:
+    if apt_lock_holder_pids(non_interactive=non_interactive):
+        return True
+
+    if have_cmd("fuser"):
+        return False
+
+    package_processes = [
+        line
+        for line in active_package_processes()
+        if "unattended-upgrade-shutdown" not in line
+    ]
+    return bool(package_processes)
+
+
+def wait_for_apt_locks(*, non_interactive: bool) -> None:
+    deadline = time.monotonic() + APT_LOCK_WAIT_SECONDS
+    last_report = 0.0
+    last_pids: set[int] | None = None
+
+    while True:
+        holder_pids = apt_lock_holder_pids(non_interactive=non_interactive)
+        if not holder_pids:
+            return
+
+        now = time.monotonic()
+        remaining = max(0, int(deadline - now))
+        if remaining <= 0:
+            print("[-] apt/dpkg is still locked; not removing lock files.")
+            details = apt_lock_holder_details(non_interactive=non_interactive)
+            if details:
+                print(details)
+            raise AptLockError(100, ["apt-lock-wait"])
+
+        if holder_pids != last_pids or now - last_report >= APT_LOCK_REPORT_SECONDS:
+            print(
+                "[*] apt/dpkg lock is busy; waiting without touching lock files "
+                f"(up to {remaining}s left)."
+            )
+            details = apt_lock_holder_details(non_interactive=non_interactive)
+            if details:
+                print(details)
+            last_report = now
+            last_pids = set(holder_pids)
+
+        time.sleep(min(APT_LOCK_POLL_SECONDS, remaining))
+
+
+def run_apt(
+    args: list[str],
+    *,
+    non_interactive: bool = False,
+) -> None:
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    env["APT_LISTCHANGES_FRONTEND"] = "none"
+
+    cmd = apt_base_command(args)
+    if not is_root():
+        cmd = add_sudo(
+            ["env", "DEBIAN_FRONTEND=noninteractive", "APT_LISTCHANGES_FRONTEND=none", *cmd],
+            non_interactive=non_interactive,
+        )
+
+    for attempt in range(1, APT_LOCK_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            print(f"[*] Retrying apt command (attempt {attempt}/{APT_LOCK_MAX_ATTEMPTS})...")
+
+        wait_for_apt_locks(non_interactive=non_interactive)
+        proc = subprocess.run(cmd, env=env if is_root() else None)
+        if proc.returncode == 0:
+            return
+
+        locked = apt_likely_locked(non_interactive=non_interactive)
+        if proc.returncode != 100 or not locked or attempt == APT_LOCK_MAX_ATTEMPTS:
+            if locked:
+                print("[-] apt/dpkg still appears to be busy; not removing lock files.")
+                details = apt_lock_holder_details(non_interactive=non_interactive)
+                if details:
+                    print(details)
+                raise AptLockError(proc.returncode, cmd)
+            raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+        wait_for_apt_locks(non_interactive=non_interactive)
+
+
 
 def install_packages(info, packages: list[str], *, non_interactive: bool = False) -> None:
     mgr = info["mgr"]
     if mgr == "apt":
-        env = os.environ.copy()
-        env["DEBIAN_FRONTEND"] = "noninteractive"
-        cmd = ["apt", "install", "-y", *packages]
-        if is_root():
-            subprocess.run(cmd, check=True, env=env)
-        else:
-            subprocess.run(
-                add_sudo(
-                    ["env", "DEBIAN_FRONTEND=noninteractive", *cmd],
-                    non_interactive=non_interactive,
-                ),
-                check=True,
-            )
+        ensure_apt_updated_for(packages, non_interactive=non_interactive)
+        run_apt(["install", "-y", *packages], non_interactive=non_interactive)
     else:
         run_cmd([mgr, "install", "-y", *packages], non_interactive=non_interactive)
 
@@ -126,11 +368,32 @@ def install_first_available(
         try:
             install_packages(info, packages, non_interactive=non_interactive)
             return
+        except AptLockError:
+            raise
         except subprocess.CalledProcessError as exc:
             last_exc = exc
             print(f"[-] Failed installing: {' '.join(packages)}; trying next...")
     if last_exc:
         raise last_exc
+
+
+def package_installed(info, package: str) -> bool:
+    if package.startswith("/") or package.endswith(".deb"):
+        return False
+
+    mgr = info["mgr"]
+    if mgr == "apt" and have_cmd("dpkg-query"):
+        proc = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Status}", package],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return proc.returncode == 0 and "install ok installed" in proc.stdout
+    if mgr == "dnf" and have_cmd("rpm"):
+        proc = subprocess.run(["rpm", "-q", package], capture_output=True, check=False)
+        return proc.returncode == 0
+    return False
 
 def distro_success_label():
     info = get_linux_info()
@@ -147,14 +410,12 @@ def install_system_deps(*, non_interactive: bool = False):
     mgr = info["mgr"]
     print(f"Detected {mgr} package manager. Installing system deps...")
 
-    if mgr == "apt":
-        print("[*] apt update")
-        run_cmd(["apt", "update"], use_sudo=True, non_interactive=non_interactive)
-
     # 1) libpcap
-    if not have_cmd("tcpdump"):  # heuristic; libpcap provides build headers too
+    if not package_installed(info, info["pcap"]):
         print(f"[*] Installing {info['pcap']}...")
         install_packages(info, [info["pcap"]], non_interactive=non_interactive)
+    else:
+        print(f"[*] {info['pcap']} already installed.")
 
     # 2) 7zip
     if not have_cmd("7z"):
@@ -334,12 +595,24 @@ def parse_args():
         action="store_true",
         help="Create the venv and exit instead of opening an activated shell.",
     )
+    parser.add_argument(
+        "--apt-lock-wait",
+        type=int,
+        default=APT_LOCK_WAIT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Maximum time to wait for apt/dpkg lock holders before failing "
+            f"(default: {APT_LOCK_WAIT_SECONDS})."
+        ),
+    )
     return parser.parse_args()
 
 
 
 def main():
     args = parse_args()
+    global APT_LOCK_WAIT_SECONDS
+    APT_LOCK_WAIT_SECONDS = max(0, args.apt_lock_wait)
 
     # 0) Ensure host python can create venvs with pip
     ensure_venv_support(

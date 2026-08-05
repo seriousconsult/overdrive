@@ -41,7 +41,7 @@ Serial console endpoint:
 
 
 Username: root
-Password: configured by ALPINE_CLIENT_ROOT_PASSWORD in VM/vm_config.py
+Password: configured by ALPINE_CLIENT_ROOT_PASSWORD in VM/.env
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ from VM.alpine_client_hardening import (
     CLIENT_FIREWALL_SCRIPT,
     CLIENT_HARDENING_SCRIPT,
 )
-from VM.vm_config import ALPINE_CLIENT_ROOT_PASSWORD
+from VM.vm_config import alpine_client_root_password
 
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = "OpenWrt_LAN_Client_Alpine"
@@ -880,6 +880,10 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
     timezone_init_host = work_root / "overdrive-ip-timezone.init"
     timezone_init_host.write_text(CLIENT_IP_TIMEZONE_INIT_ALPINE, encoding="utf-8", newline="\n")
 
+    root_password_file = work_root / "alpine-root-password"
+    root_password_file.write_text(alpine_client_root_password(), encoding="utf-8", newline="\n")
+    root_password_file.chmod(0o600)
+
     local_host_payload_host = work_root / "local_host"
     if local_host_payload_host.exists():
         shutil.rmtree(local_host_payload_host)
@@ -905,7 +909,7 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--hostname",
         CLIENT_GUEST_HOSTNAME,
         "--root-password",
-        f"password:{ALPINE_CLIENT_ROOT_PASSWORD}",
+        f"file:{root_password_file}",
         "--run-command",
         (
             "mkdir -p /usr/local/sbin /root && "
