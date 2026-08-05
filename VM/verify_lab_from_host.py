@@ -80,7 +80,7 @@ def check_client_serial_pipe(
             print(f"  [+] {vm_name} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{port}")
             print(
                 "      Socket-level check only; this does not prove guest ttyS0 output. "
-                f"Run: python VM/{'create_VM_client_browser_pipe_alpine.py' if vm_name == 'OpenWrt_LAN_Client_Alpine' else 'create_VM_client_browser_pipe.py'} --serial-only"
+                f"Run: python VM/{'alpine_client/create_VM_client_browser_pipe_alpine.py' if vm_name == 'OpenWrt_LAN_Client_Alpine' else 'create_VM_client_browser_pipe.py'} --serial-only"
             )
         else:
             errs.append(
@@ -162,7 +162,7 @@ def check_router(info: dict[str, str], verbose: bool) -> list[str]:
     if uart in ("", "off"):
         print(
             f"  [!] {ROUTER_VM}: COM1/uart1 not enabled. "
-            f"Run: python VM/create_VM_OpenWrt_router.py --enable-serial"
+            f"Run: python VM/openwrt_router/create_VM_OpenWrt_router.py --enable-serial"
         )
     if nic2 == "nat":
         # Keys vary by VirtualBox version; treat missing as "not clearly on".

@@ -33,9 +33,9 @@ import urllib.request
 from pathlib import Path
 
 
-# Ensure the repo package path is importable when running this script from VM/
+# Ensure the repo package path is importable when running this script directly.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+REPO_ROOT = str(Path(SCRIPT_DIR).resolve().parents[1])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -66,7 +66,7 @@ from detections.common.common_vm import (
     vm_is_registered,
     wsl_to_windows_path,
 )
-from VM.openwrt_assets import (
+from VM.openwrt_router.openwrt_assets import (
     APPLY_MULLVAD_DOT_SH,
     OVERDRIVE_MULLVAD_INIT_D,
     UCI_DEFAULTS_ENABLE_MULLVAD,
@@ -79,7 +79,7 @@ from VM.vm_config import (
 )
 
 try:
-    from VM.create_VM_client_browser_pipe_alpine import setup_client_vm as setup_alpine_client_vm
+    from VM.alpine_client.create_VM_client_browser_pipe_alpine import setup_client_vm as setup_alpine_client_vm
 except ImportError:
     setup_alpine_client_vm = None
 
@@ -1106,7 +1106,7 @@ def connect_router_serial_console(
 ) -> bool:
     """Attach this terminal to the OpenWrt serial console (reuse client TCP bridge)."""
     # Import lazily so --help / create paths stay light if client module is heavy.
-    from VM import create_VM_client_browser_pipe_alpine as client_serial
+    from VM.alpine_client import create_VM_client_browser_pipe_alpine as client_serial
 
     if vboxmanage_targets_windows(vboxmanage):
         return client_serial.connect_tcp_serial_console(

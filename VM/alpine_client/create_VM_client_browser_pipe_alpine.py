@@ -64,9 +64,9 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-# Ensure the repo package path is importable when running this script from VM/
+# Ensure the repo package path is importable when running this script directly.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+REPO_ROOT = str(Path(SCRIPT_DIR).resolve().parents[1])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -91,7 +91,7 @@ from detections.common.common_vm import (
     wait_after_disk_operation,
     wsl_to_windows_path,
 )
-from VM.alpine_client_hardening import (
+from VM.alpine_client.alpine_client_hardening import (
     CLIENT_FIREWALL_INIT_ALPINE,
     CLIENT_FIREWALL_SCRIPT,
     CLIENT_HARDENING_SCRIPT,

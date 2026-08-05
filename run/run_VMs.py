@@ -34,9 +34,13 @@ REPO_ROOT = RUN_DIR.parent
 SCRIPT_DIR = REPO_ROOT / "VM"
 
 PREFERRED_CREATE_ORDER = (
-    "create_VM_OpenWrt_router.py",
+    "openwrt_router/create_VM_OpenWrt_router.py",
 )
-DEFAULT_SKIP_CREATE_SCRIPTS = frozenset()
+DEFAULT_SKIP_CREATE_SCRIPTS = frozenset(
+    {
+        "alpine_client/create_VM_client_browser_pipe_alpine.py",
+    }
+)
 VERIFY_SCRIPT = "verify_lab_from_host.py"
 
 
@@ -46,7 +50,11 @@ def script_has_todo(script_path: Path) -> bool:
 
 def discover_create_scripts(*, include_todo: bool) -> list[Path]:
     """Return create_VM_*.py scripts in lab-friendly order."""
-    all_scripts = {p.name: p for p in SCRIPT_DIR.glob("create_VM_*.py") if p.is_file()}
+    all_scripts = {
+        p.relative_to(SCRIPT_DIR).as_posix(): p
+        for p in SCRIPT_DIR.rglob("create_VM_*.py")
+        if p.is_file()
+    }
     ordered: list[Path] = []
 
     for name in PREFERRED_CREATE_ORDER:
@@ -58,6 +66,10 @@ def discover_create_scripts(*, include_todo: bool) -> list[Path]:
 
     runnable = []
     for path in ordered:
+        rel = path.relative_to(SCRIPT_DIR).as_posix()
+        if rel in DEFAULT_SKIP_CREATE_SCRIPTS:
+            print(f"[skip] {rel}: handled by router orchestration")
+            continue
         if not include_todo and script_has_todo(path):
             print(f"[skip] {path.name}: contains TODO")
             continue
