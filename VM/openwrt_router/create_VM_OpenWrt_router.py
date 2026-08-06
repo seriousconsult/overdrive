@@ -14,7 +14,7 @@ start, serial runs that script once (no upload/retry loop) and **requires**
 
 **Serial console:** COM1 / ``ttyS0`` at 115200 baud (stock OpenWrt already uses
 ``console=ttyS0``). On Windows VirtualBox this is exposed as TCP port **2324** (client uses
-**2323**). Attach with ``./create_VM_OpenWrt_router.py --serial-only``.
+**2325**). Attach with ``./create_VM_OpenWrt_router.py --serial-only``.
 
 At startup, any **existing VirtualBox VM with the same name** and the matching folder under
 ``~/VirtualBox VMs/<VM_NAME>/`` are **removed** (power off, ``unregistervm --delete``, then delete
@@ -462,24 +462,49 @@ umount /
     return False
 
 
-def _open_router_serial_socket(*, timeout_s: float = 60.0) -> "socket.socket":
+def _router_serial_hosts() -> list[str]:
+    """Prefer localhost first; WSL Windows-host IPs can hang before refusing."""
+    from detections.common.common_vm import serial_tcp_host_candidates
+
+    hosts = serial_tcp_host_candidates(SERIAL_TCP_HOST)
+    if "127.0.0.1" in hosts:
+        hosts = ["127.0.0.1", *[host for host in hosts if host != "127.0.0.1"]]
+    return hosts
+
+
+def _open_router_serial_socket(
+    *,
+    timeout_s: float = 60.0,
+    vboxmanage: str | None = None,
+    endpoint: str | None = None,
+) -> "socket.socket":
     """Connect to the OpenWrt COM1 TCP serial endpoint."""
     import socket
 
-    from detections.common.common_vm import serial_tcp_host_candidates
-
-    last_err: OSError | None = None
+    errors: dict[str, str] = {}
     deadline = time.monotonic() + timeout_s
+    next_refresh = 0.0
     while time.monotonic() < deadline:
-        for host in serial_tcp_host_candidates(SERIAL_TCP_HOST):
+        now = time.monotonic()
+        if vboxmanage and endpoint and now >= next_refresh:
+            if get_vm_state(vboxmanage, VM_NAME) == "running":
+                try:
+                    refresh_live_router_serial(vboxmanage, endpoint)
+                except Exception as exc:
+                    errors["refresh"] = str(exc)
+            next_refresh = now + 8.0
+
+        for host in _router_serial_hosts():
             try:
-                sock = socket.create_connection((host, ROUTER_SERIAL_TCP_PORT), timeout=2.0)
+                sock = socket.create_connection((host, ROUTER_SERIAL_TCP_PORT), timeout=1.0)
                 sock.settimeout(0.5)
                 return sock
             except OSError as exc:
-                last_err = exc
+                errors[host] = str(exc)
         time.sleep(0.5)
-    raise RuntimeError(f"Could not open router serial TCP :{ROUTER_SERIAL_TCP_PORT}: {last_err}")
+
+    detail = "; ".join(f"{host}: {err}" for host, err in errors.items()) or "no attempts"
+    raise RuntimeError(f"Could not open router serial TCP :{ROUTER_SERIAL_TCP_PORT}: {detail}")
 
 
 def _serial_drain(sock, *, wait_s: float = 0.3) -> str:
@@ -825,15 +850,12 @@ def ensure_mullvad_dot_over_serial(
         f"(timeout {int(timeout_s)}s)..."
     )
 
-    if vboxmanage:
-        try:
-            endpoint = router_serial_endpoint(vboxmanage)
-            refresh_live_router_serial(vboxmanage, endpoint)
-            time.sleep(2.0)
-        except Exception as exc:
-            print(f"[!] Could not refresh serial backend before apply: {exc}")
-
-    sock = _open_router_serial_socket(timeout_s=min(90.0, timeout_s))
+    endpoint = router_serial_endpoint(vboxmanage) if vboxmanage else None
+    sock = _open_router_serial_socket(
+        timeout_s=min(180.0, timeout_s),
+        vboxmanage=vboxmanage,
+        endpoint=endpoint,
+    )
     try:
         _wait_for_openwrt_shell(sock, timeout_s=min(180.0, timeout_s))
         _set_openwrt_root_password(sock)
@@ -1075,6 +1097,39 @@ def refresh_live_router_serial(vboxmanage: str, endpoint: str) -> None:
     run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", uart_mode, endpoint])
 
 
+def wait_for_router_running(vboxmanage: str, *, timeout_s: float = 60.0) -> None:
+    """Wait until VBoxManage reports the router VM as running."""
+    deadline = time.monotonic() + timeout_s
+    last_state = None
+    while time.monotonic() < deadline:
+        try:
+            last_state = get_vm_state(vboxmanage, VM_NAME)
+        except Exception as exc:
+            last_state = f"error: {exc}"
+        if last_state == "running":
+            return
+        time.sleep(1.0)
+    raise RuntimeError(f"{VM_NAME} did not reach running state; last state={last_state!r}")
+
+
+def stop_router_for_start_retry(vboxmanage: str) -> None:
+    """Power off the newly-created router before retrying a different frontend."""
+    try:
+        if get_vm_state(vboxmanage, VM_NAME) == "running":
+            run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "poweroff"], lock_retries=10, lock_retry_s=1.0)
+    except Exception as exc:
+        print(f"[!] Could not power off router before start retry: {exc}")
+    time.sleep(3.0)
+
+
+def alternate_non_gui_start_type(start_type: str) -> str | None:
+    if start_type == "headless":
+        return "separate"
+    if start_type == "separate":
+        return "headless"
+    return None
+
+
 def router_serial_instructions(vboxmanage: str, endpoint: str) -> str:
     """Host-specific attach instructions for the OpenWrt serial console."""
     if vboxmanage_targets_windows(vboxmanage):
@@ -1085,7 +1140,7 @@ def router_serial_instructions(vboxmanage: str, endpoint: str) -> str:
             f"From WSL, connect to one of: {hosts}\n"
             f"  ./{Path(__file__).name} --serial-only\n"
             "Stock OpenWrt already uses console=ttyS0; press Enter for the ash login.\n"
-            "Client serial stays on TCP 2323; router uses 2324 so both can run together.\n"
+            "Alpine client serial uses TCP 2325; router uses 2324 so both can run together.\n"
         )
     return (
         "\n--- Serial console (OpenWrt ttyS0) ---\n"
@@ -1448,29 +1503,50 @@ def setup_openwrt_vm(
         print(router_serial_instructions(vboxmanage, serial_endpoint))
         return
 
-    print(f"Starting VM ({start_type})...")
-    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", start_type])
+    start_attempts = [start_type]
+    alternate = alternate_non_gui_start_type(start_type)
+    if alternate:
+        start_attempts.append(alternate)
 
-    # IMPORTANT: Do not call get_vm_state() here; it is not imported and the VM may
-    # already be running by the time this function executes.
-    print(f"[+] VM start command issued for {VM_NAME!r} with --type {start_type!r}.")
+    last_apply_error: Exception | None = None
+    for attempt_no, attempt_type in enumerate(start_attempts, start=1):
+        if attempt_no > 1:
+            print(f"[!] Retrying router VM with non-GUI start type {attempt_type!r}.")
+            stop_router_for_start_retry(vboxmanage)
 
-    # Apply + verify Mullvad DoT over serial before handing the console to the user.
-    # First-boot init is best-effort; this is the correctness guarantee for every create.
-    try:
-        ensure_mullvad_dot_over_serial(
-            timeout_s=240.0,
-            vboxmanage=vboxmanage,
-            allow_serial_upload=False,
-        )
-    except Exception as exc:
-        print(f"[!!] FATAL: Mullvad DoT not active after create: {exc}")
+        print(f"Starting VM ({attempt_type})...")
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", attempt_type])
+        wait_for_router_running(vboxmanage, timeout_s=90.0)
+        print(f"[+] VM is running with --type {attempt_type!r}.")
+
+        # Apply + verify Mullvad DoT over serial before handing the console to the user.
+        # First-boot init is best-effort; this is the correctness guarantee for every create.
+        try:
+            ensure_mullvad_dot_over_serial(
+                timeout_s=240.0,
+                vboxmanage=vboxmanage,
+                allow_serial_upload=False,
+            )
+            break
+        except Exception as exc:
+            last_apply_error = exc
+            print(f"[!!] Mullvad DoT not active after start type {attempt_type!r}: {exc}")
+            if "Could not open router serial TCP" in str(exc) and attempt_no < len(start_attempts):
+                continue
+            print(f"[!!] FATAL: Mullvad DoT not active after create: {exc}")
+            print(mullvad_dot_console_instructions(apply_helper))
+            print(router_serial_instructions(vboxmanage, serial_endpoint))
+            raise RuntimeError(
+                "Router VM started but DNS is not Mullvad DoT. "
+                "See /tmp/overdrive-mullvad-dot.log on the OpenWrt serial console."
+            ) from exc
+    else:
         print(mullvad_dot_console_instructions(apply_helper))
         print(router_serial_instructions(vboxmanage, serial_endpoint))
         raise RuntimeError(
             "Router VM started but DNS is not Mullvad DoT. "
             "See /tmp/overdrive-mullvad-dot.log on the OpenWrt serial console."
-        ) from exc
+        ) from last_apply_error
 
     print(mullvad_dot_console_instructions(apply_helper))
     print(router_serial_instructions(vboxmanage, serial_endpoint))
@@ -1530,12 +1606,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--start-type",
-        choices=("gui", "separate", "none"),
+        choices=("gui", "headless", "separate", "none"),
         default="gui",
         help=(
             "How to start the VM after creation.\n"
-            "Headless removed because it crashes on this host.\n"
-            "Default: gui."
+            "Default: gui. If headless/separate is selected and cannot expose serial, "
+            "the other non-GUI type is retried."
         ),
     )
     parser.add_argument(
@@ -1617,12 +1693,16 @@ def main() -> None:
         if setup_alpine_client_vm:
             print("\n--- Starting Alpine Client VM ---")
             try:
-                setup_alpine_client_vm(start_vm=True, connect_serial=True)
+                setup_alpine_client_vm(
+                    start_vm=True,
+                    connect_serial=True,
+                )
                 print("[+] Alpine client VM started successfully.")
             except Exception as e:
                 print(f"[!] Failed to start Alpine client VM: {e}")
+                raise
         else:
-            print("\n[!] Alpine client setup script not found, cannot start Alpine VM.")
+            raise RuntimeError("Alpine client setup script not found, cannot start Alpine VM.")
 
 
 if __name__ == "__main__":

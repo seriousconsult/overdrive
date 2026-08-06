@@ -146,7 +146,7 @@ disable_service() {
 remove_if_installed() {
   pkg="$1"
   if apk info -e "$pkg" >/dev/null 2>&1; then
-    apk del "$pkg"
+    apk del --purge "$pkg" || apk del "$pkg" || true
   fi
 }
 
@@ -164,7 +164,7 @@ remove_matching_packages() {
   prefix="$1"
   apk info 2>/dev/null | while IFS= read -r pkg; do
     case "$pkg" in
-      "$prefix"|"$prefix"-*) apk del "$pkg" ;;
+      "$prefix"|"$prefix"-*) apk del --purge "$pkg" >/dev/null 2>&1 || apk del "$pkg" >/dev/null 2>&1 || true ;;
     esac
   done
 }
@@ -292,6 +292,18 @@ clean_private_artifacts() {
   find /var/log -type f -exec sh -c ': > "$1"' sh {} \; 2>/dev/null || true
 }
 
+remove_remote_login_artifacts() {
+  rm -f \
+    /usr/sbin/sshd \
+    /usr/bin/ssh /usr/bin/scp /usr/bin/sftp \
+    /usr/bin/ssh-add /usr/bin/ssh-agent /usr/bin/ssh-keygen /usr/bin/ssh-keyscan \
+    /usr/sbin/dropbear /usr/bin/dropbear /usr/bin/dbclient \
+    /usr/bin/dropbearkey /usr/bin/dropbearconvert /usr/bin/dropbearmulti \
+    /usr/bin/telnet /usr/bin/telnetd /usr/sbin/telnetd \
+    2>/dev/null || true
+  rm -rf /etc/ssh /etc/dropbear /root/.ssh 2>/dev/null || true
+}
+
 install_remote_service_guard() {
   cat > /usr/local/sbin/overdrive-no-remote-services <<'GUARD'
 #!/bin/sh
@@ -376,6 +388,7 @@ remove_matching_packages dropbear
 for pkg in openssh openssh-client openssh-client-common openssh-client-default openssh-keygen openssh-server openssh-server-common openssh-server-pam openssh-sftp-server dropbear dropbear-scp dropbear-ssh telnet-bsd busybox-extras; do
   remove_if_installed "$pkg"
 done
+remove_remote_login_artifacts
 
 for svc in sshd ssh dropbear; do
   disable_service "$svc"
@@ -385,10 +398,11 @@ install_remote_service_guard
 /usr/local/sbin/overdrive-no-remote-services
 
 kill_matching_processes
+remove_remote_login_artifacts
 
-for bin in ssh sshd scp sftp dropbear dbclient dropbearkey; do
+for bin in sshd dropbear telnetd; do
   if command -v "$bin" >/dev/null 2>&1; then
-    echo "[overdrive] ERROR: SSH-related binary still present after hardening: $bin" >&2
+    echo "[overdrive] ERROR: remote-login daemon binary still present after hardening: $bin" >&2
     exit 1
   fi
 done

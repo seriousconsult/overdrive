@@ -21,7 +21,7 @@ Serial console endpoint:
   Which endpoint you connect to depends on the **host VirtualBox is actually running on**:
 
   * Windows host / Windows VirtualBox:
-      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2323``. The script starts the VM
+      VirtualBox exposes COM1 as TCP server ``127.0.0.1:2325``. The script starts the VM
       and attaches from WSL using a native Python socket terminal.
 
   * WSL shell controlling Windows VirtualBox through ``VBoxManage.exe``:
@@ -96,6 +96,12 @@ from VM.alpine_client.alpine_client_hardening import (
     CLIENT_FIREWALL_SCRIPT,
     CLIENT_HARDENING_SCRIPT,
 )
+from VM.alpine_client.package_assets import client_package_install_script
+from VM.alpine_client.pipeline import (
+    AlpineClientBuildOptions,
+    BuildStep,
+    run_alpine_client_pipeline,
+)
 from VM.vm_config import alpine_client_root_password
 
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
@@ -104,6 +110,7 @@ CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
 CLIENT_GUEST_HOSTNAME = "my-alpine-client"
 CLIENT_VDI_SIZE_MIB = 4096
+CLIENT_MEMORY_MIB = 1024
 CLIENT_ROOT_DEVICE = "/dev/sda"
 
 ALPINE_SERIAL_TCP_PORT = 2325
@@ -412,105 +419,6 @@ if command -v dig >/dev/null 2>&1; then
   dig +time=2 +tries=1 +short @192.168.1.1 google.com 2>&1 || true
   echo ""
 fi
-"""
-
-CLIENT_PACKAGE_INSTALL_SCRIPT = r"""#!/bin/sh
-# Required package install for the Alpine lab client.
-#
-# Package mirror/DNS failures should stop VM creation. Details are left in
-# the guest image for inspection if virt-customize fails:
-#   cat /root/overdrive-package-install.log
-set -u
-
-LOG=/root/overdrive-package-install.log
-: > "$LOG"
-
-say() {
-  echo "[overdrive] $*"
-  echo "[overdrive] $*" >> "$LOG"
-}
-
-run_logged() {
-  echo "+ $*" >> "$LOG"
-  "$@" >> "$LOG" 2>&1
-}
-
-install_pkg() {
-  pkg="$1"
-  if apk info -e "$pkg" >/dev/null 2>&1; then
-    say "package already installed: $pkg"
-    return 0
-  fi
-  if run_logged apk add --no-cache "$pkg"; then
-    say "installed package: $pkg"
-    return 0
-  fi
-  say "WARNING: failed to install package: $pkg"
-  return 1
-}
-
-say "updating Alpine package indexes"
-run_logged apk update || say "WARNING: apk update failed; continuing with any cached indexes"
-
-FAILED=""
-for pkg in bash bind-tools curl iproute2 iptables iputils net-tools nmap python3 py3-pip py3-requests py3-httpx py3-h2 socat tcpdump tzdata; do
-  install_pkg "$pkg" || FAILED="$FAILED $pkg"
-done
-
-if command -v python3 >/dev/null 2>&1; then
-  if ! python3 -c 'import requests' >/dev/null 2>&1; then
-    install_pkg py3-requests || FAILED="$FAILED py3-requests"
-  fi
-
-  if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
-    if install_pkg py3-scapy; then
-      :
-    elif command -v pip3 >/dev/null 2>&1; then
-      run_logged pip3 install --break-system-packages scapy \
-        || run_logged pip3 install scapy \
-        || FAILED="$FAILED scapy"
-    else
-      say "WARNING: pip3 missing; Scapy install skipped"
-      FAILED="$FAILED scapy"
-    fi
-  fi
-
-  if ! python3 -c 'import httpx, h2' >/dev/null 2>&1; then
-    if install_pkg py3-httpx && install_pkg py3-h2; then
-      :
-    elif command -v pip3 >/dev/null 2>&1; then
-      run_logged pip3 install --break-system-packages 'httpx[http2]' \
-        || run_logged pip3 install 'httpx[http2]' \
-        || FAILED="$FAILED httpx"
-    else
-      say "WARNING: pip3 missing; httpx install skipped"
-      FAILED="$FAILED httpx"
-    fi
-  fi
-
-  if ! python3 -c 'import requests' >/dev/null 2>&1; then
-    say "ERROR: Python requests is not importable after package install"
-    FAILED="$FAILED requests-import"
-  fi
-  if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
-    say "ERROR: Scapy is not importable after package install"
-    FAILED="$FAILED scapy-import"
-  fi
-  if ! python3 -c 'import httpx, h2' >/dev/null 2>&1; then
-    say "ERROR: httpx with HTTP/2 support is not importable after package install"
-    FAILED="$FAILED httpx-import"
-  fi
-else
-  say "ERROR: python3 missing; Python local_host tools will not run"
-  FAILED="$FAILED python3"
-fi
-
-if [ -n "$FAILED" ]; then
-  say "ERROR: required package install failed:$FAILED"
-  exit 1
-fi
-say "package install phase complete"
-exit 0
 """
 
 CLIENT_IP_TIMEZONE_SCRIPT = r"""#!/bin/sh
@@ -846,7 +754,12 @@ def connect_serial_console(vboxmanage: str, endpoint: str, *, force_interactive:
     return True
 
 
-def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_prime: bool) -> bool:
+def prime_client_vdi_for_intnet_lab(
+    vdi_linux: str,
+    work_root: Path,
+    *,
+    skip_prime: bool,
+) -> bool:
     vc = require_vdi_prime_tools(skip_prime=skip_prime)
     virt_env = _libguestfs_env()
 
@@ -870,9 +783,15 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
 
     hardening_script_host = work_root / "harden-client.sh"
     hardening_script_host.write_text(CLIENT_HARDENING_SCRIPT, encoding="utf-8", newline="\n")
+    hardening_script_host.chmod(0o700)
 
     package_script_host = work_root / "install-client-packages.sh"
-    package_script_host.write_text(CLIENT_PACKAGE_INSTALL_SCRIPT, encoding="utf-8", newline="\n")
+    package_script_host.write_text(
+        client_package_install_script(),
+        encoding="utf-8",
+        newline="\n",
+    )
+    package_script_host.chmod(0o700)
 
     timezone_script_host = work_root / "overdrive-ip-timezone"
     timezone_script_host.write_text(CLIENT_IP_TIMEZONE_SCRIPT, encoding="utf-8", newline="\n")
@@ -915,10 +834,8 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
             "mkdir -p /usr/local/sbin /root && "
             "echo 'my-alpine-client' > /etc/hostname"
         ),
-        "--copy-in",
-        f"{package_script_host}:/root",
-        "--run-command",
-        "sh /root/install-client-packages.sh",
+        "--run",
+        str(package_script_host),
         "--copy-in",
         f"{interfaces_host}:/etc/network",
         "--copy-in",
@@ -936,8 +853,6 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
         "--copy-in",
         f"{timezone_init_host}:/etc/init.d",
         "--copy-in",
-        f"{hardening_script_host}:/root",
-        "--copy-in",
         f"{local_host_payload_host}:/root",
         "--copy-in",
         f"{detections_payload_host}:/root",
@@ -954,9 +869,7 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
             "chmod 0755 /etc/init.d/lab-net-up && "
             "chmod 0755 /etc/init.d/client-firewall && "
             "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
-            "chmod 0755 /root/harden-client.sh && "
             "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
-            "sh /root/harden-client.sh && "
             "rc-update add lab-net-up default && "
             "rc-update add overdrive-ip-timezone default && "
             "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
@@ -999,6 +912,15 @@ def prime_client_vdi_for_intnet_lab(vdi_linux: str, work_root: Path, *, skip_pri
             "echo \"[overdrive] unattended bootloader: $f default=${DEF:-none}\"; "
             "done"
         ),
+        "--run",
+        str(hardening_script_host),
+        "--run-command",
+        (
+            "rm -f "
+            "/root/install-client-packages.sh /root/harden-client.sh "
+            "/tmp/install-client-packages.sh /tmp/harden-client.sh "
+            "/var/tmp/install-client-packages.sh /var/tmp/harden-client.sh"
+        ),
     ]
     subprocess.run(commands, check=True, env=virt_env)
     return True
@@ -1036,7 +958,17 @@ def nudge_alpine_boot_menu(*, rounds: int = 8, interval_s: float = 1.0) -> None:
     print(f"[!] Could not nudge Alpine serial boot ({last_err}); relying on extlinux TOTALTIMEOUT.")
 
 
-def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_vdi_prime: bool = False) -> None:
+def setup_client_vm(
+    *,
+    start_vm: bool = True,
+    connect_serial: bool = True,
+    skip_vdi_prime: bool = False,
+) -> None:
+    options = AlpineClientBuildOptions(
+        start_vm=start_vm,
+        connect_serial=connect_serial,
+        skip_vdi_prime=skip_vdi_prime,
+    )
     paths = get_system_paths(VM_NAME, ALPINE_IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -1048,53 +980,144 @@ def setup_client_vm(*, start_vm: bool = True, connect_serial: bool = True, skip_
     img_path = paths["img_path"]
     vdi_wsl = os.path.join(vm_base, CLIENT_VDI_NAME)
 
-    print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
-    remove_existing_vm(vboxmanage, VM_NAME, vm_base, medium_path_for_vbox=wsl_to_windows_path(vdi_wsl) if paths["is_wsl"] else vdi_wsl)
-
-    os.makedirs(vm_base, exist_ok=True)
-    os.makedirs(vms_root, exist_ok=True)
-
     vdi_for_vbox = wsl_to_windows_path(vdi_wsl) if paths["is_wsl"] else vdi_wsl
     vms_root_for_vbox = wsl_to_windows_path(vms_root) if paths["is_wsl"] else vms_root
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
 
-    download_alpine_image(ALPINE_URL, img_path)
-
-    if not os.path.exists(vdi_wsl):
-        print("Converting base Alpine image into VDI format...")
-        run_vboxmanage(vboxmanage, ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"])
-
-    expand_client_vdi_for_packages(vboxmanage, vdi_wsl)
-    prime_client_vdi_for_intnet_lab(vdi_wsl, Path(download_dir), skip_prime=skip_vdi_prime)
-
-    run_vboxmanage(vboxmanage, ["createvm", "--name", VM_NAME, "--ostype", "Linux_64", "--basefolder", vms_root_for_vbox, "--register"])
-    run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--memory", "1024", "--ioapic", "on", "--cpus", str(CLIENT_VM_CPUS), "--nic1", "intnet", "--intnet1", LAN_INTNET_NAME])
-
     serial_endpoint = serial_endpoint_for_vbox(vboxmanage, tcp_port=ALPINE_SERIAL_TCP_PORT)
-    configure_serial_endpoint(vboxmanage, serial_endpoint)
 
-    run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci"])
-    run_vboxmanage(vboxmanage, ["storageattach", VM_NAME, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", vdi_for_vbox])
+    def remove_previous_vm() -> None:
+        print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
+        remove_existing_vm(
+            vboxmanage,
+            VM_NAME,
+            vm_base,
+            medium_path_for_vbox=wsl_to_windows_path(vdi_wsl) if paths["is_wsl"] else vdi_wsl,
+        )
 
-    if not start_vm:
-        return
+    def ensure_workspace() -> None:
+        os.makedirs(vm_base, exist_ok=True)
+        os.makedirs(vms_root, exist_ok=True)
 
-    print(f"Starting {VM_NAME}...")
-    run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+    def download_base_image() -> None:
+        download_alpine_image(ALPINE_URL, img_path)
 
-    # Unattended: don't leave the Syslinux menu waiting for a human Enter.
-    time.sleep(2)
-    try:
-        nudge_alpine_boot_menu()
-    except Exception as exc:
-        print(f"[!] Boot nudge failed: {exc}")
+    def convert_base_image() -> None:
+        if os.path.exists(vdi_wsl):
+            print("Alpine client VDI already exists after cleanup; reusing it.")
+            return
+        print("Converting base Alpine image into VDI format...")
+        run_vboxmanage(
+            vboxmanage,
+            ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"],
+        )
 
-    if connect_serial:
-        time.sleep(1)
-        extra_args = ["--force-interactive-serial", "--serial-port", str(ALPINE_SERIAL_TCP_PORT)]
-        spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"LAN Alpine Client serial ({ALPINE_SERIAL_TCP_PORT})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
-        if not spawned:
-            connect_serial_console(vboxmanage, serial_endpoint, force_interactive=True)
+    def expand_disk() -> None:
+        expand_client_vdi_for_packages(vboxmanage, vdi_wsl, target_mib=CLIENT_VDI_SIZE_MIB)
+
+    def prime_guest_image() -> None:
+        prime_client_vdi_for_intnet_lab(
+            vdi_wsl,
+            Path(download_dir),
+            skip_prime=options.skip_vdi_prime,
+        )
+
+    def create_vm_registration() -> None:
+        run_vboxmanage(
+            vboxmanage,
+            [
+                "createvm",
+                "--name",
+                VM_NAME,
+                "--ostype",
+                "Linux_64",
+                "--basefolder",
+                vms_root_for_vbox,
+                "--register",
+            ],
+        )
+
+    def configure_vm_hardware() -> None:
+        run_vboxmanage(
+            vboxmanage,
+            [
+                "modifyvm",
+                VM_NAME,
+                "--memory",
+                str(CLIENT_MEMORY_MIB),
+                "--ioapic",
+                "on",
+                "--cpus",
+                str(CLIENT_VM_CPUS),
+                "--nic1",
+                "intnet",
+                "--intnet1",
+                LAN_INTNET_NAME,
+            ],
+        )
+        configure_serial_endpoint(vboxmanage, serial_endpoint)
+
+    def attach_storage() -> None:
+        run_vboxmanage(
+            vboxmanage,
+            ["storagectl", VM_NAME, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci"],
+        )
+        run_vboxmanage(
+            vboxmanage,
+            [
+                "storageattach",
+                VM_NAME,
+                "--storagectl",
+                "SATA",
+                "--port",
+                "0",
+                "--device",
+                "0",
+                "--type",
+                "hdd",
+                "--medium",
+                vdi_for_vbox,
+            ],
+        )
+
+    def start_and_connect() -> None:
+        print(f"Starting {VM_NAME}...")
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+
+        # Unattended: don't leave the Syslinux menu waiting for a human Enter.
+        time.sleep(2)
+        try:
+            nudge_alpine_boot_menu()
+        except Exception as exc:
+            print(f"[!] Boot nudge failed: {exc}")
+
+        if options.connect_serial:
+            time.sleep(1)
+            extra_args = ["--force-interactive-serial", "--serial-port", str(ALPINE_SERIAL_TCP_PORT)]
+            spawned = spawn_serial_console_window(
+                Path(__file__).resolve(),
+                title=f"LAN Alpine Client serial ({ALPINE_SERIAL_TCP_PORT})",
+                extra_args=extra_args,
+                cwd=Path(SCRIPT_DIR),
+            )
+            if not spawned:
+                connect_serial_console(vboxmanage, serial_endpoint, force_interactive=True)
+
+    steps = [
+        BuildStep("remove previous VM and disk", remove_previous_vm),
+        BuildStep("prepare workspace", ensure_workspace),
+        BuildStep("download Alpine base image", download_base_image),
+        BuildStep("convert image to VDI", convert_base_image),
+        BuildStep("expand client disk", expand_disk),
+        BuildStep("prime guest image with packages, hardening, and payloads", prime_guest_image),
+        BuildStep("create VirtualBox VM registration", create_vm_registration),
+        BuildStep("configure VM hardware and serial", configure_vm_hardware),
+        BuildStep("attach VDI storage", attach_storage),
+    ]
+    if options.start_vm:
+        steps.append(BuildStep("start VM and attach serial", start_and_connect))
+
+    run_alpine_client_pipeline(steps)
 
 
 if __name__ == "__main__":
@@ -1121,4 +1144,7 @@ if __name__ == "__main__":
         connect_serial_console(vboxmanage, serial_endpoint, force_interactive=ns.force_interactive_serial or ns.serial_here)
         raise SystemExit(0)
 
-    setup_client_vm(start_vm=not ns.no_start, connect_serial=not ns.no_start)
+    setup_client_vm(
+        start_vm=not ns.no_start,
+        connect_serial=not ns.no_start,
+    )

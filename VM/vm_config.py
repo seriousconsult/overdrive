@@ -62,7 +62,7 @@ OSBOXES_LOGIN_PASSWORD_ENV = "OSBOXES_LOGIN_PASSWORD"
 
 
 def alpine_client_root_password() -> str:
-    return vm_secret(ALPINE_CLIENT_ROOT_PASSWORD_ENV)
+    return vm_secret(ALPINE_CLIENT_ROOT_PASSWORD_ENV, min_len=1)
 
 
 def openwrt_root_password() -> str:
