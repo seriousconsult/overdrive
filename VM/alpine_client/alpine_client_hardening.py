@@ -284,12 +284,22 @@ install_filesystem_hardening() {
   rm -f /root/.wget-hsts /root/.python_history /root/.lesshst /root/.bash_history 2>/dev/null || true
 }
 
+scrub_tracking_identifiers() {
+  # Remove stable host/instance IDs that can correlate DHCP or local state.
+  rm -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+  : > /etc/machine-id 2>/dev/null || true
+  chmod 0444 /etc/machine-id 2>/dev/null || true
+  rm -rf /var/lib/cloud 2>/dev/null || true
+  rm -f /etc/cloud/cloud.cfg.d/* 2>/dev/null || true
+}
+
 clean_private_artifacts() {
   rm -f /etc/ssh/ssh_host_* /etc/dropbear/dropbear_* 2>/dev/null || true
   rm -f /root/.ash_history /root/.wget-hsts /root/.python_history /root/.lesshst /root/.bash_history 2>/dev/null || true
   find /tmp /var/tmp -mindepth 1 -maxdepth 1 -name 'overdrive-*' -exec rm -rf {} + 2>/dev/null || true
   find /var/cache/apk -type f -name '*.apk' -delete 2>/dev/null || true
   find /var/log -type f -exec sh -c ': > "$1"' sh {} \; 2>/dev/null || true
+  scrub_tracking_identifiers
 }
 
 remove_remote_login_artifacts() {

@@ -98,8 +98,12 @@ def main():
             score = 2
             status = f"Some mDNS/DNS-SD services found ({found}); weak residential LAN evidence."
         else:
-            score = 3
-            status = "No mDNS/DNS-SD services found; ambiguous because many networks suppress multicast."
+            # Align with mDNS_consumer: empty multicast view is lab-like, not neutral.
+            score = 5
+            status = (
+                "No mDNS/DNS-SD services found; lab-like multicast silence "
+                "(lived-in home LANs usually advertise something)."
+            )
         print(f"SCORE: {score}")
         print(f"STATUS: {status}")
 

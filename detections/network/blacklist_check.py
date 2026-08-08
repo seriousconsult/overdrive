@@ -4,12 +4,12 @@
 Queries public IPv4 against several DNS blocklists (DNSBL / RBL).
 Uses ip-api metadata (hosting/datacenter) as a secondary signal.
 
-Score (1–5):
+Score (1–5), higher = less like a typical residential egress:
   5 — Listed on Spamhaus ZEN with a high-severity code (SBL/XBL/DROP/CSS, etc.)
-  4 — Listed on ZEN PBL only, or on other DNSBLs, or multiple hits
+  4 — Listed on other DNSBLs, or PBL plus additional list hits
   3 — Could not complete checks (no IPv4, DNS failures, or DNSBL Service Blocked)
   2 — Not on queried lists, but ip-api marks IP as hosting/datacenter
-  1 — Clean on queried lists and not flagged as hosting
+  1 — Clean on queried lists, or Spamhaus PBL-only (common on residential/dynamic ISP ranges)
 
 Reliability:
   - Consensus public IPv4 (multiple probes)
@@ -367,10 +367,10 @@ def _score_from_results(
         if sev == "pbl":
             if len(non_err_hits) <= 1:
                 return (
-                    4,
+                    1,
                     prefix
-                    + f"Spamhaus PBL only ({zen_hit}) — often dynamic/residential "
-                    "ranges; verify context.",
+                    + f"Spamhaus PBL only ({zen_hit}) — typical of residential/dynamic "
+                    "ISP ranges, not a strong non-home signal.",
                 )
             return (
                 4,

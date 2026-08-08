@@ -6,7 +6,10 @@ Discovers scripts dynamically under ``detections/``. Shared helpers live in
 ``detections/common`` and are skipped.
 Section order: Root first, then subfolders A–Z.
 
-Outputs to console and generates a compact HTML report.
+Outputs to console and generates a compact HTML report
+(``detection_results.html``) with one section per folder and every discovered
+script (including LAN neighbor density, LAN discovery silence, and mDNS
+consumer diversity).
 
 Scripts whose source contains a TODO marker (word TODO) are not executed;
 they are reported as score 0 with comment "TODO:".
@@ -15,10 +18,13 @@ Scapy capture scripts (`detections/vpn/TCP_stack.py`, `detections/router/TTL.py`
 `detections/router/NAT_OS.py`, `detections/network/DHCP.py`,
 `detections/network/client_mac_exposure.py`) run via ``sudo -n`` (non-interactive)
 so the suite can finish unattended.
+Prefer ``virtual_env/bin/python`` when present; otherwise use the current
+interpreter if Scapy imports there (Alpine guest / system python3).
+If already root, capture scripts run without sudo.
 If you don't want a password to be a blocker, either:
 
-- Grant **passwordless sudo** (NOPASSWD) for *only* the venv python + those scripts (see README), or
-- One-time grant Linux file capabilities to the venv python (``setcap cap_net_raw,cap_net_admin``),
+- Grant **passwordless sudo** (NOPASSWD) for *only* the capture python + those scripts (see README), or
+- One-time grant Linux file capabilities to that python (``setcap cap_net_raw,cap_net_admin``),
   and this runner will detect that and run **without sudo**.
 """
 
@@ -169,12 +175,58 @@ def venv_python_path() -> Path:
     return BASE_DIR / "virtual_env" / "bin" / "python"
 
 
-def venv_has_raw_capture_caps() -> bool:
+def _is_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    return bool(geteuid and geteuid() == 0)
+
+
+def _python_has_scapy(python: str | Path, *, wsl_prefix: list[str] | None = None) -> bool:
+    """Return True if ``import scapy.all`` succeeds under the given interpreter."""
+    py = str(python)
+    try:
+        if wsl_prefix:
+            cmd = wsl_prefix + ["-e", py, "-c", "import scapy.all"]
+        else:
+            cmd = [py, "-c", "import scapy.all"]
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=str(BASE_DIR),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def _capture_python_path() -> Path | None:
     """
-    Best-effort check whether the venv python has Linux capabilities that allow
+    Interpreter for Scapy capture scripts.
+
+    Prefer repo ``virtual_env/bin/python``; otherwise the current process
+    interpreter when Scapy is importable there (Alpine system python3).
+    """
+    venv = venv_python_path()
+    if venv.is_file():
+        return venv
+    # Windows host without a Linux venv cannot run packet capture locally.
+    if sys.platform == "win32":
+        return None
+    try:
+        current = Path(sys.executable).resolve()
+    except OSError:
+        current = Path(sys.executable)
+    if _python_has_scapy(current):
+        return current
+    return None
+
+
+def python_has_raw_capture_caps(py: Path) -> bool:
+    """
+    Best-effort check whether ``py`` has Linux capabilities that allow
     Scapy/pcap without sudo (common: cap_net_raw + cap_net_admin).
     """
-    py = venv_python_path()
     if not py.is_file():
         return False
 
@@ -207,14 +259,25 @@ def venv_has_raw_capture_caps() -> bool:
     return "cap_net_raw" in out and "cap_net_admin" in out
 
 
+def venv_has_raw_capture_caps() -> bool:
+    """Compatibility wrapper: check caps on the preferred capture interpreter."""
+    py = _capture_python_path()
+    if py is None:
+        return False
+    return python_has_raw_capture_caps(py)
+
+
 def script_has_todo(script_path: Path) -> bool:
     return file_matches_pattern(script_path, TODO_PATTERN)
 
 
 def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int]:
     """Run a script and return (output, error, returncode)."""
-    if use_sudo and venv_has_raw_capture_caps():
-        # Avoid sudo entirely if the venv interpreter already has the needed network capabilities.
+    capture_py = _capture_python_path() if use_sudo else None
+    if use_sudo and capture_py is not None and (
+        _is_root() or python_has_raw_capture_caps(capture_py)
+    ):
+        # Already root (Alpine guest) or interpreter has raw-socket caps.
         use_sudo = False
 
     timeout = SUDO_SCRIPT_TIMEOUT_SEC if use_sudo else 120
@@ -230,27 +293,30 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
             else repo_pythonpath + pythonpath_sep + existing_pythonpath
         )
         script_str = _to_wsl_posix(script_path) if wsl_prefix else str(script_path)
-        linux_venv = BASE_DIR / "virtual_env" / "bin" / "python"
 
         if use_sudo:
-            wsl_script = _to_wsl_posix(script_path)
-            wsl_venv = _to_wsl_posix(linux_venv)
-
-            if not linux_venv.is_file():
+            if capture_py is None:
                 return (
                     "",
-                    "Scapy capture scripts need virtual_env/bin/python (Linux/WSL venv). "
+                    "Scapy capture scripts need a Python with Scapy installed "
+                    "(virtual_env/bin/python, or system python3 on Alpine/Linux). "
                     "Windows-only venv (Scripts\\python.exe) cannot run packet capture.",
                     -1,
                 )
 
+            wsl_script = _to_wsl_posix(script_path)
+            wsl_py = _to_wsl_posix(capture_py)
+
             if wsl_prefix:
                 # Same distro as normal runs: sudo -n must be passwordless in that distro
-                cmd = wsl_prefix + ["-e", "sudo", "-n", wsl_venv, wsl_script]
+                cmd = wsl_prefix + ["-e", "sudo", "-n", wsl_py, wsl_script]
             elif sys.platform == "win32":
-                cmd = ["wsl", "-e", "sudo", "-n", wsl_venv, wsl_script]
+                cmd = ["wsl", "-e", "sudo", "-n", wsl_py, wsl_script]
             else:
-                cmd = ["sudo", "-n", str(linux_venv.resolve()), str(script_path.resolve())]
+                cmd = ["sudo", "-n", str(capture_py.resolve()), str(script_path.resolve())]
+        elif capture_py is not None and script_path.name in SUDO_SCRIPTS:
+            # Capture script running without sudo (root or setcap).
+            cmd = [str(capture_py), script_str]
         else:
             cmd = VENV_PYTHON + [script_str]
 
@@ -268,7 +334,7 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
             ol = output.lower()
             if "password" in ol and ("sudo" in ol or "a password is required" in ol):
                 err = (
-                    "sudo needs a password; configure NOPASSWD for venv python + this capture script "
+                    "sudo needs a password; configure NOPASSWD for the capture python + this script "
                     "(see README: Passwordless sudo)"
                 )
             else:

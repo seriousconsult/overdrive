@@ -42,6 +42,16 @@ Serial console endpoint:
 
 Username: root
 Password: configured by ALPINE_CLIENT_ROOT_PASSWORD in VM/.env
+
+Tracking identifiers (hostname, custom NIC MAC, DHCP client identity, machine-id,
+egress User-Agent) are scrubbed at VDI prime / VM configure time. Rebuild the
+client after changing those settings. LAN silence is intentional and still looks
+lab-like to discovery probes.
+
+Detection Python libs (Scapy, Selenium, …) and network diagnostics (nmap, dig,
+tcpdump, Chromium) are NOT installed by the base package script. Priming copies
+``setup_virtual_env.py`` and runs it inside the guest so deps land in
+``/root/virtual_env`` (plus OS packages via that script's apk path).
 """
 
 from __future__ import annotations
@@ -102,15 +112,22 @@ from VM.alpine_client.pipeline import (
     BuildStep,
     run_alpine_client_pipeline,
 )
-from VM.vm_config import alpine_client_root_password
+from VM.vm_config import (
+    CLIENT_NIC_OUI,
+    alpine_client_root_password,
+    format_mac_colon,
+    random_client_mac_vbox,
+)
 
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = "OpenWrt_LAN_Client_Alpine"
 CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
-CLIENT_GUEST_HOSTNAME = "my-alpine-client"
-CLIENT_VDI_SIZE_MIB = 4096
-CLIENT_MEMORY_MIB = 1024
+# Neutral name: must not match lab/client hostname regexes in DHCP / MAC probes.
+CLIENT_GUEST_HOSTNAME = "desktop"
+# Chromium + detection Python deps need more than the tiny cloud image default.
+CLIENT_VDI_SIZE_MIB = 8192
+CLIENT_MEMORY_MIB = 2048
 CLIENT_ROOT_DEVICE = "/dev/sda"
 
 ALPINE_SERIAL_TCP_PORT = 2325
@@ -336,7 +353,7 @@ start() {
 }
 """
 
-LAB_NET_UP_SCRIPT = r"""#!/bin/sh
+LAB_NET_UP_SCRIPT = f"""#!/bin/sh
 # Bring up Ethernet NICs and request DHCP from OpenWrt when still unaddressed.
 set -u
 ok=0
@@ -349,7 +366,8 @@ for path in /sys/class/net/*; do
     ok=1
     continue
   fi
-  if udhcpc -i "$IFACE" -n -q; then
+  # Neutral DHCP identity: send generic hostname, empty vendor class (no alpine/overdrive).
+  if udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V ""; then
     ok=1
   fi
 done
@@ -357,7 +375,7 @@ ip -4 route show default 2>/dev/null | grep -q . && exit 0
 [ "$ok" -eq 1 ]
 """
 
-LAB_NET_TROUBLESHOOT_SCRIPT = r"""#!/bin/sh
+LAB_NET_TROUBLESHOOT_SCRIPT = f"""#!/bin/sh
 # Installed by create_VM_client_browser_pipe_alpine.py
 set -u
 echo "================================================================"
@@ -395,10 +413,10 @@ for IFACE in /sys/class/net/*; do
   echo "--- link up + udhcpc $IFACE ---"
   if [ "$(id -u)" -eq 0 ]; then
     ip link set "$IFACE" up 2>&1 || true
-    udhcpc -i "$IFACE" -n -q 2>&1 || true
+    udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V "" 2>&1 || true
   else
     sudo ip link set "$IFACE" up 2>&1 || true
-    sudo udhcpc -i "$IFACE" -n -q 2>&1 || true
+    sudo udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V "" 2>&1 || true
   fi
 done
 echo ""
@@ -459,7 +477,7 @@ URLS = (
 for url in URLS:
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "overdrive-alpine-timezone/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "curl/8.5.0", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=8) as response:
@@ -819,12 +837,15 @@ def prime_client_vdi_for_intnet_lab(
         detections_payload_host,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
+    setup_venv_host = work_root / "setup_virtual_env.py"
+    shutil.copy2(Path(REPO_ROOT) / "setup_virtual_env.py", setup_venv_host)
 
     print("Injecting custom configuration and packages into Alpine image...")
     commands = [
         vc,
         "-a",
         vdi_linux,
+        "--network",
         "--hostname",
         CLIENT_GUEST_HOSTNAME,
         "--root-password",
@@ -832,7 +853,7 @@ def prime_client_vdi_for_intnet_lab(
         "--run-command",
         (
             "mkdir -p /usr/local/sbin /root && "
-            "echo 'my-alpine-client' > /etc/hostname"
+            f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname"
         ),
         "--run",
         str(package_script_host),
@@ -856,6 +877,13 @@ def prime_client_vdi_for_intnet_lab(
         f"{local_host_payload_host}:/root",
         "--copy-in",
         f"{detections_payload_host}:/root",
+        "--copy-in",
+        f"{setup_venv_host}:/root",
+        "--run-command",
+        (
+            "cd /root && "
+            "python3 /root/setup_virtual_env.py --non-interactive --no-shell"
+        ),
         "--run-command",
         (
             "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
@@ -1038,6 +1066,7 @@ def setup_client_vm(
         )
 
     def configure_vm_hardware() -> None:
+        client_mac = random_client_mac_vbox()
         run_vboxmanage(
             vboxmanage,
             [
@@ -1053,7 +1082,14 @@ def setup_client_vm(
                 "intnet",
                 "--intnet1",
                 LAN_INTNET_NAME,
+                "--macaddress1",
+                client_mac,
             ],
+        )
+        oui = CLIENT_NIC_OUI.lower().replace(":", "")
+        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
+        print(
+            f"[overdrive] Client NIC MAC (OUI {oui_colon}): {format_mac_colon(client_mac)}"
         )
         configure_serial_endpoint(vboxmanage, serial_endpoint)
 

@@ -515,6 +515,11 @@ def analyze_headers(
             iss = ["unknown browser family; limited Client Hints checks applied"]
 
     weight = sum(_issue_weight(m) for m in iss)
+    ua_l = (ua or "").lower()
+    automation = any(
+        tok in ua_l
+        for tok in ("headlesschrome", "headless", "phantomjs", "selenium", "webdriver")
+    )
 
     if not iss and family in ("chromium", "firefox"):
         score = 1
@@ -533,7 +538,16 @@ def analyze_headers(
     else:
         score = 2
 
-    if iss:
+    # Headless/automation UAs are not a normal residential browser even if headers are consistent.
+    if automation:
+        score = max(score, 4)
+
+    if automation and not iss:
+        summary = (
+            "Headers are internally consistent, but User-Agent exposes headless/automation "
+            "(non-home browser profile)."
+        )
+    elif iss:
         summary = f"{len(iss)} issue(s). Worst: {iss[0]}"
     else:
         summary = "Request headers and Client Hints look internally consistent for the detected family."

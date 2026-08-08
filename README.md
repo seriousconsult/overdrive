@@ -78,7 +78,7 @@ sudo setcap cap_net_raw,cap_net_admin+eip virtual_env/bin/python
 
 ## WSL2
 
-Default WSL2 NAT hides LAN broadcast/multicast behavior. For router, mDNS, ARP/OUI, and capture probes, enable mirrored networking:
+Default WSL2 NAT hides LAN broadcast/multicast behavior. For router, mDNS (including consumer diversity), ARP/OUI, LAN neighbor density, LLMNR/NBNS/WS-Discovery, and capture probes, enable mirrored networking:
 
 ```bash
 python3 local_host/wsl_config.py --enable
@@ -102,6 +102,8 @@ python3 local_host/wsl_config.py
 - **LAN checks:** run from the client VM on `openwrt-lan`; target the router LAN IP, usually `192.168.1.1`.
 - The WSL/Linux host cannot directly reach VirtualBox `intnet` LANs.
 - The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
+- The Alpine LAN client scrubs tracking identifiers at build time (neutral hostname `desktop`, non-VirtualBox NIC MAC, tame DHCP client identity, cleared `machine-id`, generic timezone User-Agent). Rebuild the Alpine VM after changing those settings. LAN silence is still expected and discovery probes may still score it as lab-like.
+- Alpine client checker/network deps are installed by guest `setup_virtual_env.py` during VDI prime (Python libs into `/root/virtual_env`; curl, iproute2, iptables, iputils, nmap, dig, tcpdump, Chromium via apk). Bootstrap image install only keeps `bash` / `python3` / `tzdata`. Rebuild the client after changing `setup_virtual_env.py`.
 
 Verify wiring:
 

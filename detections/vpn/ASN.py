@@ -56,17 +56,12 @@ HOSTING_ORG_PATTERNS = [
     r"\bAlibaba\b",
     r"\bTencent\b",
     r"\bColocenter\b",
-    r"\bServer\b",
+    r"\bDedicated\s+Server\b",
     r"\bDataCenter\b",
     r"\bColocation\b",
-    r"\bTransit\b",
-    r"\bBackbone\b",
     r"\bIP\b.*Transit\b",
     r"\bVerizon\b.*Business\b",
     r"\bUUNET\b",
-    r"\bMCI\b",
-    r"\bSprint\b",
-    r"\bAT&T\b",
     r"\bComcast\b.*Business\b",
     r"\bBusiness\b.*Cable\b",
 ]
@@ -113,12 +108,13 @@ VPN_ORG_PATTERNS = [
 # Patterns that indicate residential ISPs
 RESIDENTIAL_ISP_PATTERNS = [
     r"\bComcast\b",
+    r"\bXfinity\b",
     r"\bCharter\b",
     r"\bSpectrum\b",
-    r"\bVerizon\b.*FiOS\b",
-    r"\bVerizon\b.*Online\b",
-    r"\bAT&T\b.*DSL\b",
-    r"\bAT&T\b.*Fiber\b",
+    r"\bVerizon\b",
+    r"\bFiOS\b",
+    r"\bVZW\b",
+    r"\bAT&T\b",
     r"\bCox\b",
     r"\bSuddenlink\b",
     r"\bRCN\b",
@@ -127,8 +123,6 @@ RESIDENTIAL_ISP_PATTERNS = [
     r"\bCenturyLink\b",
     r"\bLumen\b",
     r"\bT-Mobile\b",
-    r"\bVerizon\b.*Wireless\b",
-    r"\bAT&T\b.*Wireless\b",
     r"\bSprint\b.*Wireless\b",
     r"\bCricket\b",
     r"\bConsumer\b",
@@ -206,8 +200,9 @@ def classify_ip_api(meta: dict[str, Any]) -> tuple[int | None, str]:
         return 5, "ip-api: VPN-like ISP/org name"
 
     if meta.get("hosting") is True:
-        if _residential_strength(isp):
-            return 4, "ip-api: hosting=true but ISP hints residential (mixed)"
+        # ip-api often marks large ISP eyeball networks as hosting=true; prefer ISP name.
+        if _residential_strength(combined) or _residential_strength(isp):
+            return 2, "ip-api: hosting=true but ISP/org looks like residential broadband"
         return 5, "ip-api: hosting=true (datacenter/colocation)"
 
     if meta.get("mobile") is True:
@@ -244,23 +239,53 @@ def merge_asn_scores(
     if s_ip_api is None:
         return s_ipapi, f"{msg_ipapi} (ip-api: {msg_ip_api or 'skipped'})"
 
-    suspicious_terms = ("proxy", "vpn", "anonym", "hosting", "datacenter", "colocation")
-    explicit_suspicious = any(
-        term in (msg_ipapi or "").lower() for term in suspicious_terms
-    ) or any(term in (msg_ip_api or "").lower() for term in suspicious_terms)
+    msgs = f"{msg_ipapi or ''} | {msg_ip_api or ''}".lower()
+    residential_hint = any(
+        tok in msgs
+        for tok in (
+            "residential",
+            "verizon",
+            "fios",
+            "comcast",
+            "xfinity",
+            "spectrum",
+            "charter",
+            "mobile carrier",
+            "broadband",
+        )
+    )
+    vpn_proxy_terms = ("proxy", "vpn", "anonym")
+    explicit_vpn_proxy = any(term in msgs for term in vpn_proxy_terms)
+    hosting_terms = ("hosting", "datacenter", "colocation")
+    hosting_hit = any(term in msgs for term in hosting_terms)
 
-    # Never down-rank explicit high-confidence proxy/VPN evidence.
-    if explicit_suspicious and max(s_ipapi, s_ip_api) >= 5:
+    # VPN/proxy remains high-confidence non-home.
+    if explicit_vpn_proxy and max(s_ipapi, s_ip_api) >= 5:
         return (
             5,
-            f"high-confidence suspicious egress: ipapi={s_ipapi} ({msg_ipapi}); "
+            f"high-confidence VPN/proxy egress: ipapi={s_ipapi} ({msg_ipapi}); "
+            f"ip-api={s_ip_api} ({msg_ip_api})",
+        )
+    if explicit_vpn_proxy and max(s_ipapi, s_ip_api) >= 4:
+        return (
+            4,
+            f"suspicious VPN/proxy egress: ipapi={s_ipapi} ({msg_ipapi}); "
             f"ip-api={s_ip_api} ({msg_ip_api})",
         )
 
-    if explicit_suspicious and max(s_ipapi, s_ip_api) >= 4:
+    # Do not let a bare hosting flag override clear residential ISP naming.
+    if residential_hint and hosting_hit and not explicit_vpn_proxy:
+        blended = max(1, min(3, min(s_ipapi, s_ip_api)))
         return (
-            4,
-            f"suspicious egress: ipapi={s_ipapi} ({msg_ipapi}); "
+            blended,
+            f"residential ISP naming outweighs hosting flag: ipapi={s_ipapi} ({msg_ipapi}); "
+            f"ip-api={s_ip_api} ({msg_ip_api})",
+        )
+
+    if hosting_hit and max(s_ipapi, s_ip_api) >= 5 and min(s_ipapi, s_ip_api) >= 4:
+        return (
+            5,
+            f"high-confidence hosting/datacenter egress: ipapi={s_ipapi} ({msg_ipapi}); "
             f"ip-api={s_ip_api} ({msg_ip_api})",
         )
 

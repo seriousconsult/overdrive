@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import time
 from typing import Any
 
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -36,8 +39,43 @@ DEFAULT_TIMEOUT = 8
 DEFAULT_REPORT_WIDTH = 60
 
 
+def _first_existing_path(*candidates: str) -> str | None:
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _chromium_binary() -> str | None:
+    """Locate Chrome/Chromium for Selenium (Alpine uses chromium, not google-chrome)."""
+    env = (os.environ.get("CHROME_BIN") or os.environ.get("CHROMIUM_BIN") or "").strip()
+    if env and os.path.isfile(env):
+        return env
+    which = shutil.which("chromium-browser") or shutil.which("chromium") or shutil.which(
+        "google-chrome"
+    ) or shutil.which("google-chrome-stable")
+    if which:
+        return which
+    return _first_existing_path(
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    )
+
+
+def _chromedriver_binary() -> str | None:
+    env = (os.environ.get("CHROMEDRIVER_PATH") or "").strip()
+    if env and os.path.isfile(env):
+        return env
+    which = shutil.which("chromedriver")
+    if which:
+        return which
+    return _first_existing_path("/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver")
+
+
 def build_driver() -> webdriver.Chrome:
-    """Build a Chrome WebDriver with common headless options for browser detection."""
+    """Build a Chrome/Chromium WebDriver with common headless options for browser detection."""
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
@@ -47,6 +85,14 @@ def build_driver() -> webdriver.Chrome:
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("--disable-blink-features=AutomationControlled")
+
+    chromium = _chromium_binary()
+    if chromium:
+        opts.binary_location = chromium
+
+    driver_path = _chromedriver_binary()
+    if driver_path:
+        return webdriver.Chrome(service=ChromeService(executable_path=driver_path), options=opts)
     return webdriver.Chrome(options=opts)
 
 

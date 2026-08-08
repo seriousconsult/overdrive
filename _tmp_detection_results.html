@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overdrive Detection Results</title>
+<style>
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --border: #2d3a4d;
+  --text: #e7ecf3;
+  --muted: #8b9cb3;
+  --accent: #3d9eff;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  margin: 0;
+  padding: 1.25rem 1.5rem 2rem;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+  font-size: 14px;
+}
+header {
+  max-width: 960px;
+  margin: 0 auto 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+}
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+.timestamp { color: var(--muted); font-size: 0.8rem; }
+main { max-width: 960px; margin: 0 auto; }
+section { margin-bottom: 1.5rem; }
+h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  background: var(--surface);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.65rem;
+  vertical-align: top;
+}
+th:nth-child(1), td:nth-child(1) { width: 32%; }
+th:nth-child(2), td:nth-child(2) { width: 5.5rem; }
+th:nth-child(3), td:nth-child(3) { width: auto; }
+th {
+  background: rgba(0,0,0,0.25);
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+.script { font-family: ui-monospace, monospace; font-size: 0.85rem; color: #b8d4ff; }
+.comment {
+  color: var(--muted);
+  font-size: 0.8rem;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.badge {
+  display: inline-block;
+  min-width: 2rem;
+  text-align: center;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.badge.na { background: #3d4555; color: #c5cdd8; }
+.badge.err { background: #5c2a2a; color: #ffb4b4; }
+.badge.todo { background: #4a3d6b; color: #d4c4ff; }
+.badge.n1 { background: #1e4d2b; color: #9fe3b4; }
+.badge.n2 { background: #2d4a3a; color: #a8e0c0; }
+.badge.n3 { background: #3d4a5c; color: #c5d4e8; }
+.badge.n4 { background: #5c4a2a; color: #ffd89a; }
+.badge.n5 { background: #5c3a2a; color: #ffb89a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Overdrive detection results</h1>
+  <div style="display: flex; gap: 1rem; align-items: baseline;">
+    <span class="timestamp">2026-08-08 10:50:52</span>    <span class="timestamp">(5m 14s)</span>
+  </div>
+</header>
+<main>
+<section>
+<h2>Browser: 3.58</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: All providers agree on one country name — not multiple countries.</td></tr>
+<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: HTTP/2 SETTINGS are browser-like, but User-Agent exposes HeadlessChrome automation.</td></tr>
+<tr><td class="script">HTTP3_QUIC.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: HeadlessChrome observed with HTTP/2 fallback and no QUIC transport-parameter evidence (strong automation/non-standard client signal).</td></tr>
+<tr><td class="script">WebRTC.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: IPv4 matched only from loose page text — low confidence (may be noise).</td></tr>
+<tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">—</td></tr>
+<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like profile: stable canvas is present, but browser signals indicate automation: User-Agent exposes headless browser. hash=digest unavailable, dataURL bytes=9122.</td></tr>
+<tr><td class="script">cookie_tracking.py</td><td><span class="badge badge n3">3</span></td><td class="comment">Selenium run failed: JavascriptException: Message: javascript error: done is not a function</td></tr>
+<tr><td class="script">font_enumeration.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like profile: font probing worked, but browser signals indicate automation: User-Agent exposes headless browser; detected 0/45 tested fonts (sample: none).</td></tr>
+<tr><td class="script">full_header.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Request headers and Client Hints look internally consistent for the detected family. | echo=https://httpbin.org/get</td></tr>
+<tr><td class="script">gpu_webgl_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strongly non-home-like browser/GPU profile: User-Agent exposes headless browser. WebGL renderer=&#x27;unknown renderer&#x27;, vendor=&#x27;unknown vendor&#x27;, hash=016c8051.</td></tr>
+<tr><td class="script">screen_capture.py</td><td><span class="badge badge n3">3</span></td><td class="comment">Screen capture detection returned unexpected data.</td></tr>
+<tr><td class="script">user_agent_client_hints.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: UA/Client-Hints profile is inconsistent: User-Agent exposes headless browser</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Network: 2.25</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">DHCP.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: DHCP packets were weak, but local DHCP identity artifacts indicate: Likely lab/VM DHCP identity from local artifacts.</td></tr>
+<tr><td class="script">blacklist_check.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Spamhaus PBL only (127.0.0.10) — often dynamic/residential ranges; verify context.</td></tr>
+<tr><td class="script">client_mac_exposure.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: MAC addresses are observable (4 unique), but no VM OUI/lab client attribution.</td></tr>
+<tr><td class="script">doh_detection.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No DoH evidence found; explicit off/plain DNS signals: resolv.conf: nameserver(s): 192.168.1.1 (plain DNS likely unless another local proxy/browser setting overrides it)</td></tr>
+<tr><td class="script">egress_ptr.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Confirmed residential/ISP PTR pool-138-88-108-18.washdc.fios.verizon.net (residential/ISP naming: zone=fios.verizon.net, token=pool, ip-in-label; FCrDNS=yes); org=Verizon Internet Services</td></tr>
+<tr><td class="script">lan_discovery_silence.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: Could not send discovery probes; inconclusive.</td></tr>
+<tr><td class="script">lan_neighbor_density.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Moderate LAN density: 2 non-gateway peers beyond gateway.</td></tr>
+<tr><td class="script">tor_proxy_reputation.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Strong clean result: consensus IPv4, Onionoo clean, Tor/proxy lists clean. Tor check IsTor=false. AbuseIPDB not configured (optional).</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Router: 2.57</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">NAT_OS.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: 1.1.1.1 shows 3 distinct TTL values (some home-network evidence).</td></tr>
+<tr><td class="script">OUI.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: OUI mapped to network vendor: Arcadyan / Verizon FiOS G3100</td></tr>
+<tr><td class="script">TTL.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Strongest TTL evidence 1.0.0.1: One source shows two initial TTL families; possible NAT, load-balancing, or mixed-host path.</td></tr>
+<tr><td class="script">UPNP.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No SSDP replies from 192.168.1.1; normal routers may suppress discovery</td></tr>
+<tr><td class="script">banners.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: body:LuCI</td></tr>
+<tr><td class="script">mDNS_consumer.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: No mDNS/DNS-SD services discovered; lab-like multicast silence.</td></tr>
+<tr><td class="script">mDNS_mesh.py</td><td><span class="badge badge n3">3</span></td><td class="comment">STATUS: No mDNS/DNS-SD services found; ambiguous because many networks suppress multicast.</td></tr>
+</tbody></table>
+</section>
+<section>
+<h2>Vpn: 2.36</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">ASN.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: high-confidence suspicious egress: ipapi=5 (datacenter/hosting org pattern); ip-api=5 (ip-api isp heuristic: datacenter/hosting org pattern)</td></tr>
+<tr><td class="script">DNS.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Certain leak of IPv4 AND IPv6.</td></tr>
+<tr><td class="script">IPv6_leak.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: No public IPv6 address or IPv6 egress observed.</td></tr>
+<tr><td class="script">MTU.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Standard local link MTU (often 1500 on Ethernet). This does not prove you are not using a VPN; many VPNs do not show up as a reduced MTU on the interface this script can see, and WSL can obscure host tunnels.</td></tr>
+<tr><td class="script">TCP_stack.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: MATCH: Captured TCP SYN stack matches this OS family (low suspicion).</td></tr>
+<tr><td class="script">TLS_handshake.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: SUSPICIOUS: Library TLS, HTTP/2 mismatch, or thin ClientHello vs browser UA. Breakdown: Declared script UA; TLS is not a catalogued library hash (custom stack or rare build).</td></tr>
+<tr><td class="script">clock_time_mismatch.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Local UTC offset aligns with geo-IP timezone offset (low suspicion; heuristic).</td></tr>
+<tr><td class="script">proxy_detection.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Echo saw: x-forwarded-proto</td></tr>
+<tr><td class="script">timing_latency.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Measured via TCP Connect; RTT 208.02 ms — MATCH: Latency is consistent with geographic distance.</td></tr>
+<tr><td class="script">tunnel_interface.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No tunnel-pattern interfaces found (tun/tap/wg/…); no VPN-style virtual iface names.</td></tr>
+<tr><td class="script">vpn_ports.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: No OPEN VPN/proxy-specific ports were observed. Generic HTTPS/443 is informational only.</td></tr>
+</tbody></table>
+</section>
+</main>
+</body>
+</html>

@@ -3,10 +3,16 @@
 Bootstrap a project-local Python virtual environment for Overdrive automation.
 
 - Creates ./virtual_env next to this script
-- Installs Python deps into the venv
-- Installs OS deps via apt (Ubuntu/Debian) or dnf (Fedora/RHEL), unless skipped
+- Installs Python deps into the venv (requests, selenium, httpx, scapy, zeroconf)
+- Installs OS deps via apt (Ubuntu/Debian), dnf (Fedora/RHEL), or apk (Alpine),
+  unless skipped — including curl/iproute2/iptables/iputils, network diagnostics
+  (nmap, dig, tcpdump), and a browser/driver for Selenium
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
 - Drops into an interactive bash with venv activated, unless skipped
+
+The Alpine LAN client primes by copying this script to ``/root`` and running it
+with ``--non-interactive --no-shell`` (do not apk-add those checker packages in
+``package_assets.py``).
 """
 
 import argparse
@@ -34,6 +40,22 @@ PY_DEPS = [
     "scapy",
     "zeroconf",
 ]
+
+# OS packages that provide the ``dig`` CLI (name differs by distro).
+DIG_PACKAGE_BY_MGR = {
+    "apt": "dnsutils",
+    "dnf": "bind-utils",
+    "apk": "bind-tools",
+}
+
+# Core networking packages used by the Alpine lab client (and useful on hosts).
+# Installed here — not by VM/alpine_client/package_assets.py.
+NET_BASE_PACKAGES = (
+    "curl",
+    "iproute2",
+    "iptables",
+    "iputils",
+)
 
 APT_LOCK_TIMEOUT_SECONDS = 180
 APT_LOCK_WAIT_SECONDS = 60
@@ -65,6 +87,22 @@ class AptLockError(subprocess.CalledProcessError):
 APT_UPDATED = False
 
 def get_linux_info():
+    if shutil.which("apk"):
+        return {
+            "mgr": "apk",
+            "pcap": "libpcap",
+            "7zip_sets": [["7zip"], ["p7zip"]],
+            # Not useful inside the Alpine lab guest; host WSL uses apt/dnf.
+            "guestfs_sets": [],
+            "cap_provider_sets": [["libcap-utils"], ["libcap"]],
+            "chrome_cmd": "chromium",
+            "chrome_packages": ["chromium", "chromium-chromedriver"],
+            "socat": "socat",
+            "minicom": "minicom",
+            "nmap": "nmap",
+            "tcpdump": "tcpdump",
+            "curl": "curl",
+        }
     if shutil.which("dnf"):
         return {
             "mgr": "dnf",
@@ -74,9 +112,11 @@ def get_linux_info():
             "guestfs_sets": [["guestfs-tools"], ["libguestfs-tools"]],
             "cap_provider_sets": [["libcap"], ["libcap-tools"]],
             "chrome_cmd": "google-chrome",
+            "chrome_packages": [],
             "socat": "socat",
             "minicom": "minicom",
             "nmap": "nmap",
+            "tcpdump": "tcpdump",
             "curl": "curl",
         }
     if shutil.which("apt"):
@@ -87,12 +127,49 @@ def get_linux_info():
             "guestfs_sets": [["libguestfs-tools"], ["guestfs-tools"]],
             "cap_provider_sets": [["libcap2-bin"], ["libcap-bin"]],
             "chrome_cmd": "google-chrome",
+            "chrome_packages": [],
             "socat": "socat",
             "minicom": "minicom",
             "nmap": "nmap",
+            "tcpdump": "tcpdump",
             "curl": "curl",
         }
     return None
+
+
+def enable_alpine_community_repo() -> None:
+    """Uncomment/add Alpine community (chromium, many py3-* packages)."""
+    repos = Path("/etc/apk/repositories")
+    if not repos.is_file():
+        return
+    try:
+        text = repos.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return
+    lines = text.splitlines()
+    changed = False
+    new_lines: list[str] = []
+    has_community = False
+    main_line = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#") and "/community" in stripped:
+            uncommented = stripped.lstrip("#").strip()
+            new_lines.append(uncommented)
+            changed = True
+            has_community = True
+            continue
+        if stripped and not stripped.startswith("#") and "/community" in stripped:
+            has_community = True
+        if stripped and not stripped.startswith("#") and stripped.endswith("/main") and not main_line:
+            main_line = stripped
+        new_lines.append(line)
+    if not has_community and main_line:
+        new_lines.append(main_line.replace("/main", "/community"))
+        changed = True
+    if changed:
+        repos.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        print("[*] Enabled Alpine community repository.")
 
 def have_cmd(cmd: str) -> bool:
     return shutil.which(cmd) is not None
@@ -352,6 +429,8 @@ def install_packages(info, packages: list[str], *, non_interactive: bool = False
     if mgr == "apt":
         ensure_apt_updated_for(packages, non_interactive=non_interactive)
         run_apt(["install", "-y", *packages], non_interactive=non_interactive)
+    elif mgr == "apk":
+        run_cmd(["apk", "add", "--no-cache", *packages], non_interactive=non_interactive)
     else:
         run_cmd([mgr, "install", "-y", *packages], non_interactive=non_interactive)
 
@@ -393,13 +472,25 @@ def package_installed(info, package: str) -> bool:
     if mgr == "dnf" and have_cmd("rpm"):
         proc = subprocess.run(["rpm", "-q", package], capture_output=True, check=False)
         return proc.returncode == 0
+    if mgr == "apk" and have_cmd("apk"):
+        proc = subprocess.run(
+            ["apk", "info", "-e", package],
+            capture_output=True,
+            check=False,
+        )
+        return proc.returncode == 0
     return False
 
 def distro_success_label():
     info = get_linux_info()
     if not info:
         return "this system (unknown package manager—install deps manually if needed)"
-    return "Fedora / RHEL-family (dnf)" if info["mgr"] == "dnf" else "Debian / Ubuntu (apt)"
+    labels = {
+        "dnf": "Fedora / RHEL-family (dnf)",
+        "apt": "Debian / Ubuntu (apt)",
+        "apk": "Alpine (apk)",
+    }
+    return labels.get(info["mgr"], info["mgr"])
 
 def install_system_deps(*, non_interactive: bool = False):
     info = get_linux_info()
@@ -410,6 +501,11 @@ def install_system_deps(*, non_interactive: bool = False):
     mgr = info["mgr"]
     print(f"Detected {mgr} package manager. Installing system deps...")
 
+    if mgr == "apk":
+        enable_alpine_community_repo()
+        print("[*] apk update...")
+        run_cmd(["apk", "update"], non_interactive=non_interactive)
+
     # 1) libpcap
     if not package_installed(info, info["pcap"]):
         print(f"[*] Installing {info['pcap']}...")
@@ -417,29 +513,42 @@ def install_system_deps(*, non_interactive: bool = False):
     else:
         print(f"[*] {info['pcap']} already installed.")
 
-    # 2) 7zip
-    if not have_cmd("7z"):
-        print("[*] Installing 7-Zip (first available option)...")
-        install_first_available(
-            info,
-            info["7zip_sets"],
-            non_interactive=non_interactive,
-        )
-    else:
-        print("[*] 7-Zip already installed.")
+    # 2) 7zip (host tooling; optional on Alpine guest)
+    if mgr != "apk":
+        if not have_cmd("7z"):
+            print("[*] Installing 7-Zip (first available option)...")
+            install_first_available(
+                info,
+                info["7zip_sets"],
+                non_interactive=non_interactive,
+            )
+        else:
+            print("[*] 7-Zip already installed.")
 
-    # 3) Chrome
-    if not have_cmd(info["chrome_cmd"]):
+    # 3) Browser for Selenium
+    chrome_packages = info.get("chrome_packages") or []
+    if chrome_packages:
+        need_browser = not (
+            have_cmd("chromium")
+            or have_cmd("chromium-browser")
+            or have_cmd(info["chrome_cmd"])
+        )
+        need_driver = not have_cmd("chromedriver")
+        if need_browser or need_driver:
+            print(f"[*] Installing browser packages: {' '.join(chrome_packages)}...")
+            install_packages(info, chrome_packages, non_interactive=non_interactive)
+        else:
+            print("[*] Chromium + chromedriver already installed.")
+    elif not have_cmd(info["chrome_cmd"]):
         print("[*] Installing Google Chrome...")
         if mgr == "dnf":
-            # Direct rpm install works for most Fedora/RHEL setups
             chrome_url = "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
             run_cmd(
                 ["dnf", "install", "-y", chrome_url],
                 use_sudo=True,
                 non_interactive=non_interactive,
             )
-        else:
+        elif mgr == "apt":
             deb_url = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
             fd, deb_path = tempfile.mkstemp(suffix=".deb")
             os.close(fd)
@@ -452,30 +561,69 @@ def install_system_deps(*, non_interactive: bool = False):
                     os.unlink(deb_path)
                 except OSError:
                     pass
+        else:
+            print("[*] No Chrome installer path for this package manager; install a browser manually.")
     else:
         print("[*] Chrome already installed.")
 
-    # 4) nmap / minicom / socat / curl
-    for key in ["nmap", "minicom", "socat", "curl"]:
-        cmd = info[key]
-        if not have_cmd(cmd):
-            print(f"[*] Installing {cmd}...")
-            install_packages(info, [cmd], non_interactive=non_interactive)
-        else:
-            print(f"[*] {cmd} already installed.")
-
-    # 5) guestfs tools (for virt-customize)
-    if not have_cmd("virt-customize"):
-        print("[*] Installing guestfs tools for virt-customize (first available option)...")
-        install_first_available(
-            info,
-            info["guestfs_sets"],
-            non_interactive=non_interactive,
-        )
+    # 4) Core networking (lab client + hosts): curl, iproute2, iptables, iputils
+    net_needed = [pkg for pkg in NET_BASE_PACKAGES if not package_installed(info, pkg)]
+    # Also treat missing CLIs as needing install (busybox may shadow package checks).
+    cli_to_pkg = {
+        "curl": "curl",
+        "ip": "iproute2",
+        "iptables": "iptables",
+        "ping": "iputils",
+    }
+    for cmd, pkg in cli_to_pkg.items():
+        if not have_cmd(cmd) and pkg not in net_needed:
+            net_needed.append(pkg)
+    if net_needed:
+        print(f"[*] Installing network base packages: {' '.join(net_needed)}...")
+        install_packages(info, net_needed, non_interactive=non_interactive)
     else:
-        print("[*] virt-customize already available.")
+        print("[*] Network base packages (curl/iproute2/iptables/iputils) already present.")
 
-    # 6) capability tool provider (setcap)
+    # 5) Network diagnostics + helpers: nmap, dig, tcpdump, socat [, minicom]
+    diag_cmds = [
+        ("nmap", info["nmap"]),
+        ("tcpdump", info.get("tcpdump") or "tcpdump"),
+        ("socat", info["socat"]),
+    ]
+    if mgr != "apk":
+        diag_cmds.append(("minicom", info["minicom"]))
+
+    for cmd, package in diag_cmds:
+        if have_cmd(cmd):
+            print(f"[*] {cmd} already installed.")
+            continue
+        print(f"[*] Installing {package} (provides {cmd})...")
+        try:
+            install_packages(info, [package], non_interactive=non_interactive)
+        except subprocess.CalledProcessError:
+            print(f"[-] Failed installing {package}; continuing.")
+
+    dig_pkg = DIG_PACKAGE_BY_MGR.get(mgr)
+    if dig_pkg:
+        if have_cmd("dig"):
+            print("[*] dig already installed.")
+        else:
+            print(f"[*] Installing {dig_pkg} (provides dig)...")
+            install_packages(info, [dig_pkg], non_interactive=non_interactive)
+
+    # 6) guestfs tools (for virt-customize on host builders — skip on Alpine guests)
+    if info.get("guestfs_sets"):
+        if not have_cmd("virt-customize"):
+            print("[*] Installing guestfs tools for virt-customize (first available option)...")
+            install_first_available(
+                info,
+                info["guestfs_sets"],
+                non_interactive=non_interactive,
+            )
+        else:
+            print("[*] virt-customize already available.")
+
+    # 7) capability tool provider (setcap)
     if not have_cmd("setcap"):
         print("[*] Installing libcap tooling (first available option)...")
         install_first_available(
@@ -561,11 +709,26 @@ def ensure_venv_support(*, non_interactive: bool = False, allow_install: bool = 
     # Install alternatives (Ubuntu/Debian are usually version-specific; Fedora varies)
     if mgr == "apt":
         candidates = [f"python{pyver}-venv", "python3-venv"]
+    elif mgr == "apk":
+        enable_alpine_community_repo()
+        run_cmd(["apk", "update"], non_interactive=non_interactive)
+        candidates = ["py3-pip", "python3"]
     else:  # dnf
         candidates = [f"python{pyver}-venv", "python3-venv"]
 
     print("[*] Host python missing ensurepip/venv support. Installing required package...")
     install_first_available(info, [[c] for c in candidates], non_interactive=non_interactive)
+
+    # Alpine: py3-pip often provides ensurepip; re-check after install.
+    if mgr == "apk":
+        try:
+            import ensurepip  # noqa: F401
+            return
+        except Exception:
+            print(
+                "[*] ensurepip still unavailable; venv will be created and pip "
+                "bootstrapped via get-pip if needed."
+            )
 
 
 def parse_args():
@@ -583,7 +746,7 @@ def parse_args():
     parser.add_argument(
         "--skip-system-deps",
         action="store_true",
-        help="Do not run apt/dnf or install OS packages.",
+        help="Do not run apt/dnf/apk or install OS packages (nmap, dig, browser, …).",
     )
     parser.add_argument(
         "--skip-capabilities",
@@ -626,12 +789,36 @@ def main():
         shutil.rmtree(VENV_DIR)
 
     print(f"[*] Creating venv in {VENV_DIR}...")
-    venv.create(str(VENV_DIR), with_pip=True)
+    try:
+        venv.create(str(VENV_DIR), with_pip=True)
+    except Exception as exc:
+        print(f"[*] venv.create(with_pip=True) failed ({exc}); retrying without pip...")
+        if VENV_DIR.exists():
+            shutil.rmtree(VENV_DIR)
+        venv.create(str(VENV_DIR), with_pip=False)
 
     python_exe = str(VENV_PYTHON)
     if not Path(python_exe).exists():
         print(f"[-] Expected venv python not found at: {python_exe}")
         sys.exit(1)
+
+    # Bootstrap pip when ensurepip was unavailable (common on minimal Alpine).
+    pip_probe = subprocess.run(
+        [python_exe, "-m", "pip", "--version"],
+        capture_output=True,
+        check=False,
+    )
+    if pip_probe.returncode != 0:
+        print("[*] Bootstrapping pip into venv via ensurepip/get-pip...")
+        ensure = subprocess.run(
+            [python_exe, "-m", "ensurepip", "--upgrade"],
+            capture_output=True,
+            check=False,
+        )
+        if ensure.returncode != 0:
+            get_pip = Path(tempfile.gettempdir()) / "get-pip.py"
+            urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip)
+            subprocess.check_call([python_exe, str(get_pip)])
 
     # 2) Install Python libs
     print("Installing Python packages into venv...")

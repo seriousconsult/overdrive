@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""DNS leak probe via bash.ws (IPv4/IPv6 resolver visibility).
+"""DNS resolver authenticity probe via bash.ws + local resolv.conf.
 
-Purpose: Detect whether DNS appears to exit through non-VPN / non-provider paths when VPN claims
-to tunnel traffic, and print the resolver data that was collected.
+Collects which resolvers answer DNS for this host (bash.ws) and classifies them
+for residential vs VPN/privacy/datacenter-like DNS.
 
-Score (1-5), aligned with Overdrive: 1 = no leak pattern observed (best case). 5 = strong
-leak signal (IPv4 and/or IPv6 resolvers look non-VPN). Middle scores = mixed or partial exposure.
+Score (1-5), higher = less like a typical home PC/network DNS path:
+  1 — LAN/router or residential-ISP-like resolvers dominate
+  2 — Common public resolvers (Google/Cloudflare/…) or mild mix
+  3 — Inconclusive / mixed / no rows
+  4 — Privacy-VPN DNS (e.g. Mullvad) or mostly non-home resolvers
+  5 — Strong VPN/anonymizer or hosting/datacenter DNS footprint
 
-Environment: Any OS with Python requests and outbound HTTPS; uses third-party bash.ws. Rate
-limits or blocking yield inconclusive errors.
+Note: this is NOT “VPN leak = bad”. Plain ISP/LAN DNS is the home-like outcome.
 """
 
 from __future__ import annotations
@@ -27,12 +30,41 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from detections.common.common_dns import classify_resolver, resolv_nameservers
+from detections.common.common_dns import (
+    KNOWN_PUBLIC_DNS,
+    classify_resolver,
+    is_mullvad_dot_ip,
+    resolv_nameservers,
+    reverse_dns,
+)
 
 API_DOMAIN = "bash.ws"
 TRIGGER_COUNT = 10
 REQUEST_TIMEOUT = 4
 RESULT_TIMEOUT = 12
+
+_PUBLIC_RESOLVER_IPS = frozenset(KNOWN_PUBLIC_DNS.keys()) if KNOWN_PUBLIC_DNS else frozenset()
+_VPN_DNS_HINTS = (
+    "mullvad",
+    "nordvpn",
+    "expressvpn",
+    "proton",
+    "windscribe",
+    "ivpn",
+    "pia.",
+    "privateinternetaccess",
+)
+_HOSTING_DNS_HINTS = (
+    "amazon",
+    "aws",
+    "googleusercontent",
+    "digitalocean",
+    "linode",
+    "vultr",
+    "hetzner",
+    "ovh",
+    "cloudflare-dns",  # anycast public is handled separately
+)
 
 
 def _is_ipv6(value: str) -> bool:
@@ -160,27 +192,105 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def score_dns_leak(summary: dict[str, Any]) -> tuple[int, str]:
-    has_ipv4_leak = bool(summary["has_ipv4_leak"])
-    has_ipv6_leak = bool(summary["has_ipv6_leak"])
-    non_vpn_servers = int(summary["non_vpn_servers"])
-    total_servers = int(summary["total_servers"])
+def _classify_resolver_bucket(ip: str, *, bashws_vpn: bool = False) -> str:
+    """Return one of: lan, public, vpn, hosting, isp_public, unknown."""
+    if bashws_vpn:
+        return "vpn"
+    base = (ip or "").split("%", 1)[0].strip()
+    if not base:
+        return "unknown"
+    try:
+        addr = ipaddress.ip_address(base)
+    except ValueError:
+        return "unknown"
+    if addr.is_loopback or addr.is_private or addr.is_link_local:
+        return "lan"
+    if is_mullvad_dot_ip(base):
+        return "vpn"
+    if base in _PUBLIC_RESOLVER_IPS or base in {
+        "1.1.1.1",
+        "1.0.0.1",
+        "8.8.8.8",
+        "8.8.4.4",
+        "9.9.9.9",
+        "208.67.222.222",
+        "208.67.220.220",
+    }:
+        return "public"
+    ptr = (reverse_dns(base) or "").lower()
+    if any(h in ptr for h in _VPN_DNS_HINTS):
+        return "vpn"
+    if any(h in ptr for h in _HOSTING_DNS_HINTS) and "fios" not in ptr and "verizon" not in ptr:
+        return "hosting"
+    if any(
+        tok in ptr
+        for tok in ("fios", "verizon", "comcast", "xfinity", "rr.com", "cox.net", "charter")
+    ):
+        return "isp_public"
+    if "pool" in ptr or "dsl" in ptr or "cable" in ptr or "dynamic" in ptr:
+        return "isp_public"
+    return "unknown"
 
-    if total_servers == 0:
-        return 3, "Inconclusive: bash.ws returned no DNS resolver rows."
-    if has_ipv4_leak and has_ipv6_leak:
-        return 5, "Certain leak of IPv4 AND IPv6."
-    if has_ipv4_leak and not has_ipv6_leak:
-        return 5, "Certain leak of IPv4."
-    if has_ipv6_leak and not has_ipv4_leak:
-        return 5, "Certain leak of IPv6."
-    if non_vpn_servers > 0 and non_vpn_servers == total_servers:
-        return 5, "Certain leak: all observed DNS resolvers are non-VPN."
-    if non_vpn_servers > (total_servers / 2):
-        return 4, "Probable leak: majority of observed resolvers are non-VPN."
-    if non_vpn_servers > 0:
-        return 3, "Possible leak: mixed VPN and non-VPN resolver results."
-    return 1, "Connection secure by bash.ws signal: no non-VPN resolvers reported."
+
+def score_dns_authenticity(summary: dict[str, Any]) -> tuple[int, str]:
+    """Score whether DNS paths look like a normal home setup (low) vs VPN/DC (high)."""
+    rows = list(summary.get("unique_rows") or [])
+    local = resolv_nameservers()
+    buckets: list[str] = []
+    for ns in local:
+        buckets.append(_classify_resolver_bucket(ns))
+    for row in rows:
+        ip = row_ip(row)
+        if not ip:
+            continue
+        buckets.append(_classify_resolver_bucket(ip, bashws_vpn=row_is_vpn(row)))
+
+    if not buckets and int(summary.get("total_servers") or 0) == 0:
+        return 3, "Inconclusive: no local nameservers and bash.ws returned no resolver rows."
+    if not buckets:
+        return 3, "Inconclusive: could not classify any DNS resolvers."
+
+    counts = {k: buckets.count(k) for k in ("lan", "isp_public", "public", "vpn", "hosting", "unknown")}
+
+    if counts["vpn"] or counts["hosting"]:
+        if counts["vpn"] and counts["hosting"]:
+            return (
+                5,
+                f"DNS uses VPN and hosting/datacenter resolvers "
+                f"(vpn={counts['vpn']}, hosting={counts['hosting']}).",
+            )
+        if counts["vpn"]:
+            return (
+                4,
+                f"Privacy-VPN DNS resolvers observed ({counts['vpn']}); "
+                "uncommon for a vanilla home PC.",
+            )
+        return 5, f"Hosting/datacenter DNS resolvers observed ({counts['hosting']})."
+
+    homeish = counts["lan"] + counts["isp_public"]
+    if homeish and not counts["public"]:
+        where = "LAN/router" if counts["lan"] else "residential-ISP"
+        return 1, f"DNS looks home-like ({where} resolvers dominate; n={homeish})."
+    if homeish and counts["public"]:
+        return (
+            2,
+            f"Mostly home-like DNS with some public resolvers "
+            f"(homeish={homeish}, public={counts['public']}).",
+        )
+    if counts["public"] and not homeish:
+        return 2, f"Only well-known public resolvers observed (n={counts['public']}); common at home."
+    if counts["unknown"]:
+        return (
+            2,
+            f"Public resolvers without strong VPN/hosting fingerprints (n={counts['unknown']}); "
+            "consistent with ISP DNS.",
+        )
+    return 3, "DNS resolver mix inconclusive for residential vs non-home classification."
+
+
+def score_dns_leak(summary: dict[str, Any]) -> tuple[int, str]:
+    """Backward-compatible name — residential authenticity scoring."""
+    return score_dns_authenticity(summary)
 
 
 def print_local_dns_context() -> None:
