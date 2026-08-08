@@ -33,23 +33,22 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from detections.common.common_router_capture import print_sniff_permission_help, reexec_to_repo_venv_python
+from detections.common.common_local import get_repo_root, normalize_mac_colon
+from detections.common.common_router_capture import print_sniff_permission_help
 from detections.common.common_router_gateway import KNOWN_VIRTUAL_OUI
+from detections.common.common_utils import reexec_with_repo_venv
 
 
-reexec_to_repo_venv_python()
+reexec_with_repo_venv(
+    get_repo_root(),
+    reason="Scapy capture scripts prefer the repo virtualenv Python",
+)
 
-MAC_RE = re.compile(r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b")
 IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 LAB_HOST_RE = re.compile(
     r"(?i)(my-alpine-client|overdrive|vbox|virtualbox|qemu|vmware|docker|podman|"
     r"container|lab-client|test-client|openwrt_lan_client|alpine-client|client-vm)"
 )
-
-BROADCAST_MACS = {
-    "ff:ff:ff:ff:ff:ff",
-    "00:00:00:00:00:00",
-}
 
 VIRTUAL_OUI = {k.lower(): v for k, v in KNOWN_VIRTUAL_OUI.items()}
 
@@ -76,20 +75,8 @@ class MacEvidence:
 
 
 def normalize_mac(value: str | bytes | None) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        if len(value) < 6:
-            return None
-        return ":".join(f"{b:02x}" for b in value[:6])
-    text = str(value).strip().lower().replace("-", ":")
-    match = MAC_RE.search(text)
-    if not match:
-        return None
-    mac = match.group(0).lower()
-    if mac in BROADCAST_MACS:
-        return None
-    return mac
+    """MAC normalize for ARP/neigh/pcap lines (search + drop broadcast/zero)."""
+    return normalize_mac_colon(value, search=True, reject_broadcast=True)
 
 
 def add_evidence(

@@ -54,20 +54,24 @@ def get_iface_operstate(ifname: str) -> str:
 
 def detect_runtime_os():
     sysname = platform.system().lower()
-    is_wsl = False
     try:
-        if os.environ.get("WSL_DISTRO_NAME"):
-            is_wsl = True
-        else:
-            with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
-                if "microsoft" in f.read().lower():
-                    is_wsl = True
+        from detections.common.common_local import is_wsl_local
+
+        on_wsl = is_wsl_local()
     except Exception:
-        pass
+        on_wsl = False
+        try:
+            if os.environ.get("WSL_DISTRO_NAME"):
+                on_wsl = True
+            else:
+                with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
+                    on_wsl = "microsoft" in f.read().lower()
+        except Exception:
+            pass
 
     if "windows" in sysname:
         return ("Windows", "Windows-like")
-    if sysname == "linux" and is_wsl:
+    if sysname == "linux" and on_wsl:
         return ("Linux (WSL)", "Linux-like")
     return ("Linux", "Linux-like")
 

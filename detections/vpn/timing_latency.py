@@ -19,8 +19,18 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-import requests
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from detections.common.common_vpn import (
+    fetch_ip_api,
+    fetch_ipapi,
+    geo_coords_from_payload,
+    public_ipv4,
+)
 
 
 def calculate_latency_score(distance_km, rtt_ms):
@@ -48,28 +58,12 @@ def calculate_latency_score(distance_km, rtt_ms):
 
 
 def get_my_coords():
-    endpoints = [
-        "https://ipapi.co/json/",
-        "http://ip-api.com/json/",
-    ]
-    for url in endpoints:
-        try:
-            resp = requests.get(url, timeout=8)
-            data = resp.json()
-            if data.get("status") == "fail" or data.get("error"):
-                continue
-            lat = data.get("latitude") or data.get("lat")
-            lon = data.get("longitude") or data.get("lon")
-            if lat is not None and lon is not None:
-                return {
-                    "lat": float(lat),
-                    "lon": float(lon),
-                    "city": data.get("city") or "",
-                    "country": data.get("country_name") or data.get("country") or "",
-                    "ip": data.get("ip") or data.get("query") or "",
-                }
-        except (requests.RequestException, ValueError, TypeError, KeyError):
-            continue
+    coords = geo_coords_from_payload(fetch_ipapi(None))
+    if coords:
+        return coords
+    ip = public_ipv4()
+    if ip:
+        return geo_coords_from_payload(fetch_ip_api(ip))
     return None
 
 
@@ -79,26 +73,11 @@ def get_host_coords(hostname):
     except OSError:
         return None
 
-    urls = (
-        f"https://ipapi.co/{host_ip}/json/",
-        f"http://ip-api.com/json/{host_ip}",
-    )
-    for url in urls:
-        try:
-            resp = requests.get(url, timeout=8)
-            data = resp.json()
-            if data.get("status") == "fail" or data.get("error"):
-                continue
-            lat = data.get("latitude") or data.get("lat")
-            lon = data.get("longitude") or data.get("lon")
-            if lat is not None and lon is not None:
-                return {
-                    "lat": float(lat),
-                    "lon": float(lon),
-                    "ip": host_ip,
-                }
-        except (requests.RequestException, ValueError, TypeError, KeyError):
-            continue
+    for data in (fetch_ipapi(host_ip), fetch_ip_api(host_ip)):
+        coords = geo_coords_from_payload(data if isinstance(data, dict) else None)
+        if coords:
+            coords["ip"] = host_ip
+            return coords
     return None
 
 

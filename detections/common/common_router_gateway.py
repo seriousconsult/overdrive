@@ -41,14 +41,6 @@ def default_ipv4_gateway() -> str | None:
     return None
 
 
-def run_cmd(cmd: list[str]) -> str:
-    """Run a subprocess command and return stdout."""
-    try:
-        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return ""
-
-
 def normalize_oui(mac: str) -> str:
     """Normalize MAC address to XX:XX:XX format."""
     mac = mac.strip().upper().replace("-", ":")

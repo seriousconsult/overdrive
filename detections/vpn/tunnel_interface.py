@@ -23,7 +23,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_vpn import run
+from detections.common.common_utils import run_output
 
 
 TUNNEL_PATTERNS = [
@@ -42,7 +42,7 @@ TUNNEL_PATTERNS = [
 
 
 def get_interfaces() -> list[str]:
-    out = run(["ip", "-o", "link", "show"])
+    out = run_output(["ip", "-o", "link", "show"])
     ifaces: list[str] = []
     for line in out.splitlines():
         match = re.match(r"^\d+:\s+([^:]+):", line)

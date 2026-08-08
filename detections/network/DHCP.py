@@ -42,14 +42,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from detections.common.common_router_capture import (
-    print_sniff_permission_help,
-    reexec_to_repo_venv_python,
-)
+from detections.common.common_local import get_repo_root, normalize_mac_colon
+from detections.common.common_router_capture import print_sniff_permission_help
 from detections.common.common_router_gateway import KNOWN_VIRTUAL_OUI
+from detections.common.common_utils import reexec_with_repo_venv
 
 
-reexec_to_repo_venv_python()
+reexec_with_repo_venv(
+    get_repo_root(),
+    reason="Scapy capture scripts prefer the repo virtualenv Python",
+)
 
 try:
     from scapy.all import BOOTP, DHCP, Ether, IP, conf, rdpcap, sniff
@@ -236,30 +238,17 @@ def _decode_client_id(value: Any) -> str | None:
     return _decode_text(value)
 
 
-def _normalize_mac(mac: str | bytes | None) -> str | None:
-    if mac is None:
-        return None
-    if isinstance(mac, bytes):
-        if len(mac) < 6:
-            return None
-        return ":".join(f"{b:02x}" for b in mac[:6])
-    text = str(mac).strip().lower()
-    if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", text):
-        return text
-    return None
-
-
 def _bootp_mac(pkt: Any) -> str | None:
     if BOOTP not in pkt:
         return None
     bootp = pkt[BOOTP]
     hlen = int(getattr(bootp, "hlen", 6) or 6)
     raw = bytes(getattr(bootp, "chaddr", b"") or b"")
-    mac = _normalize_mac(raw[: max(0, min(16, hlen))])
+    mac = normalize_mac_colon(raw[: max(0, min(16, hlen))])
     if mac:
         return mac
     if Ether in pkt:
-        return _normalize_mac(pkt[Ether].src)
+        return normalize_mac_colon(pkt[Ether].src)
     return None
 
 
@@ -629,7 +618,7 @@ def _collect_local_interfaces(preferred_iface: str | None = None) -> list[LocalI
             mac = (path / "address").read_text(encoding="utf-8", errors="ignore").strip().lower()
         except OSError:
             continue
-        if not _normalize_mac(mac):
+        if not normalize_mac_colon(mac):
             continue
         rows.append(
             LocalInterfaceIdentity(

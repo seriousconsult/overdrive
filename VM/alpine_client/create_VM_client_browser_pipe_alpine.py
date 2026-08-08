@@ -70,11 +70,11 @@ REPO_ROOT = str(Path(SCRIPT_DIR).resolve().parents[1])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from detections.common.common_local import is_wsl_local
 from detections.common.common_vm import (
     find_vboxmanage,
     get_vm_state,
     get_system_paths,
-    is_wsl_environment,
     OPENWRT_LAN_INTNET_NAME,
     close_medium_best_effort,
     remove_existing_vm,
@@ -240,7 +240,7 @@ def require_vdi_prime_tools(*, skip_prime: bool) -> str:
 
 def _libguestfs_env() -> dict[str, str]:
     virt_env = os.environ.copy()
-    if is_wsl_environment():
+    if is_wsl_local():
         virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
     virt_env.setdefault("TMPDIR", "/tmp")
 

@@ -18,6 +18,9 @@ __all__ = [
     "FIREHOL_TOR_EXITS_7D_URL",
     "GEOIP_PROVIDERS",
     "HTTP_ECHO_URLS",
+    "IPIFY_URL",
+    "IPIFY_IPV6_URL",
+    "IP_API_AUTO_URL",
     "IP_API_URL",
     "IP_API_URL_WITH_FIELDS",
     "IPAPI_AUTO_URL",
@@ -53,11 +56,15 @@ GEOIP_PROVIDERS: Final[tuple[Mapping[str, str], ...]] = (
 
 BROWSERLEAKS_WEBRTC_URL: Final = "https://browserleaks.com/webrtc"
 
+IPIFY_URL: Final = "https://api.ipify.org?format=json"
+IPIFY_IPV6_URL: Final = "https://api6.ipify.org?format=json"
+
 IP_API_URL: Final = "http://ip-api.com/json/{ip}"
 IP_API_URL_WITH_FIELDS: Final = (
     "http://ip-api.com/json/{ip}"
     "?fields=status,message,query,isp,org,as,hosting,mobile,proxy"
 )
+IP_API_AUTO_URL: Final = "http://ip-api.com/json/?fields=status,message,timezone"
 IPAPI_AUTO_URL: Final = "https://ipapi.co/json/"
 IPAPI_IP_URL: Final = "https://ipapi.co/{ip}/json/"
 

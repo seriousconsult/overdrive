@@ -13,6 +13,11 @@ import sys
 import time
 from pathlib import Path
 
+from detections.common.common_local import (
+    is_wsl_local as _is_wsl_local,
+    wsl_windows_host_ip as _wsl_windows_host_ip,
+)
+
 __all__ = [
     "CLIENT_VDI_NAME",
     "OPENWRT_CLIENT_VM_NAME",
@@ -43,7 +48,6 @@ __all__ = [
     "get_system_paths",
     "get_vboxmanage_install_hint",
     "get_vm_state",
-    "is_wsl_environment",
     "parse_machinereadable",
     "probe_tcp_serial",
     "remove_existing_vm",
@@ -58,7 +62,6 @@ __all__ = [
     "ensure_vm_ready_to_start",
     "close_medium_best_effort",
     "wait_after_disk_operation",
-    "wsl_windows_host_ip",
     "try_unregistervm_delete",
     "vbox_closemedium_disk_delete_best_effort",
     "vm_is_registered",
@@ -94,19 +97,12 @@ OSBOXES_LOGIN_PASSWORD_HINT = "configured by OSBOXES_LOGIN_PASSWORD in VM/.env"
 CLIENT_VDI_NAME = "client_browser.vdi"
 
 
-def is_wsl_environment() -> bool:
-    """Return True when running inside WSL."""
-    return "microsoft" in platform.release().lower() or os.path.exists(
-        "/proc/sys/fs/binfmt_misc/WSLInterop"
-    )
-
-
 @functools.lru_cache(maxsize=1)
 def _windows_cmd_available() -> bool:
     """True when ``cmd.exe`` interop works (optional Windows helper, not required for VM setup)."""
     if os.name == "nt":
         return True
-    if not is_wsl_environment() or shutil.which("cmd.exe") is None:
+    if not _is_wsl_local() or shutil.which("cmd.exe") is None:
         return False
     try:
         proc = subprocess.run(
@@ -121,24 +117,9 @@ def _windows_cmd_available() -> bool:
         return False
 
 
-def wsl_windows_host_ip() -> str | None:
-    """Return the Windows host IP as seen from WSL2 (for Windows-local TCP services)."""
-    if not is_wsl_environment():
-        return None
-    try:
-        with open("/etc/resolv.conf", encoding="utf-8") as resolv:
-            for line in resolv:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] == "nameserver":
-                    return parts[1]
-    except OSError:
-        return None
-    return None
-
-
 def get_linux_distro_id() -> str | None:
     """Return the lowercase /etc/os-release distro ID on native Linux hosts."""
-    if is_wsl_environment() or platform.system().lower() != "linux":
+    if _is_wsl_local() or platform.system().lower() != "linux":
         return None
     try:
         with open("/etc/os-release", encoding="utf-8") as f:
@@ -185,7 +166,7 @@ def wsl_to_windows_path(path: str | Path) -> str:
 
 def windows_temp_dir_linux() -> Path | None:
     """Return Windows %TEMP% as a WSL path when cmd.exe interop is available."""
-    if not is_wsl_environment() or not _windows_cmd_available():
+    if not _is_wsl_local() or not _windows_cmd_available():
         return None
     try:
         proc = subprocess.run(
@@ -221,7 +202,7 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
     linux_home = str(Path.home())
     win_profile: str | None = None
 
-    if is_wsl_environment() and _windows_cmd_available():
+    if _is_wsl_local() and _windows_cmd_available():
         try:
             proc = subprocess.run(
                 ["cmd.exe", "/c", "echo", "%USERPROFILE%"],
@@ -245,7 +226,7 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
     vm_base = os.path.join(vms_root, vm_name)
 
     paths: dict[str, str | bool | None] = {
-        "is_wsl": is_wsl_environment(),
+        "is_wsl": _is_wsl_local(),
         "linux_home": linux_home,
         "win_profile": win_profile,
         "base_path": linux_home,
@@ -297,7 +278,7 @@ def find_vboxmanage_with_windows_fallback(paths: dict[str, str | bool | None]) -
 
 def get_vboxmanage_install_hint() -> str:
     """Return a host-specific hint for installing or exposing VBoxManage."""
-    if is_wsl_environment():
+    if _is_wsl_local():
         return (
             "VBoxManage not found. Install VirtualBox on Windows or add it to PATH. "
             "Expected Windows install path from WSL: "
@@ -378,7 +359,7 @@ def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
         if locked and attempt < lock_retries:
             if attempt == 0:
                 print("VirtualBox still has a machine lock; waiting and retrying...")
-            if attempt == 5 and (is_wsl_environment() or os.name == "nt"):
+            if attempt == 5 and (_is_wsl_local() or os.name == "nt"):
                 print("Clearing stale VBoxManage.exe processes that may hold disk locks...")
                 terminate_stale_vboxmanage_processes()
             time.sleep(lock_retry_s)
@@ -653,13 +634,13 @@ def serial_tcp_host_candidates(base_host: str | None = None) -> list[str]:
     """Hosts to try when reaching VirtualBox's Windows TCP serial server from WSL."""
     host = base_host or SERIAL_TCP_HOST
     candidates: list[str] = []
-    if is_wsl_environment():
-        win_host = wsl_windows_host_ip()
+    if _is_wsl_local():
+        win_host = _wsl_windows_host_ip()
         if win_host:
             candidates.append(win_host)
     if host not in candidates:
         candidates.append(host)
-    if is_wsl_environment() and "127.0.0.1" not in candidates:
+    if _is_wsl_local() and "127.0.0.1" not in candidates:
         candidates.append("127.0.0.1")
     return candidates
 
@@ -757,10 +738,10 @@ def spawn_serial_console_window(
         )
         if os.name == "nt":
             subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, check=False)
-        elif is_wsl_environment():
+        elif _is_wsl_local():
             subprocess.run(["powershell.exe", "-Command", ps_cmd], capture_output=True, check=False)
 
-    if platform.system().lower() == "linux" or is_wsl_environment():
+    if platform.system().lower() == "linux" or _is_wsl_local():
         # Terminate Linux/WSL python instances of this script
         my_pid = os.getpid()
         script_pattern = script.name
@@ -776,7 +757,7 @@ def spawn_serial_console_window(
     time.sleep(1.0)
 
     # --- Path A: WSL host → new wt window running Linux Python ---
-    if is_wsl_environment():
+    if _is_wsl_local():
         py = sys.executable or "python3"
         cmd = [py, str(script), *args]
         if spawn_wsl_interactive_terminal(cmd, cwd=work, title=safe_title):
@@ -786,14 +767,14 @@ def spawn_serial_console_window(
 
     # --- Path B: Windows Python via wt / new console ---
     if os.name == "nt" or _windows_cmd_available():
-        win_script = _windows_path_from_wsl(script) if is_wsl_environment() else str(script)
-        win_cwd = _windows_path_from_wsl(work) if is_wsl_environment() else str(work)
+        win_script = _windows_path_from_wsl(script) if _is_wsl_local() else str(script)
+        win_cwd = _windows_path_from_wsl(work) if _is_wsl_local() else str(work)
         if not win_script:
             win_script = str(script)
         if not win_cwd:
             win_cwd = str(work)
 
-        if is_wsl_environment() or os.name != "nt":
+        if _is_wsl_local() or os.name != "nt":
             run_cmd = ["py", "-3", win_script, *args]
         else:
             run_cmd = [sys.executable, win_script, *args]

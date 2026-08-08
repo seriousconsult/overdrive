@@ -23,8 +23,6 @@ Uses ``common.common_network`` for public IPv4 and reverse-DNSBL host constructi
 from __future__ import annotations
 
 import ipaddress
-import json
-import os
 import socket
 import sys
 import time
@@ -38,6 +36,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 import requests
 
+from detections.common.common_cache import (
+    env_cache_disabled,
+    env_cache_ttl_s,
+    read_ip_score_cache,
+    write_ip_score_cache,
+)
 from detections.common.common_config import (
     BLACKLIST_TIMEOUT,
     DNSBL_ZONES,
@@ -73,18 +77,11 @@ class DnsblResult:
 
 
 def _cache_ttl_s() -> int:
-    raw = (os.environ.get("OVERDRIVE_BLACKLIST_CACHE_TTL") or "").strip()
-    if raw.isdigit():
-        return max(0, int(raw))
-    return _DEFAULT_CACHE_TTL_S
+    return env_cache_ttl_s("OVERDRIVE_BLACKLIST_CACHE_TTL", _DEFAULT_CACHE_TTL_S)
 
 
 def _cache_disabled() -> bool:
-    return (os.environ.get("OVERDRIVE_BLACKLIST_NO_CACHE") or "").strip() in {
-        "1",
-        "true",
-        "yes",
-    }
+    return env_cache_disabled("OVERDRIVE_BLACKLIST_NO_CACHE")
 
 
 def _cache_path() -> Path:
@@ -92,29 +89,18 @@ def _cache_path() -> Path:
 
 
 def _read_cache(ip: str) -> tuple[int, str, list[dict[str, Any]]] | None:
-    if _cache_disabled() or _cache_ttl_s() <= 0:
-        return None
-    path = _cache_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    if data.get("ip") != ip:
-        return None
-    try:
-        ts = float(data["ts"])
-        score = int(data["score"])
-        description = str(data["description"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if time.time() - ts > _cache_ttl_s():
+    data = read_ip_score_cache(
+        _cache_path(),
+        ip=ip,
+        ttl_s=_cache_ttl_s(),
+        disabled=_cache_disabled(),
+    )
+    if not data:
         return None
     results = data.get("results")
     if not isinstance(results, list):
         results = []
-    return score, description, results
+    return int(data["score"]), str(data["description"]), results
 
 
 def _write_cache(
@@ -123,15 +109,14 @@ def _write_cache(
     description: str,
     results: list[DnsblResult],
 ) -> None:
-    if _cache_disabled() or _cache_ttl_s() <= 0:
-        return
-    path = _cache_path()
-    payload = {
-        "ip": ip,
-        "ts": time.time(),
-        "score": score,
-        "description": description,
-        "results": [
+    write_ip_score_cache(
+        _cache_path(),
+        ip=ip,
+        score=score,
+        description=description,
+        disabled=_cache_disabled(),
+        ttl_s=_cache_ttl_s(),
+        results=[
             {
                 "zone": r.zone,
                 "label": r.label,
@@ -141,14 +126,7 @@ def _write_cache(
             }
             for r in results
         ],
-    }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass
+    )
 
 
 def public_ipv4() -> tuple[str | None, str]:

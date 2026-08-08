@@ -25,15 +25,19 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+from detections.common.common_config import LAN_PROBE_URLS
+from detections.common.common_local import get_repo_root
 from detections.common.common_router_capture import (
     background_probe_loop,
     print_sniff_permission_help,
-    reexec_to_repo_venv_python,
 )
-from detections.common.common_config import LAN_PROBE_URLS
+from detections.common.common_utils import reexec_with_repo_venv
 
 
-reexec_to_repo_venv_python()
+reexec_with_repo_venv(
+    get_repo_root(),
+    reason="Scapy capture scripts prefer the repo virtualenv Python",
+)
 
 import argparse
 import threading

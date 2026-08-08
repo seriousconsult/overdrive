@@ -22,7 +22,8 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_vpn import get_public_ipv4, is_wsl, wsl_windows_host_ip
+from detections.common.common_local import is_wsl_local, wsl_windows_host_ip
+from detections.common.common_vpn import public_ipv4
 
 
 VPN_PROXY_SIGNAL = "vpn_proxy"
@@ -97,13 +98,13 @@ def summarize_generic_https(observations: list[tuple[str, str]]) -> str | None:
 
 
 def run_audit() -> int:
-    public_ip = get_public_ipv4()
+    public_ip = public_ipv4()
 
     targets: list[tuple[str, str]] = []
 
     if public_ip:
         targets.append(("Public IPv4 (egress)", public_ip))
-    if is_wsl():
+    if is_wsl_local():
         print(
             "\n[WSL2] Public IPv4 reflects NAT egress. 127.0.0.1 is this distro only.\n"
             "       A separate row scans the default gateway (usually the Windows host).\n"

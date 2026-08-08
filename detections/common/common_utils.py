@@ -19,6 +19,7 @@ __all__ = [
     "reexec_with_repo_venv",
     "repo_venv_python",
     "run_command",
+    "run_output",
     "run_step",
     "split_address_port",
 ]
@@ -37,6 +38,14 @@ def run_command(cmd: list[str], *, timeout: float = 15) -> tuple[int, str]:
         return result.returncode, result.stdout or ""
     except (OSError, subprocess.SubprocessError):
         return -1, ""
+
+
+def run_output(cmd: list[str]) -> str:
+    """Return combined stdout+stderr text, or empty string on any failure."""
+    try:
+        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return ""
 
 
 def repo_venv_python(repo_root: str | Path) -> Path | None:

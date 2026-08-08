@@ -6,6 +6,8 @@ import ipaddress
 import json
 import os
 
+from detections.common.common_config import IPIFY_URL
+
 __all__ = [
     "IPIFY_URL",
     "IPV4_ICANHAZIP_URL",
@@ -19,7 +21,6 @@ __all__ = [
 ]
 
 
-IPIFY_URL = "https://api.ipify.org?format=json"
 IPV4_ICANHAZIP_URL = "https://ipv4.icanhazip.com/"
 IPV4_IFCONFIGME_URL = "https://ifconfig.me/ip"
 

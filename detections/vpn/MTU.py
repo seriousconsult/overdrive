@@ -25,7 +25,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_vpn import run
+from detections.common.common_utils import run_output
 
 
 def _is_tunnelish_iface(name: str) -> bool:
@@ -51,7 +51,7 @@ def get_link_mtu_info():
     - Many commercial VPNs still show 1500 on the default route interface; the tunnel may
       have a private name or may not be visible depending on how the VPN is integrated.
     """
-    out = run(["ip", "-o", "link", "show"])
+    out = run_output(["ip", "-o", "link", "show"])
     mtus: list[int] = []
     tunnel: list[tuple[str, int]] = []
 

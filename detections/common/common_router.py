@@ -10,7 +10,6 @@ from __future__ import annotations
 from detections.common.common_router_capture import (
     background_probe_loop,
     print_sniff_permission_help,
-    reexec_to_repo_venv_python,
 )
 from detections.common.common_router_gateway import (
     KNOWN_VIRTUAL_OUI,
@@ -26,7 +25,6 @@ from detections.common.common_router_gateway import (
     powershell_exes,
     resolve_mac,
     resolve_router_ipv4_and_iface,
-    run_cmd,
     run_powershell_first_ipv4,
     try_ip_neigh,
     valid_ipv4,
@@ -81,10 +79,8 @@ __all__ = [
     "ping_first",
     "powershell_exes",
     "print_sniff_permission_help",
-    "reexec_to_repo_venv_python",
     "resolve_mac",
     "resolve_router_ipv4_and_iface",
-    "run_cmd",
     "run_powershell_first_ipv4",
     "run_router_nmap_summary",
     "send_msearch",
@@ -99,13 +95,12 @@ __all__ = [
     "xml_text_fields",
 ]
 
-# Backward-compatible aliases for older scripts. Prefer the public names above.
+# Backward-compatible aliases for older underscore-prefixed private names.
 _background_probe_loop = background_probe_loop
 _collect_ssdp = collect_ssdp
 _extract_realm = extract_realm
 _fetch_location = fetch_location
 _parse_ssdp_headers = parse_ssdp_headers
 _print_sniff_permission_help = print_sniff_permission_help
-_reexec_to_repo_venv_python = reexec_to_repo_venv_python
 _send_msearch = send_msearch
 _xml_text_fields = xml_text_fields

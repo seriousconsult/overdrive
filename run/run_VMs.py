@@ -24,7 +24,6 @@ from detections.common.common_vm import (
     find_vboxmanage,
     get_system_paths,
     get_vm_state,
-    is_wsl_environment,
     spawn_wsl_interactive_terminal,
 )
 

@@ -21,8 +21,6 @@ Environment:
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import socket
 import sys
@@ -37,6 +35,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 import requests
 
+from detections.common.common_cache import (
+    env_cache_disabled,
+    env_cache_ttl_s,
+    read_ip_score_cache,
+    write_ip_score_cache,
+)
 from detections.common.common_config import (
     IP_API_URL_WITH_FIELDS,
     OVERDRIVE_CACHE_DIR,
@@ -130,54 +134,37 @@ class PtrEvidence:
 
 
 def _cache_ttl_s() -> int:
-    raw = (os.environ.get("OVERDRIVE_EGRESS_PTR_CACHE_TTL") or "").strip()
-    if raw.isdigit():
-        return max(0, int(raw))
-    return _DEFAULT_CACHE_TTL_S
+    return env_cache_ttl_s("OVERDRIVE_EGRESS_PTR_CACHE_TTL", _DEFAULT_CACHE_TTL_S)
 
 
 def _cache_disabled() -> bool:
-    return (os.environ.get("OVERDRIVE_EGRESS_PTR_NO_CACHE") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    return env_cache_disabled("OVERDRIVE_EGRESS_PTR_NO_CACHE")
 
 
 def _read_cache(ip: str) -> tuple[int, str, dict[str, Any]] | None:
-    if _cache_disabled() or _cache_ttl_s() <= 0:
-        return None
-    path = OVERDRIVE_CACHE_DIR / _CACHE_NAME
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    if not isinstance(data, dict) or data.get("ip") != ip:
-        return None
-    try:
-        ts = float(data["ts"])
-        score = int(data["score"])
-        description = str(data["description"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if time.time() - ts > _cache_ttl_s():
+    data = read_ip_score_cache(
+        OVERDRIVE_CACHE_DIR / _CACHE_NAME,
+        ip=ip,
+        ttl_s=_cache_ttl_s(),
+        disabled=_cache_disabled(),
+    )
+    if not data:
         return None
     evidence = data.get("evidence")
     if not isinstance(evidence, dict):
         evidence = {}
-    return score, description, evidence
+    return int(data["score"]), str(data["description"]), evidence
 
 
 def _write_cache(ip: str, score: int, description: str, evidence: PtrEvidence) -> None:
-    if _cache_disabled() or _cache_ttl_s() <= 0:
-        return
-    path = OVERDRIVE_CACHE_DIR / _CACHE_NAME
-    payload = {
-        "ip": ip,
-        "ts": time.time(),
-        "score": score,
-        "description": description,
-        "evidence": {
+    write_ip_score_cache(
+        OVERDRIVE_CACHE_DIR / _CACHE_NAME,
+        ip=ip,
+        score=score,
+        description=description,
+        disabled=_cache_disabled(),
+        ttl_s=_cache_ttl_s(),
+        evidence={
             "ip": evidence.ip,
             "ip_strong": evidence.ip_strong,
             "ip_note": evidence.ip_note,
@@ -190,14 +177,7 @@ def _write_cache(ip: str, score: int, description: str, evidence: PtrEvidence) -
             "hosting_flag": evidence.hosting_flag,
             "org": evidence.org,
         },
-    }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass
+    )
 
 
 def _normalize_hostname(name: str | None) -> str | None:

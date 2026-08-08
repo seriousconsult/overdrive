@@ -3,72 +3,25 @@
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
+from detections.common.common_config import (
+    IP_API_AUTO_URL,
+    IP_API_URL,
+    IPAPI_AUTO_URL,
+    IPAPI_IP_URL,
+    IPIFY_IPV6_URL,
+)
+from detections.common.common_network import fetch_public_ipv4_ipify
+
 DEFAULT_TIMEOUT = 10
 DEFAULT_UA = {"User-Agent": "overdrive-vpn-utils/1.0"}
 
-IPV4_URL = "https://api.ipify.org?format=json"
-IPV6_URL = "https://api6.ipify.org?format=json"
-IPAPI_URL_AUTO = "https://ipapi.co/json/"
-IPAPI_URL_IP = "https://ipapi.co/{ip}/json/"
-IP_API_URL = "http://ip-api.com/json/{ip}"
-IP_API_AUTO_URL = "http://ip-api.com/json/?fields=status,message,timezone"
-
 IANA_TZ_RE = re.compile(r"^[A-Za-z0-9_\-/+]+$")
-
-
-def run(cmd: list[str]) -> str:
-    try:
-        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return ""
-
-
-def is_wsl() -> bool:
-    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
-        return True
-    try:
-        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
-            return "microsoft" in f.read().lower()
-    except OSError:
-        return False
-
-
-def wsl_windows_host_ip() -> str | None:
-    try:
-        out = subprocess.run(
-            ["ip", "-4", "route", "show", "default"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout:
-            m = re.search(r"default\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", out.stdout)
-            if m:
-                return m.group(1)
-    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    try:
-        with open("/etc/resolv.conf", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] == "nameserver":
-                    ip = parts[1]
-                    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) and not ip.startswith("127."):
-                        return ip
-    except OSError:
-        pass
-
-    return None
 
 
 def fetch_json(url: str, timeout: int = DEFAULT_TIMEOUT, headers: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -81,22 +34,11 @@ def fetch_json(url: str, timeout: int = DEFAULT_TIMEOUT, headers: dict[str, str]
 
 
 def public_ipv4(timeout: int = DEFAULT_TIMEOUT) -> str | None:
-    data = fetch_json(IPV4_URL, timeout=timeout, headers=DEFAULT_UA)
-    if not data:
-        return None
-    ip = data.get("ip")
-    if not ip or ":" in str(ip):
-        return None
-    return str(ip).strip()
-
-
-def get_public_ipv4(timeout: int = DEFAULT_TIMEOUT) -> str | None:
-    """Backward-compatible alias for scripts that used the older helper name."""
-    return public_ipv4(timeout=timeout)
+    return fetch_public_ipv4_ipify(user_agent=DEFAULT_UA["User-Agent"], timeout=timeout)
 
 
 def public_ipv6(timeout: int = DEFAULT_TIMEOUT) -> str | None:
-    data = fetch_json(IPV6_URL, timeout=timeout, headers=DEFAULT_UA)
+    data = fetch_json(IPIFY_IPV6_URL, timeout=timeout, headers=DEFAULT_UA)
     if not data:
         return None
     ip = data.get("ip")
@@ -106,7 +48,7 @@ def public_ipv6(timeout: int = DEFAULT_TIMEOUT) -> str | None:
 
 
 def fetch_ipapi(ip: str | None = None, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any] | None:
-    url = IPAPI_URL_IP.format(ip=ip) if ip else IPAPI_URL_AUTO
+    url = IPAPI_IP_URL.format(ip=ip) if ip else IPAPI_AUTO_URL
     try:
         r = requests.get(url, headers=DEFAULT_UA, timeout=timeout)
         if r.status_code == 429:
@@ -124,6 +66,32 @@ def fetch_ip_api(ip: str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
         return r.json()
     except (requests.RequestException, ValueError):
         return {"status": "fail", "message": "request error"}
+
+
+def geo_coords_from_payload(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """
+    Extract ``lat``/``lon`` (and light metadata) from ipapi.co or ip-api.com JSON.
+
+    Returns None when coordinates are missing or the payload looks like an error.
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("status") == "fail" or data.get("error"):
+        return None
+    lat = data.get("latitude") if data.get("latitude") is not None else data.get("lat")
+    lon = data.get("longitude") if data.get("longitude") is not None else data.get("lon")
+    if lat is None or lon is None:
+        return None
+    try:
+        return {
+            "lat": float(lat),
+            "lon": float(lon),
+            "city": data.get("city") or "",
+            "country": data.get("country_name") or data.get("country") or "",
+            "ip": data.get("ip") or data.get("query") or "",
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def ip_metadata(ip: str, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:

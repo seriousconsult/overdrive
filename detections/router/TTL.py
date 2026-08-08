@@ -43,15 +43,19 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_config import LAN_PROBE_URLS
+from detections.common.common_local import get_repo_root
 from detections.common.common_router_capture import (
     background_probe_loop,
     print_sniff_permission_help,
-    reexec_to_repo_venv_python,
 )
+from detections.common.common_utils import reexec_with_repo_venv
 
 
 if __name__ == "__main__":
-    reexec_to_repo_venv_python()
+    reexec_with_repo_venv(
+        get_repo_root(),
+        reason="Scapy capture scripts prefer the repo virtualenv Python",
+    )
 
 COMMON_INITIAL_TTLS = (32, 64, 128, 255)
 INITIAL_TTL_LABELS = {

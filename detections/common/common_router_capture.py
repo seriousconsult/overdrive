@@ -2,49 +2,21 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-
-def _repo_root_for_script(script: Path) -> Path:
-    """Return the repository root for a script under ``detections/<category>/``."""
-    for parent in script.parents:
-        if (parent / "detections").is_dir() and (parent / "run").is_dir():
-            return parent
-    return script.parents[2]
-
-
-def reexec_to_repo_venv_python() -> None:
-    """Re-execute the active script with repo virtualenv Python if available."""
-    script = Path(sys.argv[0]).resolve()
-    repo = _repo_root_for_script(script)
-    candidates = (
-        repo / "virtual_env" / "bin" / "python",
-        repo / "virtual_env" / "Scripts" / "python.exe",
-    )
-    vpy = next((candidate for candidate in candidates if candidate.is_file()), None)
-    if vpy is None:
-        return
-    try:
-        if Path(sys.executable).resolve() == vpy.resolve():
-            return
-    except OSError:
-        return
-    try:
-        os.execv(str(vpy), [str(vpy), str(script), *sys.argv[1:]])
-    except OSError:
-        pass
+from detections.common.common_local import get_repo_root
+from detections.common.common_utils import reexec_with_repo_venv, repo_venv_python
 
 
 def print_sniff_permission_help() -> None:
     """Print help for packet capture permissions."""
     script = Path(sys.argv[0]).resolve()
-    repo = _repo_root_for_script(script)
-    vpy = repo / "virtual_env" / "bin" / "python"
+    repo = Path(get_repo_root())
+    vpy = repo_venv_python(repo) or (repo / "virtual_env" / "bin" / "python")
     print("[!] Packet capture needs raw sockets (Linux: root or cap_net_raw+cap_net_admin on the venv Python).")
     print("    From repo root, for example:")
     print(f"        sudo -n {vpy} {script}")

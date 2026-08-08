@@ -37,14 +37,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from detections.common.common_config import USER_AGENTS
+from detections.common.common_config import IPIFY_IPV6_URL, USER_AGENTS
 from detections.common.common_dns import resolv_nameservers
 from detections.common.common_vpn import fetch_ip_api, public_ipv4
 
 TIMEOUT = 10
 UA = {"User-Agent": USER_AGENTS["ipv6_leak"]}
 IPV6_PROBES: tuple[tuple[str, str, str], ...] = (
-    ("ipify6", "json", "https://api6.ipify.org?format=json"),
+    ("ipify6", "json", IPIFY_IPV6_URL),
     ("icanhazip6", "text", "https://ipv6.icanhazip.com/"),
     ("identme6", "text", "https://v6.ident.me/"),
 )

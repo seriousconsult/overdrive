@@ -25,13 +25,9 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+from detections.common.common_config import USER_AGENTS
 from detections.common.common_vpn import fetch_ip_api, fetch_ipapi, public_ipv4
-from detections.common.common_config import IP_API_URL_WITH_FIELDS, IPAPI_AUTO_URL, IPAPI_IP_URL, USER_AGENTS
 
-IPIFY = "https://api.ipify.org?format=json"
-IP_API_URL = IP_API_URL_WITH_FIELDS
-IPAPI_URL_AUTO = IPAPI_AUTO_URL
-IPAPI_URL_IP = IPAPI_IP_URL
 TIMEOUT = 15
 UA = {"User-Agent": USER_AGENTS["asn"]}
 

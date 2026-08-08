@@ -12,6 +12,7 @@ __all__ = [
     "ensure_repo_on_path",
     "get_repo_root",
     "is_wsl_local",
+    "wsl_windows_host_ip",
     "windows_userprofile_as_wsl_path",
     "read_text_file",
     "path_exists",
@@ -39,7 +40,8 @@ def is_wsl_local() -> bool:
     """
     True when this process appears to run under WSL (Linux userland on Windows).
 
-    Combines env hints, ``WSLInterop``, and ``/proc/version`` checks used across ``local/`` scripts.
+    Combines env hints, ``WSLInterop``, ``platform.release``, and ``/proc/version``.
+    Canonical WSL detector for Overdrive; other modules should alias this.
     """
     if platform.system() != "Linux":
         return False
@@ -47,11 +49,49 @@ def is_wsl_local() -> bool:
         return True
     if os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
         return True
+    if "microsoft" in platform.release().lower():
+        return True
     try:
         with open("/proc/version", encoding="utf-8", errors="replace") as f:
             return "microsoft" in f.read().lower()
     except OSError:
         return False
+
+
+def wsl_windows_host_ip() -> str | None:
+    """
+    Windows host IPv4 as seen from WSL (default-route via, then resolv.conf nameserver).
+
+    Skips loopback nameservers. Returns None when not in WSL or no candidate is found.
+    """
+    if not is_wsl_local():
+        return None
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if out.returncode == 0 and out.stdout:
+            match = re.search(r"default\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})", out.stdout)
+            if match:
+                return match.group(1)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    ip = parts[1]
+                    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) and not ip.startswith("127."):
+                        return ip
+    except OSError:
+        pass
+    return None
 
 
 def windows_userprofile_as_wsl_path() -> str | None:
@@ -92,14 +132,47 @@ def path_exists(path: str) -> bool:
 
 
 _MAC_COLON_RE: Final = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", re.I)
+_MAC_FIND_RE: Final = re.compile(r"(?i)(?:[0-9a-f]{2}[:\-]){5}[0-9a-f]{2}")
+_BROADCAST_MACS: Final = frozenset(
+    {
+        "ff:ff:ff:ff:ff:ff",
+        "00:00:00:00:00:00",
+    }
+)
 
 
-def normalize_mac_colon(s: str) -> str | None:
-    """Normalize ``aa-bb-cc-dd-ee-ff`` or mixed case to lowercase colon form; invalid → None."""
-    s = s.strip().lower().replace("-", ":")
-    if _MAC_COLON_RE.fullmatch(s):
-        return s
-    return None
+def normalize_mac_colon(
+    value: str | bytes | None,
+    *,
+    search: bool = False,
+    reject_broadcast: bool = False,
+) -> str | None:
+    """
+    Normalize a MAC to lowercase colon form (``aa:bb:cc:dd:ee:ff``); invalid → None.
+
+    Accepts ``str`` (hyphen or colon) or raw 6+ ``bytes`` (first six octets).
+    When ``search`` is True, extract the first MAC-like token from a longer string.
+    When ``reject_broadcast`` is True, drop all-zero / all-ff addresses.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        if len(value) < 6:
+            return None
+        mac = ":".join(f"{b:02x}" for b in value[:6])
+    else:
+        text = str(value).strip()
+        if search:
+            match = _MAC_FIND_RE.search(text)
+            if not match:
+                return None
+            text = match.group(0)
+        mac = text.lower().replace("-", ":")
+        if not _MAC_COLON_RE.fullmatch(mac):
+            return None
+    if reject_broadcast and mac in _BROADCAST_MACS:
+        return None
+    return mac
 
 
 def mac_to_oui(mac: str) -> str:
