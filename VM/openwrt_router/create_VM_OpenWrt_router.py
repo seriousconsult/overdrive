@@ -72,10 +72,13 @@ from VM.openwrt_router.openwrt_assets import (
     UCI_DEFAULTS_ENABLE_MULLVAD,
 )
 from VM.vm_config import (
+    G3100_MAC_OUI,
     MULLVAD_DOT_PORT,
     MULLVAD_DOT_RESOLVERS,
     OPENWRT_LAN_DNS,
+    format_mac_colon,
     openwrt_root_password,
+    random_g3100_mac_vbox,
 )
 
 try:
@@ -1097,6 +1100,37 @@ def refresh_live_router_serial(vboxmanage: str, endpoint: str) -> None:
     run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", uart_mode, endpoint])
 
 
+def assign_g3100_macs(vboxmanage: str) -> tuple[str, str]:
+    """
+    Assign fresh Verizon FiOS G3100-style MACs to LAN (NIC1) and WAN (NIC2).
+
+    Must be called while the VM is powered off. A new pair is generated on every
+    start so the lab router does not keep a sticky VirtualBox OUI.
+    """
+    lan = random_g3100_mac_vbox()
+    wan = random_g3100_mac_vbox()
+    while wan == lan:
+        wan = random_g3100_mac_vbox()
+    run_vboxmanage(
+        vboxmanage,
+        [
+            "modifyvm",
+            VM_NAME,
+            "--macaddress1",
+            lan,
+            "--macaddress2",
+            wan,
+        ],
+    )
+    oui = G3100_MAC_OUI.lower().replace(":", "")
+    oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
+    print(
+        f"[overdrive] G3100 MACs (OUI {oui_colon}): "
+        f"LAN={format_mac_colon(lan)}  WAN={format_mac_colon(wan)}"
+    )
+    return lan, wan
+
+
 def wait_for_router_running(vboxmanage: str, *, timeout_s: float = 60.0) -> None:
     """Wait until VBoxManage reports the router VM as running."""
     deadline = time.monotonic() + timeout_s
@@ -1513,6 +1547,9 @@ def setup_openwrt_vm(
         if attempt_no > 1:
             print(f"[!] Retrying router VM with non-GUI start type {attempt_type!r}.")
             stop_router_for_start_retry(vboxmanage)
+
+        # New G3100-style MACs on every start (VM must be powered off).
+        assign_g3100_macs(vboxmanage)
 
         print(f"Starting VM ({attempt_type})...")
         run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", attempt_type])

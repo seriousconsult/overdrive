@@ -40,6 +40,10 @@ DEFAULT_OUI_MAP: dict[str, str] = {
     "00:14:BF": "Linksys",
     "F4:5C:89": "Apple (often - not a router, but could appear in neighbor cache)",
     "3C:3B:1B": "Cisco/SPA (example - not guaranteed)",
+    # Verizon FiOS G3100 (Arcadyan OEM; common field OUI)
+    "3C:BD:C5": "Arcadyan / Verizon FiOS G3100",
+    "B8:F8:53": "Arcadyan / Verizon FiOS G3100",
+    "04:A2:22": "Arcadyan / Verizon FiOS G3100",
 }
 
 # Names that usually indicate home/SOHO router or ISP CPE (heuristic).
@@ -50,6 +54,8 @@ ROUTER_LIKELY_VENDOR_SUBSTR = (
     "Linksys",
     "Sagemcom",
     "Cisco",
+    "Arcadyan",
+    "Verizon",
 )
 
 

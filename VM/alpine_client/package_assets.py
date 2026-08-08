@@ -79,6 +79,19 @@ if command -v python3 >/dev/null 2>&1; then
     fi
   fi
 
+  if ! python3 -c 'import zeroconf' >/dev/null 2>&1; then
+    if install_pkg py3-zeroconf; then
+      :
+    elif command -v pip3 >/dev/null 2>&1; then
+      run_logged pip3 install --break-system-packages zeroconf \
+        || run_logged pip3 install zeroconf \
+        || FAILED="$FAILED zeroconf"
+    else
+      say "WARNING: pip3 missing; zeroconf install skipped"
+      FAILED="$FAILED zeroconf"
+    fi
+  fi
+
   if ! python3 -c 'import requests' >/dev/null 2>&1; then
     say "ERROR: Python requests is not importable after package install"
     FAILED="$FAILED requests-import"
@@ -86,6 +99,10 @@ if command -v python3 >/dev/null 2>&1; then
   if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
     say "ERROR: Scapy is not importable after package install"
     FAILED="$FAILED scapy-import"
+  fi
+  if ! python3 -c 'import zeroconf' >/dev/null 2>&1; then
+    say "ERROR: zeroconf is not importable after package install"
+    FAILED="$FAILED zeroconf-import"
   fi
   if ! python3 -c 'import httpx, h2' >/dev/null 2>&1; then
     say "ERROR: httpx with HTTP/2 support is not importable after package install"

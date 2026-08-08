@@ -91,6 +91,7 @@ USER_AGENTS: Final[Mapping[str, str]] = MappingProxyType({
     "asn": "overdrive-asn-lookup/1.0",
     "blacklist": "overdrive-blacklist-check/1.0",
     "clock_time_mismatch": "overdrive-clock-time-mismatch/1.0",
+    "egress_ptr": "overdrive-egress-ptr/1.0",
     "ipv6_leak": "overdrive-ipv6-leak/1.0",
     "proxy": "overdrive-proxy-detect/1.0",
     "tor_proxy": "overdrive-tor-proxy-reputation/1.0",

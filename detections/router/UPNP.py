@@ -205,7 +205,7 @@ def main() -> None:
     ap.add_argument(
         "--ip",
         default=None,
-        help="LAN IP to M-SEARCH unicast (e.g. 192.168.1.1:1900). Use with WSL2; default route IP is often not your router.",
+        help="Extra LAN IP for unicast M-SEARCH (default route gateway is always included when known).",
     )
     ap.add_argument(
         "--verbose",
@@ -280,10 +280,13 @@ def main() -> None:
         print(f"[+] JSON → {args.out_json}")
 
     if not responses:
-        if args.ip and args.ip.strip():
-            status_line = f"No SSDP to {args.ip.strip()}"
+        if unicast:
+            status_line = (
+                f"No SSDP replies from {', '.join(unicast)}; "
+                "normal routers may suppress discovery"
+            )
         else:
-            status_line = "No SSDP (add --ip <LAN gateway>)"
+            status_line = "No SSDP replies; normal routers may suppress discovery"
 
     print("-" * 30)
     print(f"SCORE: {score}")

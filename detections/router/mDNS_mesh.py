@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 '''
-NOTE: To make this script work, you must run it in a Windows Python environment or switch your WSL to Mirrored Networking Mode.
+NOTE: To make this script work on WSL, you must set WSL to Mirrored Networking Mode.
 
 mDNS (Multicast DNS) is used by mesh network systems to discover and advertise services (such as web management portals and setup APIs) within the local network, 
 allowing devices to resolve names like .local without a centralized DNS server. If a device is designed to be controlled via a smartphone app or 
@@ -9,10 +9,22 @@ discovered by a browser without you manually entering an IP address, it is likel
 
 '''
 
+from __future__ import annotations
 
-from zeroconf import ServiceBrowser, Zeroconf, ServiceListener, ZeroconfServiceTypes
 import socket
+import sys
 import time
+
+try:
+    from zeroconf import ServiceBrowser, ServiceListener, Zeroconf, ZeroconfServiceTypes
+except ModuleNotFoundError:
+    print(
+        "Missing dependency: zeroconf\n"
+        "  Alpine:  apk add py3-zeroconf   OR   pip3 install --break-system-packages zeroconf\n"
+        "  Host venv: pip install zeroconf   (also installed by setup_virtual_env.py)",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from None
 
 class DeepDiscoveryListener(ServiceListener):
     def __init__(self):

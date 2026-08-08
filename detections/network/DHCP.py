@@ -8,6 +8,10 @@ The probe observes DHCP client packets and fingerprints each client using:
   - Vendor Class Identifier (option 60)
   - Hostname (option 12)
 
+Live capture actively renews the local OS DHCP client during the sniff window
+so quiet lease intervals still produce authentic client packets (not crafted
+Scapy DHCP, which would poison option-order fingerprints).
+
 Host-authenticity score:
   1 = common residential/client device fingerprints observed
   2 = DHCP clients observed but classification is weak or generic
@@ -20,10 +24,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -891,6 +899,143 @@ def _read_pcap(path: str) -> list[Any]:
     return list(rdpcap(path))
 
 
+def _pid_cmdline_has(pid: int, token: str) -> bool:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+    return token.encode() in raw.replace(b"\x00", b" ")
+
+
+def _signal_matching_pids(comm_names: set[str], sig: int, *, iface: str | None = None) -> list[str]:
+    """Send ``sig`` to matching DHCP client PIDs; optionally require iface in cmdline."""
+    notes: list[str] = []
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return notes
+    for path in proc.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            comm = (path / "comm").read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            continue
+        if comm not in comm_names:
+            continue
+        pid = int(path.name)
+        if iface and not _pid_cmdline_has(pid, iface):
+            # Still allow if cmdline has no iface token (some clients omit it).
+            try:
+                cmdline = (path / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+            except OSError:
+                cmdline = ""
+            if cmdline and iface not in cmdline:
+                continue
+        try:
+            os.kill(pid, sig)
+            notes.append(f"{comm} pid={pid} signal={sig}")
+        except OSError as exc:
+            notes.append(f"{comm} pid={pid} signal-failed({exc})")
+    return notes
+
+
+def _udhcpc_pidfiles_renew(iface: str) -> list[str]:
+    notes: list[str] = []
+    roots = (Path("/var/run"), Path("/run"), Path("/var/lib/misc"))
+    patterns = (f"udhcpc.{iface}.pid", f"udhcpc-{iface}.pid", "udhcpc*.pid")
+    seen: set[int] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for pattern in patterns:
+            for path in root.glob(pattern):
+                try:
+                    pid = int(path.read_text(encoding="utf-8", errors="ignore").strip().split()[0])
+                except (OSError, ValueError, IndexError):
+                    continue
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                try:
+                    os.kill(pid, signal.SIGUSR1)  # busybox udhcpc: renew
+                    notes.append(f"udhcpc SIGUSR1 via {path} pid={pid}")
+                except OSError as exc:
+                    notes.append(f"udhcpc pidfile {path}: {exc}")
+    return notes
+
+
+def trigger_local_dhcp_traffic(iface: str) -> list[str]:
+    """
+    Encourage authentic local DHCP client packets (renew/rebind/reapply).
+
+    Uses the host's real DHCP client so option order / vendor class stay honest.
+    Avoids crafting Scapy DHCP discovers that would fake fingerprints.
+    Prefers renew over release+discover to limit connectivity disruption.
+    """
+    if not iface:
+        return ["skipped: no interface"]
+
+    notes: list[str] = []
+
+    # Alpine / busybox: USR1 = renew
+    notes.extend(_udhcpc_pidfiles_renew(iface))
+    notes.extend(_signal_matching_pids({"udhcpc"}, signal.SIGUSR1, iface=iface))
+
+    # dhcpcd: rebind/renew without tearing the address down
+    dhcpcd = shutil.which("dhcpcd")
+    if dhcpcd:
+        for args in (
+            [dhcpcd, "--rebind", iface],
+            [dhcpcd, "-n", iface],
+        ):
+            ret, out = _run_command(args, timeout=10)
+            snippet = " ".join(out.split())[:120]
+            notes.append(f"{' '.join(args)} -> rc={ret}" + (f" ({snippet})" if snippet else ""))
+            if ret == 0:
+                break
+
+    # systemd-networkd
+    networkctl = shutil.which("networkctl")
+    if networkctl:
+        ret, out = _run_command([networkctl, "renew", iface], timeout=10)
+        snippet = " ".join(out.split())[:120]
+        notes.append(f"networkctl renew {iface} -> rc={ret}" + (f" ({snippet})" if snippet else ""))
+
+    # NetworkManager
+    nmcli = shutil.which("nmcli")
+    if nmcli:
+        ret, out = _run_command([nmcli, "device", "reapply", iface], timeout=12)
+        snippet = " ".join(out.split())[:120]
+        notes.append(f"nmcli device reapply {iface} -> rc={ret}" + (f" ({snippet})" if snippet else ""))
+        if ret != 0:
+            ret2, out2 = _run_command([nmcli, "device", "connect", iface], timeout=15)
+            snippet2 = " ".join(out2.split())[:120]
+            notes.append(
+                f"nmcli device connect {iface} -> rc={ret2}" + (f" ({snippet2})" if snippet2 else "")
+            )
+
+    # ISC dhclient: gentle reinvoke (avoid dhclient -r; that drops the address)
+    dhclient = shutil.which("dhclient")
+    if dhclient:
+        ret, out = _run_command([dhclient, "-nw", iface], timeout=12)
+        snippet = " ".join(out.split())[:120]
+        notes.append(f"dhclient -nw {iface} -> rc={ret}" + (f" ({snippet})" if snippet else ""))
+
+    # Last resort on busybox hosts with no running udhcpc pid: one-shot discover
+    udhcpc = shutil.which("udhcpc")
+    if udhcpc and not any("udhcpc" in n for n in notes):
+        ret, out = _run_command(
+            [udhcpc, "-i", iface, "-n", "-q", "-t", "2", "-T", "1"],
+            timeout=12,
+        )
+        snippet = " ".join(out.split())[:120]
+        notes.append(f"udhcpc one-shot {iface} -> rc={ret}" + (f" ({snippet})" if snippet else ""))
+
+    if not notes:
+        notes.append("no local DHCP client tooling found to stimulate traffic")
+    return notes
+
+
 def _capture_live(args: argparse.Namespace) -> tuple[list[Any], bool, str | None]:
     if sniff is None:
         return [], False, f"Scapy unavailable: {SCAPY_IMPORT_ERROR}"
@@ -898,6 +1043,7 @@ def _capture_live(args: argparse.Namespace) -> tuple[list[Any], bool, str | None
     pkts: list[Any] = []
     denied = False
     note: str | None = None
+    trigger_notes: list[str] = []
 
     sniff_kw: dict[str, Any] = {
         "iface": args.iface,
@@ -908,6 +1054,33 @@ def _capture_live(args: argparse.Namespace) -> tuple[list[Any], bool, str | None
         sniff_kw["count"] = args.count
     if args.timeout > 0:
         sniff_kw["timeout"] = args.timeout
+
+    stop = threading.Event()
+
+    def _stimulate() -> None:
+        nonlocal trigger_notes
+        delay = max(0.2, float(getattr(args, "trigger_delay", 0.8)))
+        if stop.wait(delay):
+            return
+        trigger_notes = trigger_local_dhcp_traffic(str(args.iface))
+        # Second pulse helps clients that ignore the first renew.
+        timeout = float(getattr(args, "timeout", 45.0) or 45.0)
+        second_wait = min(10.0, max(2.5, timeout * 0.3))
+        if stop.wait(second_wait):
+            return
+        more = trigger_local_dhcp_traffic(str(args.iface))
+        # Keep unique notes, preserve order
+        seen = set(trigger_notes)
+        for item in more:
+            if item not in seen:
+                trigger_notes.append(item)
+                seen.add(item)
+
+    stim_thread: threading.Thread | None = None
+    do_trigger = bool(args.iface) and not bool(getattr(args, "no_trigger", False))
+    if do_trigger:
+        stim_thread = threading.Thread(target=_stimulate, name="dhcp-traffic-stim", daemon=True)
+        stim_thread.start()
 
     try:
         pkts = list(sniff(**sniff_kw))
@@ -922,6 +1095,18 @@ def _capture_live(args: argparse.Namespace) -> tuple[list[Any], bool, str | None
             note = str(exc)
     except Exception as exc:
         note = str(exc)
+    finally:
+        stop.set()
+        if stim_thread is not None:
+            stim_thread.join(timeout=3.0)
+
+    if do_trigger:
+        if trigger_notes:
+            trig = "local DHCP renew triggered: " + "; ".join(trigger_notes[:5])
+        else:
+            trig = "local DHCP renew trigger scheduled (no status captured)"
+        note = f"{note}; {trig}" if note else trig
+
     return pkts, denied, note
 
 
@@ -1012,6 +1197,17 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=40, help="Stop after N DHCP packets. Default 40; 0 means no limit.")
     ap.add_argument("--bpf", default="udp and (port 67 or port 68)", help="BPF filter for live capture.")
     ap.add_argument("--pcap", default=None, help="Read packets from a pcap/pcapng file instead of live capture.")
+    ap.add_argument(
+        "--no-trigger",
+        action="store_true",
+        help="Do not renew/rebind the local DHCP client during live capture (pure passive).",
+    )
+    ap.add_argument(
+        "--trigger-delay",
+        type=float,
+        default=0.8,
+        help="Seconds to wait after sniff starts before renewing local DHCP. Default 0.8.",
+    )
     ap.add_argument("--no-local", action="store_true", help="Disable local DHCP identity fallback evidence.")
     ap.add_argument("--local-only", action="store_true", help="Skip packet capture and report local DHCP identity evidence only.")
     ap.add_argument("--out-json", default=None, help="Optional JSON evidence output path.")
@@ -1039,7 +1235,13 @@ def main() -> int:
             f"Input: live capture iface={args.iface or '(auto)'} "
             f"count={args.count or 'unbounded'} timeout={args.timeout if args.timeout > 0 else 'none'}s"
         )
-        print("Hint: renew a client DHCP lease during capture if the LAN is quiet.")
+        if args.no_trigger:
+            print("DHCP traffic trigger: disabled (--no-trigger)")
+        else:
+            print(
+                "DHCP traffic trigger: will renew/rebind the local OS DHCP client "
+                f"~{args.trigger_delay:.1f}s after sniff starts (authentic client packets only)."
+            )
         if args.iface:
             print(f"Detected capture interface: {args.iface}")
         packets, capture_denied, capture_note = _capture_live(args)
@@ -1091,8 +1293,12 @@ def main() -> int:
 
     if not observations and not args.local_only:
         print("\nWire-capture note:")
-        print("  DHCP is bursty; a quiet lease interval can produce zero packets.")
-        print("  To confirm wire-level option order, run longer or renew the client lease while this probe is active.")
+        print("  DHCP is bursty; quiet leases produce zero packets without a renew.")
+        if args.pcap or args.no_trigger:
+            print("  Re-run live capture without --no-trigger, or renew another LAN client's lease.")
+        else:
+            print("  Local renew was attempted; if still empty, capture may lack privileges,")
+            print("  the iface may not use DHCP, or other hosts did not broadcast during the window.")
 
     if args.out_json:
         _write_json(args.out_json, results, observations, local_identity, score, status)

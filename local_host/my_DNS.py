@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report configured DNS, observed upstream resolver, and Mullvad DNS vs VPN exit."""
+"""Report configured DNS and observed upstream resolver (Mullvad DNS / DoT/DoH)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from detections.common.common_dns import (
     get_arin_owner,
     is_mullvad_dot_ip,
     model_and_urls_from_ptr,
-    mullvad_connection_check,
     mullvad_dns_leak_probe,
     mullvad_dot_whoami_pop,
     query_whoami_akamai,
@@ -107,7 +106,7 @@ def _print_configured_encryption_hints(dns_ips: list[str]) -> dict[str, Any]:
             "Configured nameserver is on the LAN (e.g. OpenWrt 192.168.1.1).\n"
             "  Client→router DNS is usually plain UDP/53 on the lab LAN.\n"
             "  Encryption only applies if the router forwards upstream with DoT/DoH (e.g. stubby→Mullvad).\n"
-            "  Proof of upstream is whoami.akamai.net (next section), not am.i.mullvad.net."
+            "  Proof of upstream is whoami.akamai.net (next section)."
         )
     if loopback_stub:
         print(
@@ -593,27 +592,6 @@ def _print_dns_path_summary(
             print(f"  - {item}")
 
 
-def _print_vpn_exit_report() -> None:
-    print("\n--- VPN exit IP (NOT a DNS check) ---")
-    print(
-        "https://am.i.mullvad.net/json reports where *HTTPS* egress appears from.\n"
-        "mullvad_exit_ip=false + ISP org (e.g. Verizon) is expected for Mullvad DNS-only "
-        "(DoT/DoH without the VPN)."
-    )
-    data, err = mullvad_connection_check()
-    if err or not data:
-        print(f"Connection check failed: {err or 'empty'}")
-        return
-    print(f"  egress_ip: {data.get('ip')}")
-    print(f"  organization: {data.get('organization')}")
-    print(f"  country/city: {data.get('country')}/{data.get('city')}")
-    print(f"  mullvad_exit_ip (VPN): {data.get('mullvad_exit_ip')}")
-    if data.get("mullvad_exit_ip"):
-        print("  → Traffic is exiting via Mullvad VPN.")
-    else:
-        print("  → Not on Mullvad VPN (normal for DNS-only lab).")
-
-
 def get_dns_info() -> None:
     if is_wsl_local():
         dns_ips = resolv_nameservers()
@@ -671,7 +649,6 @@ def get_dns_info() -> None:
             akahelp,
             leak_probe,
         )
-        _print_vpn_exit_report()
         return
 
     print(f"\nConfigured IPv4 DNS servers ({len(dns_ips)} unique, order preserved where possible):")
@@ -686,7 +663,6 @@ def get_dns_info() -> None:
     )
     leak_probe = _print_mullvad_leak_probe_report()
     _print_dns_path_summary(configured, upstream, akahelp, leak_probe)
-    _print_vpn_exit_report()
 
     details: list[str] = []
     is_public_dns = False
