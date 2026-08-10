@@ -56,6 +56,7 @@ dirty_words_detail_*.txt
 dirty_words_report.*
 dirty_words_results.*
 dirty_words*.json
+run/logs/
 results/
 reports/
 artifacts/

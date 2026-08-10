@@ -9,8 +9,8 @@ gateway (and maybe the hypervisor host).
 Host-authenticity score:
   1 = rich peer set (many non-gateway neighbors; residential LAN density)
   2 = several peers beyond the gateway
-  3 = only a couple of peers (weak home evidence / small lab)
-  4 = only gateway, or a single non-gateway peer (lab-like sparsity)
+  3 = a few peers (thin home LAN; still some multi-device evidence)
+  4 = only 1–2 non-gateway peers, or gateway-only (lab-like sparsity)
   5 = empty neighbor table after stimulation, or only explicit lab/virtual peers
 """
 
@@ -173,15 +173,21 @@ def score_neighbors(
             f"Rich LAN density: {len(physical_others)} non-gateway peers "
             f"(+{len(gw_peers)} gateway); residential-like neighborhood.",
         )
-    if len(physical_others) >= 3:
+    if len(physical_others) >= 4:
         return (
             2,
             f"Several LAN peers: {len(physical_others)} non-gateway peers beyond gateway.",
         )
-    if len(physical_others) == 2:
+    if len(physical_others) == 3:
         return (
             3,
-            f"Only {len(physical_others)} non-gateway peers; weak home evidence "
+            f"Only {len(physical_others)} non-gateway peers; thin LAN — "
+            "weak residential density.",
+        )
+    if len(physical_others) == 2:
+        return (
+            4,
+            f"Only {len(physical_others)} non-gateway peers; atypical for a home LAN "
             "(common on minimal lab segments).",
         )
     if physical_others:

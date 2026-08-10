@@ -50,7 +50,7 @@ lab-like to discovery probes.
 
 Detection Python libs (Scapy, Selenium, …) and network diagnostics (nmap, dig,
 tcpdump, Chromium) are NOT installed by the base package script. Priming copies
-``setup_virtual_env.py`` and runs it inside the guest so deps land in
+``install.py`` and runs it inside the guest so deps land in
 ``/root/virtual_env`` (plus OS packages via that script's apk path).
 """
 
@@ -837,8 +837,8 @@ def prime_client_vdi_for_intnet_lab(
         detections_payload_host,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
-    setup_venv_host = work_root / "setup_virtual_env.py"
-    shutil.copy2(Path(REPO_ROOT) / "setup_virtual_env.py", setup_venv_host)
+    setup_venv_host = work_root / "install.py"
+    shutil.copy2(Path(REPO_ROOT) / "install.py", setup_venv_host)
 
     print("Injecting custom configuration and packages into Alpine image...")
     commands = [
@@ -882,7 +882,7 @@ def prime_client_vdi_for_intnet_lab(
         "--run-command",
         (
             "cd /root && "
-            "python3 /root/setup_virtual_env.py --non-interactive --no-shell"
+            "python3 /root/install.py --non-interactive"
         ),
         "--run-command",
         (

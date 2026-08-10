@@ -4,14 +4,15 @@ Bootstrap a project-local Python virtual environment for Overdrive automation.
 
 - Creates ./virtual_env next to this script
 - Installs Python deps into the venv (requests, selenium, httpx, scapy, zeroconf)
-- Installs OS deps via apt (Ubuntu/Debian), dnf (Fedora/RHEL), or apk (Alpine),
-  unless skipped — including curl/iproute2/iptables/iputils, network diagnostics
-  (nmap, dig, tcpdump), and a browser/driver for Selenium
+- Installs OS deps via apt (Ubuntu/Debian), dnf (Fedora/RHEL), or apk (Alpine) —
+  including curl/iproute/iptables/ping (distro package names vary; Debian uses
+  ``iputils-ping``), network diagnostics (nmap, dig, tcpdump), and a browser/driver
+  for Selenium
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
-- Drops into an interactive bash with venv activated, unless skipped
+- Drops into an interactive bash with venv activated (skipped with ``--non-interactive``)
 
 The Alpine LAN client primes by copying this script to ``/root`` and running it
-with ``--non-interactive --no-shell`` (do not apk-add those checker packages in
+with ``--non-interactive`` (do not apk-add those checker packages in
 ``package_assets.py``).
 """
 
@@ -50,12 +51,12 @@ DIG_PACKAGE_BY_MGR = {
 
 # Core networking packages used by the Alpine lab client (and useful on hosts).
 # Installed here — not by VM/alpine_client/package_assets.py.
-NET_BASE_PACKAGES = (
-    "curl",
-    "iproute2",
-    "iptables",
-    "iputils",
-)
+# Package names differ by distro (Debian has iputils-ping, not iputils).
+NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
+    "apt": ("curl", "iproute2", "iptables", "iputils-ping"),
+    "dnf": ("curl", "iproute", "iptables", "iputils"),
+    "apk": ("curl", "iproute2", "iptables", "iputils"),
+}
 
 APT_LOCK_TIMEOUT_SECONDS = 180
 APT_LOCK_WAIT_SECONDS = 60
@@ -566,14 +567,17 @@ def install_system_deps(*, non_interactive: bool = False):
     else:
         print("[*] Chrome already installed.")
 
-    # 4) Core networking (lab client + hosts): curl, iproute2, iptables, iputils
-    net_needed = [pkg for pkg in NET_BASE_PACKAGES if not package_installed(info, pkg)]
+    # 4) Core networking (lab client + hosts): curl, iproute, iptables, ping
+    net_pkgs = list(NET_BASE_PACKAGES_BY_MGR.get(mgr, NET_BASE_PACKAGES_BY_MGR["apk"]))
+    net_needed = [pkg for pkg in net_pkgs if not package_installed(info, pkg)]
     # Also treat missing CLIs as needing install (busybox may shadow package checks).
+    ping_pkg = "iputils-ping" if mgr == "apt" else "iputils"
+    ip_pkg = "iproute" if mgr == "dnf" else "iproute2"
     cli_to_pkg = {
         "curl": "curl",
-        "ip": "iproute2",
+        "ip": ip_pkg,
         "iptables": "iptables",
-        "ping": "iputils",
+        "ping": ping_pkg,
     }
     for cmd, pkg in cli_to_pkg.items():
         if not have_cmd(cmd) and pkg not in net_needed:
@@ -582,7 +586,7 @@ def install_system_deps(*, non_interactive: bool = False):
         print(f"[*] Installing network base packages: {' '.join(net_needed)}...")
         install_packages(info, net_needed, non_interactive=non_interactive)
     else:
-        print("[*] Network base packages (curl/iproute2/iptables/iputils) already present.")
+        print(f"[*] Network base packages already present: {' '.join(net_pkgs)}.")
 
     # 5) Network diagnostics + helpers: nmap, dig, tcpdump, socat [, minicom]
     diag_cmds = [
@@ -675,7 +679,7 @@ def apply_network_capabilities(interpreter_path: Path, *, non_interactive: bool 
 
 
 
-def ensure_venv_support(*, non_interactive: bool = False, allow_install: bool = True):
+def ensure_venv_support(*, non_interactive: bool = False):
     """
     Ensures the host python has ensurepip/venv support so `venv.create(..., with_pip=True)`
     can bootstrap pip. On Ubuntu/Debian this is typically python3-venv / pythonX.Y-venv.
@@ -695,12 +699,6 @@ def ensure_venv_support(*, non_interactive: bool = False, allow_install: bool = 
         raise RuntimeError(
             "Host python lacks ensurepip; please install venv support manually "
             "(e.g., apt install python3-venv on Ubuntu/Debian)."
-        )
-    if not allow_install:
-        raise RuntimeError(
-            "Host python lacks ensurepip/venv support, and --skip-system-deps "
-            "prevents installing it automatically. Install python3-venv manually "
-            "or rerun without --skip-system-deps."
         )
 
     pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -744,21 +742,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--skip-system-deps",
-        action="store_true",
-        help="Do not run apt/dnf/apk or install OS packages (nmap, dig, browser, …).",
-    )
-    parser.add_argument(
-        "--skip-capabilities",
-        action="store_true",
-        help="Do not run setcap on the venv Python interpreter.",
-    )
-    parser.add_argument(
-        "--no-shell",
-        action="store_true",
-        help="Create the venv and exit instead of opening an activated shell.",
-    )
-    parser.add_argument(
         "--apt-lock-wait",
         type=int,
         default=APT_LOCK_WAIT_SECONDS,
@@ -778,10 +761,7 @@ def main():
     APT_LOCK_WAIT_SECONDS = max(0, args.apt_lock_wait)
 
     # 0) Ensure host python can create venvs with pip
-    ensure_venv_support(
-        non_interactive=args.non_interactive,
-        allow_install=not args.skip_system_deps,
-    )
+    ensure_venv_support(non_interactive=args.non_interactive)
 
     # 1) Always delete and recreate venv (fresh start)
     if VENV_DIR.exists():
@@ -824,18 +804,13 @@ def main():
     print("Installing Python packages into venv...")
     subprocess.check_call([python_exe, "-m", "pip", "install", "--no-input", *PY_DEPS])
 
-    # 3) Install system deps (apt/dnf)
-    if args.skip_system_deps:
-        print("[*] Skipping system dependency installation (--skip-system-deps).")
-    else:
-        install_system_deps(non_interactive=args.non_interactive)
+    # 3) Install system deps (apt/dnf/apk)
+    install_system_deps(non_interactive=args.non_interactive)
 
     print(f"\nSuccess! Virtual environment is ready on {distro_success_label()}.")
 
     # 4) Apply capabilities only when bootstrapping from system Python.
-    if args.skip_capabilities:
-        print("[*] Skipping network capabilities (--skip-capabilities).")
-    elif sys.platform != "win32" and sys.prefix == sys.base_prefix:
+    if sys.platform != "win32" and sys.prefix == sys.base_prefix:
         print("[*] Running from system Python; applying capabilities to venv interpreter.")
         apply_network_capabilities(
             Path(python_exe),
@@ -843,7 +818,7 @@ def main():
         )
 
     # 5) Enter shell with venv activated
-    if args.no_shell or args.non_interactive:
+    if args.non_interactive:
         print(f"Activate it later with: source {VENV_DIR / 'bin' / 'activate'}")
         return 0
 
@@ -876,9 +851,8 @@ if __name__ == "__main__":
         )
         if used_noninteractive_sudo(exc.cmd):
             print(
-                "[-] Non-interactive sudo was denied. Configure passwordless sudo, "
-                "run the script interactively, or use --skip-system-deps "
-                "--skip-capabilities.",
+                "[-] Non-interactive sudo was denied. Configure passwordless sudo "
+                "or run the script interactively.",
                 file=sys.stderr,
             )
         sys.exit(exc.returncode)

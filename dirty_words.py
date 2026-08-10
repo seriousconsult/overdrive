@@ -139,10 +139,18 @@ def _local_identity_rules() -> list[Rule]:
     return rules
 
 
+def _pem_begin_marker(*parts: str) -> re.Pattern[bytes]:
+    """Build a PEM BEGIN regex without storing a live header literal in this file."""
+    return _bregex("".join(parts))
+
+
 def build_rules() -> list[Rule]:
+    # Split PEM headers so this scanner does not match its own rule source.
+    private_key_marker = _pem_begin_marker("-----BEGIN ", r"[A-Z0-9 ]*PRIVATE KEY", "-----")
+    openssh_private_key = _pem_begin_marker("-----BEGIN ", "OPENSSH PRIVATE KEY", "-----")
     rules = [
-        Rule("private-key-marker", 5, _bregex(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "private key material marker", redact=False),
-        Rule("openssh-private-key", 5, _bregex(r"-----BEGIN OPENSSH PRIVATE KEY-----"), "OpenSSH private key marker", redact=False),
+        Rule("private-key-marker", 5, private_key_marker, "private key material marker", redact=False),
+        Rule("openssh-private-key", 5, openssh_private_key, "OpenSSH private key marker", redact=False),
         Rule("aws-access-key", 5, _bregex(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "AWS access key id"),
         Rule("github-token", 5, _bregex(r"\bgh[pousr]_[A-Za-z0-9_]{30,255}\b"), "GitHub token"),
         Rule("slack-token", 5, _bregex(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "Slack token"),

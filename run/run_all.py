@@ -26,11 +26,6 @@ def main() -> int:
         description="Run VM setup/verification first, then run all detections.",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print commands without running them.",
-    )
-    parser.add_argument(
         "--skip-vms",
         action="store_true",
         help="Skip run_VMs.py and only run detections.",
@@ -46,11 +41,6 @@ def main() -> int:
         help="Skip dirty_words.py identity/secret hygiene scan.",
     )
     parser.add_argument(
-        "--keep-going",
-        action="store_true",
-        help="Run detections even if VM setup/verification fails.",
-    )
-    parser.add_argument(
         "--vm-arg",
         action="append",
         default=[],
@@ -64,49 +54,35 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    failures: list[tuple[str, int]] = []
-
     if not args.skip_vms:
         rc = run_step(
             [sys.executable, str(RUN_VMS), *args.vm_arg],
             cwd=REPO_ROOT,
-            dry_run=args.dry_run,
+            dry_run=False,
             name="VM setup and verification",
         )
         if rc != 0:
-            failures.append(("run_VMs.py", rc))
-            if not args.keep_going:
-                return rc
+            return rc
 
     if not args.skip_detections:
         rc = run_step(
             [sys.executable, str(RUN_DETECTIONS)],
             cwd=REPO_ROOT,
-            dry_run=args.dry_run,
+            dry_run=False,
             name="Detection suite",
         )
         if rc != 0:
-            failures.append(("run_detections.py", rc))
-            if not args.keep_going:
-                return rc
+            return rc
 
     if not args.skip_dirty_words:
         rc = run_step(
             [sys.executable, str(DIRTY_WORDS), *args.dirty_words_arg],
             cwd=REPO_ROOT,
-            dry_run=args.dry_run,
+            dry_run=False,
             name="Dirty words / identity hygiene scan",
         )
         if rc != 0:
-            failures.append(("dirty_words.py", rc))
-            if not args.keep_going:
-                return rc
-
-    if failures:
-        print("\n[!] Completed with failures:")
-        for name, rc in failures:
-            print(f"    - {name}: exit code {rc}")
-        return failures[0][1]
+            return rc
 
     print("\n[+] All requested steps completed successfully.")
     return 0

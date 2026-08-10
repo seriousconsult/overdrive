@@ -53,6 +53,7 @@ DETECTIONS_DIR = BASE_DIR / "detections"
 EXCLUDE_SCRIPT_NAMES = frozenset(
     {
         "run_detections.py",
+        "install.py",
         "setup_virtual_env.py",
         "verify_lab_from_host.py",
         "__init__.py",

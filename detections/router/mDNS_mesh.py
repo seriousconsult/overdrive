@@ -21,7 +21,7 @@ except ModuleNotFoundError:
     print(
         "Missing dependency: zeroconf\n"
         "  Alpine:  apk add py3-zeroconf   OR   pip3 install --break-system-packages zeroconf\n"
-        "  Host venv: pip install zeroconf   (also installed by setup_virtual_env.py)",
+        "  Host venv: pip install zeroconf   (also installed by install.py)",
         file=sys.stderr,
     )
     raise SystemExit(1) from None

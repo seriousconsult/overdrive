@@ -19,22 +19,17 @@ Batch runner extras: `0` means skipped due to `TODO`; `Error` means failed, time
 Initial setup:
 
 ```bash
-python3 setup_virtual_env.py
+python3 install.py
 ```
 
 Non-interactive setup for scripts/CI:
 
 ```bash
-python3 setup_virtual_env.py --non-interactive
+python3 install.py --non-interactive
 ```
 
 `--non-interactive` uses `sudo -n` for system packages and `setcap`, so it exits
-instead of prompting if passwordless sudo is not already configured. To avoid all
-privileged setup, use:
-
-```bash
-python3 setup_virtual_env.py --non-interactive --skip-system-deps --skip-capabilities
-```
+instead of prompting if passwordless sudo is not already configured.
 
 ```bash
 cd /path/to/overdrive
@@ -47,7 +42,6 @@ Useful commands:
 ```bash
 python3 run/run_all.py --skip-vms          # detections only
 python3 run/run_all.py --skip-detections   # VM setup/verification only
-python3 run/run_all.py --dry-run
 python3 detections/run_detections.py
 python3 run/run_VMs.py
 ```
@@ -103,7 +97,7 @@ python3 local_host/wsl_config.py
 - The WSL/Linux host cannot directly reach VirtualBox `intnet` LANs.
 - The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
 - The Alpine LAN client scrubs tracking identifiers at build time (neutral hostname `desktop`, non-VirtualBox NIC MAC, tame DHCP client identity, cleared `machine-id`, generic timezone User-Agent). Rebuild the Alpine VM after changing those settings. LAN silence is still expected and discovery probes may still score it as lab-like.
-- Alpine client checker/network deps are installed by guest `setup_virtual_env.py` during VDI prime (Python libs into `/root/virtual_env`; curl, iproute2, iptables, iputils, nmap, dig, tcpdump, Chromium via apk). Bootstrap image install only keeps `bash` / `python3` / `tzdata`. Rebuild the client after changing `setup_virtual_env.py`.
+- Alpine client checker/network deps are installed by guest `install.py` during VDI prime (Python libs into `/root/virtual_env`; curl, iproute2, iptables, iputils, nmap, dig, tcpdump, Chromium via apk). Bootstrap image install only keeps `bash` / `python3` / `tzdata`. Rebuild the client after changing `install.py`.
 
 Verify wiring:
 
