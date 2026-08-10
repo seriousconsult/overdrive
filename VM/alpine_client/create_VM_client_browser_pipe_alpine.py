@@ -49,9 +49,10 @@ client after changing those settings. LAN silence is intentional and still looks
 lab-like to discovery probes.
 
 Detection Python libs (Scapy, Selenium, …) and network diagnostics (nmap, dig,
-tcpdump, Chromium) are NOT installed by the base package script. Priming copies
-``install.py`` and runs it inside the guest so deps land in
-``/root/virtual_env`` (plus OS packages via that script's apk path).
+tcpdump, Chromium) are NOT installed by the base package script (bootstrap does
+install ``iptables`` so ``client-firewall`` can harden without them). Priming
+copies ``install.py`` and runs it inside the guest so deps land in
+``/root/virtual_env`` (plus remaining OS packages via that script's apk path).
 """
 
 from __future__ import annotations
