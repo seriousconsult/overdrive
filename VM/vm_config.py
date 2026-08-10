@@ -16,9 +16,9 @@ VM_ENV_PATH = Path(__file__).resolve().with_name(".env")
 # https://wikidevi.wi-cat.ru/Verizon_G3100
 G3100_MAC_OUI = "3cbdc5"
 
-# Common PC NIC OUI (Realtek) for the Alpine LAN client — not VirtualBox 080027,
+# Dell Inc. PC NIC OUI for the Alpine LAN client - not VirtualBox 080027,
 # and not the router G3100 OUI, so router vs client stay distinct on the wire.
-CLIENT_NIC_OUI = "00e04c"
+CLIENT_NIC_OUI = "001422"
 
 
 def _load_vm_env(path: Path = VM_ENV_PATH) -> None:
@@ -89,7 +89,7 @@ def random_g3100_mac_vbox(*, oui: str = G3100_MAC_OUI) -> str:
 
 
 def random_client_mac_vbox(*, oui: str = CLIENT_NIC_OUI) -> str:
-    """Return a random consumer-PC-style MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
+    """Return a random Dell-style client MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
     return _random_mac_vbox(oui)
 
 

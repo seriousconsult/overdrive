@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -49,6 +51,10 @@ STEP_LABELS = {
 
 LABEL_WIDTH = 36
 TAIL_LINES_ON_FAILURE = 24
+TMUX_SESSION_BASE = "overdrive-vms"
+TMUX_ENV_FLAG = "OVERDRIVE_RUN_VMS_TMUX"
+TMUX_SESSION_ENV = "OVERDRIVE_RUN_VMS_TMUX_SESSION"
+TMUX_SERIAL_READY_ENV = "OVERDRIVE_RUN_VMS_SERIAL_READY_FILE"
 
 
 def script_has_todo(script_path: Path) -> bool:
@@ -94,6 +100,247 @@ def finish_progress(step: int, total: int, label: str, status: str) -> None:
         print(f"\r{line:<100}", flush=True)
     else:
         print(line, flush=True)
+
+
+def _shell_join(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def _bash_command(body: str) -> str:
+    return "bash -lc " + shlex.quote(body)
+
+
+def _tmux_session_exists(session_name: str) -> bool:
+    return (
+        subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def _available_tmux_session_name() -> str:
+    if not _tmux_session_exists(TMUX_SESSION_BASE):
+        return TMUX_SESSION_BASE
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{TMUX_SESSION_BASE}-{stamp}"
+
+
+def _tmux_serial_loop(title: str, command: list[str], *, ready_file: Path) -> str:
+    return _bash_command(
+        "\n".join(
+            [
+                f"cd {_shell_join([str(REPO_ROOT)])}",
+                f"printf '\\033]2;{title}\\033\\\\'",
+                f"ready_file={shlex.quote(str(ready_file))}",
+                "until [ -e \"$ready_file\" ]; do",
+                "  clear",
+                f"  echo '[overdrive] {title}'",
+                "  echo 'Host setup is still configuring VMs and using serial for bootstrap.'",
+                "  echo 'This pane will attach as soon as the host releases the serial endpoints.'",
+                "  sleep 3",
+                "done",
+                "while true; do",
+                "  clear",
+                f"  echo '[overdrive] {title}'",
+                "  echo 'Waiting for the VM serial endpoint; this pane retries automatically.'",
+                "  echo 'Press Ctrl-c in this pane to stop retrying.'",
+                "  echo",
+                f"  {_shell_join(command)}",
+                "  rc=$?",
+                "  echo",
+                f"  echo '[overdrive] {title} exited with status '\"$rc\"'. Retrying in 5s...'",
+                "  sleep 5",
+                "done",
+            ]
+        )
+    )
+
+
+def _tmux_host_command(session_name: str, argv: list[str], *, ready_file: Path) -> str:
+    child_args = [arg for arg in argv if arg not in ("--tmux", "--no-tmux")]
+    child_command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        *child_args,
+        "--no-tmux",
+    ]
+    env_prefix = (
+        f"{TMUX_ENV_FLAG}=1 "
+        f"{TMUX_SESSION_ENV}={shlex.quote(session_name)} "
+        f"{TMUX_SERIAL_READY_ENV}={shlex.quote(str(ready_file))} "
+        "PYTHONUNBUFFERED=1"
+    )
+    return _bash_command(
+        "\n".join(
+            [
+                f"cd {_shell_join([str(REPO_ROOT)])}",
+                "printf '\\033]2;overdrive host\\033\\\\'",
+                f"{env_prefix} {_shell_join(child_command)}",
+                "rc=$?",
+                "echo",
+                "echo \"[overdrive] run_VMs exited with status $rc\"",
+                f"echo \"Detach: Ctrl-b d    Reattach: tmux attach -t {session_name}\"",
+                "read -r -p 'Press Enter to close this host pane...' _",
+                "exit \"$rc\"",
+            ]
+        )
+    )
+
+
+def print_tmux_host_help() -> None:
+    session_name = os.environ.get(TMUX_SESSION_ENV, TMUX_SESSION_BASE)
+    print("tmux layout")
+    print("  top:    host runner, logs, verification")
+    print("  bottom: left Alpine client serial, right OpenWrt router serial")
+    print()
+    print("Useful tmux commands")
+    print("  Ctrl-b arrow-key    move between panes")
+    print("  Ctrl-b z            zoom/unzoom the active pane")
+    print("  Ctrl-b [            scrollback; press q to leave copy mode")
+    print("  Ctrl-b d            detach from tmux")
+    print(f"  tmux attach -t {session_name}")
+    print(f"  tmux kill-session -t {session_name}")
+    print()
+
+
+def mark_tmux_serial_ready(log: TextIO) -> None:
+    ready_file = os.environ.get(TMUX_SERIAL_READY_ENV)
+    if not ready_file:
+        return
+    path = Path(ready_file)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError as exc:
+        log.write(f"[!] Could not mark tmux serial panes ready at {path}: {exc}\n")
+        log.flush()
+        print(f"[!] Could not wake tmux serial panes: {exc}")
+        return
+    log.write(f"[tmux] serial panes ready marker: {path}\n")
+    log.flush()
+    print(f"[tmux] Serial panes may now attach ({path}).")
+
+
+def launch_tmux_layout(argv: list[str]) -> int | None:
+    if os.environ.get(TMUX_ENV_FLAG):
+        return None
+    if shutil.which("tmux") is None:
+        print("[!] tmux is not installed or not on PATH; continuing without tmux layout.")
+        return None
+    if not sys.stdout.isatty():
+        return None
+
+    session_name = _available_tmux_session_name()
+    ready_file = Path("/tmp") / f"overdrive-{session_name}-serial-ready"
+    try:
+        ready_file.unlink()
+    except FileNotFoundError:
+        pass
+    host_command = _tmux_host_command(session_name, argv, ready_file=ready_file)
+    client_command = _tmux_serial_loop(
+        "Alpine client serial :2325",
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "alpine_client" / "create_VM_client_browser_pipe_alpine.py"),
+            "--serial-here",
+            "--force-interactive-serial",
+            "--serial-port",
+            "2325",
+        ],
+        ready_file=ready_file,
+    )
+    router_command = _tmux_serial_loop(
+        "OpenWrt router serial :2324",
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "openwrt_router" / "create_VM_OpenWrt_router.py"),
+            "--serial-here",
+            "--force-interactive-serial",
+        ],
+        ready_file=ready_file,
+    )
+
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-n",
+            "lab",
+            "-c",
+            str(REPO_ROOT),
+            host_command,
+        ],
+        check=True,
+    )
+    host_pane = (
+        subprocess.check_output(
+            ["tmux", "display-message", "-p", "-t", f"{session_name}:lab", "#{pane_id}"],
+            text=True,
+        )
+        .strip()
+    )
+    client_pane = (
+        subprocess.check_output(
+            [
+                "tmux",
+                "split-window",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                host_pane,
+                "-v",
+                "-p",
+                "35",
+                "-c",
+                str(REPO_ROOT),
+                client_command,
+            ],
+            text=True,
+        )
+        .strip()
+    )
+    router_pane = (
+        subprocess.check_output(
+            [
+                "tmux",
+                "split-window",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                client_pane,
+                "-h",
+                "-p",
+                "50",
+                "-c",
+                str(REPO_ROOT),
+                router_command,
+            ],
+            text=True,
+        )
+        .strip()
+    )
+    for pane, title in (
+        (host_pane, "host"),
+        (client_pane, "client serial"),
+        (router_pane, "router serial"),
+    ):
+        subprocess.run(["tmux", "select-pane", "-t", pane, "-T", title], check=True)
+    subprocess.run(["tmux", "select-pane", "-t", host_pane], check=True)
+
+    if os.environ.get("TMUX"):
+        subprocess.run(["tmux", "switch-client", "-t", session_name], check=True)
+    else:
+        subprocess.run(["tmux", "attach-session", "-t", session_name], check=True)
+    return 0
 
 
 def discover_create_scripts(
@@ -257,6 +504,19 @@ def main() -> int:
         description="Create/refresh the OpenWrt lab VMs, then verify host-side wiring.",
     )
     parser.add_argument(
+        "--tmux",
+        dest="tmux",
+        action="store_true",
+        default=True,
+        help="Run inside the managed tmux layout when stdout is interactive. Default: on.",
+    )
+    parser.add_argument(
+        "--no-tmux",
+        dest="tmux",
+        action="store_false",
+        help="Run in the current terminal without creating the tmux layout.",
+    )
+    parser.add_argument(
         "--include-todo",
         action="store_true",
         help="Also run create_VM_*.py scripts whose source contains TODO.",
@@ -282,6 +542,10 @@ def main() -> int:
         help="Deprecated no-op; the client VM and serial pipe are always required.",
     )
     args = parser.parse_args()
+    if args.tmux:
+        tmux_rc = launch_tmux_layout(sys.argv[1:])
+        if tmux_rc is not None:
+            return tmux_rc
 
     log_path, log = open_run_log()
     try:
@@ -293,6 +557,8 @@ def main() -> int:
         print("Lab VM setup")
         print(f"  Log  {log_display}")
         print()
+        if os.environ.get(TMUX_ENV_FLAG):
+            print_tmux_host_help()
 
         scripts = discover_create_scripts(
             include_todo=args.include_todo,
@@ -310,6 +576,8 @@ def main() -> int:
                 command.extend(
                     ["--start-type", "gui", "--wan-mode", "nat", "--start-alpine-client"]
                 )
+                if os.environ.get(TMUX_ENV_FLAG):
+                    command.append("--no-connect-serial")
             steps.append((step_label(script), command, script))
 
         if not args.skip_verify:
@@ -324,6 +592,7 @@ def main() -> int:
 
         total = len(steps)
         failures: list[tuple[str, int]] = []
+        created_vms = False
 
         for index, (label, command, script) in enumerate(steps, start=1):
             rc = run_logged_step(
@@ -339,12 +608,19 @@ def main() -> int:
             if rc != 0:
                 failures.append((script.name, rc))
                 if not args.keep_going:
+                    if os.environ.get(TMUX_ENV_FLAG) and created_vms:
+                        mark_tmux_serial_ready(log)
                     print()
                     print(f"Stopped after step {index}/{total} failed (exit {rc}).")
                     print(f"Full log: {log_path}")
                     return rc
+            elif script.name == "create_VM_OpenWrt_router.py":
+                created_vms = True
 
         print()
+        if os.environ.get(TMUX_ENV_FLAG) and created_vms:
+            mark_tmux_serial_ready(log)
+
         if failures:
             print("Completed with failures:")
             for name, rc in failures:

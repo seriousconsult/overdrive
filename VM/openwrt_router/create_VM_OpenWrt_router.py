@@ -71,6 +71,11 @@ from VM.openwrt_router.openwrt_assets import (
     OVERDRIVE_MULLVAD_INIT_D,
     UCI_DEFAULTS_ENABLE_MULLVAD,
 )
+from VM.openwrt_router.pipeline import (
+    BuildStep,
+    OpenWrtRouterBuildOptions,
+    run_openwrt_router_pipeline,
+)
 from VM.vm_config import (
     G3100_MAC_OUI,
     MULLVAD_DOT_PORT,
@@ -1105,7 +1110,7 @@ def assign_g3100_macs(vboxmanage: str) -> tuple[str, str]:
     Assign fresh Verizon FiOS G3100-style MACs to LAN (NIC1) and WAN (NIC2).
 
     Must be called while the VM is powered off. A new pair is generated on every
-    start so the lab router does not keep a sticky VirtualBox OUI.
+    create so the lab router does not keep a sticky VirtualBox OUI.
     """
     lan = random_g3100_mac_vbox()
     wan = random_g3100_mac_vbox()
@@ -1359,6 +1364,11 @@ def setup_openwrt_vm(
     wan_mode: str = "nat",
     connect_serial: bool = True,
 ) -> None:
+    options = OpenWrtRouterBuildOptions(
+        start_type=start_type,
+        wan_mode=wan_mode,
+        connect_serial=connect_serial,
+    )
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
     if not vboxmanage:
@@ -1376,237 +1386,276 @@ def setup_openwrt_vm(
     vms_root = paths["vms_root"]
     vdi_path = os.path.join(vm_base, VDI_NAME)
     dst_path = wsl_to_windows_path(vdi_path) if paths["is_wsl"] else vdi_path
-
-    print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
-    remove_existing_vm(
-        vboxmanage,
-        VM_NAME,
-        vm_base,
-        medium_path_for_vbox=dst_path,
-    )
-
-    os.makedirs(vms_root, exist_ok=True)
-    os.makedirs(vm_base, exist_ok=True)
-
-    # This script expects the raw OpenWrt image already being downloadable/available via OPENWRT_URL logic.
-    # Keep your existing downloader/converter flow:
-    download_openwrt_image(OPENWRT_URL, img_path)
-    apply_helper = write_mullvad_dot_helpers(Path(vm_base))
-    # Keep a copy beside the script for manual use.
-    write_mullvad_dot_helpers(Path(SCRIPT_DIR))
-
-    apk_dir = fetch_openwrt_stubby_apks()
-    injected = inject_mullvad_dot_into_openwrt_image(img_path, apk_dir=apk_dir)
-    if not injected:
-        raise RuntimeError(
-            "Image inject failed (need guestfish/virt-customize + libguestfs). "
-            "Offline stubby APKs + apply script must be baked into the disk — "
-            "serial upload is too slow/fragile for OpenWrt 25.12 apk packages.\n"
-            f"Host apply script: {apply_helper}\n"
-            f"APK cache: {apk_dir}"
-        )
-
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
     vms_root_for_vbox = wsl_to_windows_path(vms_root) if paths["is_wsl"] else vms_root
-
-    # Always rebuild VDI from the (possibly just-injected) raw image.
-    if os.path.exists(vdi_path):
-        print(f"Removing stale VDI so convertfromraw uses the current image: {vdi_path}")
-        try:
-            os.remove(vdi_path)
-        except OSError as exc:
-            print(f"[!] Could not remove VDI ({exc}); attempting VBox closemedium...")
-            subprocess.run(
-                [vboxmanage, "closemedium", "disk", dst_path, "--delete"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-    print("Converting raw image to VDI...")
-    run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
-
-    # ``createvm --basefolder`` must be the *parent* ``VirtualBox VMs`` dir (Windows path for VBoxManage.exe).
-    if not vm_is_registered(vboxmanage, VM_NAME):
-        existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
-        if existing_vbox:
-            reg_path = (
-                wsl_to_windows_path(existing_vbox)
-                if paths["is_wsl"]
-                else existing_vbox
-            )
-            print(f"Registering existing settings file: {existing_vbox}")
-            run_vboxmanage(vboxmanage, ["registervm", reg_path])
-        else:
-            run_vboxmanage(
-                vboxmanage,
-                [
-                    "createvm",
-                    "--name",
-                    VM_NAME,
-                    "--ostype",
-                    "Linux_64",
-                    "--basefolder",
-                    vms_root_for_vbox,
-                    "--register",
-                ],
-            )
-
-    # Force BIOS firmware (command line uses modifyvm, not createvm).
-    run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--firmware", "bios"])
-
-    # NIC1 = LAN: matches OpenWrt default br-lan on eth0. NIC2 = WAN: matches wan on eth1.
-    lan_nic_args = [
-        "--nic1",
-        "intnet",
-        "--intnet1",
-        LAN_INTNET_NAME,
-        "--nicpromisc1",
-        "allow-vms",
-    ]
-
-    bridge_interface = get_active_bridged_interface(vboxmanage) if wan_mode == "bridged" else None
-    if wan_mode == "bridged" and bridge_interface:
-        wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
-        wan_note = f"bridged → {bridge_interface!r} (WAN / uplink)"
-    else:
-        # Host resolver is bootstrap only (NTP / WAN reachability before DoT).
-        # stubby packages are injected offline — no apk update over WAN required.
-        wan_nic_args = [
-            "--nic2",
-            "nat",
-            "--natdnshostresolver2",
-            "on",
-        ]
-        if wan_mode == "bridged":
-            wan_note = "NAT (WAN fallback — no bridged adapter; DNS host-resolver for stubby bootstrap)"
-        else:
-            wan_note = "NAT (WAN; DNS host-resolver for stubby/Mullvad DoT bootstrap)"
-
-    # Ensure VirtualBox can create VM log files.
-    logs_dir = Path(vm_base) / "Logs"
-    os.makedirs(logs_dir, exist_ok=True)
-
-    print(f"Configuring VM {VM_NAME}…")
-    print(f"  LAN (NIC1): internal network {LAN_INTNET_NAME!r} — stock OpenWrt ``br-lan`` on ``eth0``.")
-    print(f"  WAN (NIC2): {wan_note} — stock OpenWrt ``wan`` on ``eth1``.")
-    print("  Client VMs: ``--nic1 intnet`` on the same intnet name (see create_VM_client_browser.py).")
-
-    run_vboxmanage(
-        vboxmanage,
-        [
-            "modifyvm",
-            VM_NAME,
-            "--memory",
-            "512",
-            "--cpus",
-            "1",
-            "--graphicscontroller",
-            "vmsvga",
-            *lan_nic_args,
-            *wan_nic_args,
-        ],
-    )
-
     serial_endpoint = router_serial_endpoint(vboxmanage)
-    configure_router_serial(vboxmanage, serial_endpoint)
+    apply_helper: Path | None = None
+    apk_dir: Path | None = None
 
-    try_remove_vbox_storage_controller_with_retry(vboxmanage, VM_NAME, "IDE")
+    def require_apply_helper() -> Path:
+        if apply_helper is None:
+            raise RuntimeError("Mullvad DoT helper was not prepared before router start.")
+        return apply_helper
 
-    run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
-    run_vboxmanage(
-        vboxmanage,
-        [
-            "storageattach",
+    def remove_previous_vm() -> None:
+        print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
+        remove_existing_vm(
+            vboxmanage,
             VM_NAME,
-            "--storagectl",
-            "IDE",
-            "--port",
-            "0",
-            "--device",
-            "0",
-            "--type",
-            "hdd",
-            "--medium",
-            dst_path,
-        ],
-    )
+            vm_base,
+            medium_path_for_vbox=dst_path,
+        )
 
-    if start_type == "none":
-        print("VM configured. Skipping start because --start-type none was selected.")
-        print(mullvad_dot_console_instructions(apply_helper))
-        print(router_serial_instructions(vboxmanage, serial_endpoint))
-        return
+    def ensure_workspace() -> None:
+        os.makedirs(vms_root, exist_ok=True)
+        os.makedirs(vm_base, exist_ok=True)
 
-    start_attempts = [start_type]
-    alternate = alternate_non_gui_start_type(start_type)
-    if alternate:
-        start_attempts.append(alternate)
+    def download_base_image() -> None:
+        download_openwrt_image(OPENWRT_URL, img_path)
 
-    last_apply_error: Exception | None = None
-    for attempt_no, attempt_type in enumerate(start_attempts, start=1):
-        if attempt_no > 1:
-            print(f"[!] Retrying router VM with non-GUI start type {attempt_type!r}.")
-            stop_router_for_start_retry(vboxmanage)
+    def prepare_mullvad_dot_helpers() -> None:
+        nonlocal apply_helper
+        apply_helper = write_mullvad_dot_helpers(Path(vm_base))
+        # Keep a copy beside the script for manual use.
+        write_mullvad_dot_helpers(Path(SCRIPT_DIR))
 
-        # New G3100-style MACs on every start (VM must be powered off).
+    def inject_mullvad_dot_assets() -> None:
+        nonlocal apk_dir
+        apk_dir = fetch_openwrt_stubby_apks()
+        injected = inject_mullvad_dot_into_openwrt_image(img_path, apk_dir=apk_dir)
+        if not injected:
+            raise RuntimeError(
+                "Image inject failed (need guestfish/virt-customize + libguestfs). "
+                "Offline stubby APKs + apply script must be baked into the disk - "
+                "serial upload is too slow/fragile for OpenWrt 25.12 apk packages.\n"
+                f"Host apply script: {require_apply_helper()}\n"
+                f"APK cache: {apk_dir}"
+            )
+
+    def convert_image_to_vdi() -> None:
+        # Always rebuild VDI from the (possibly just-injected) raw image.
+        if os.path.exists(vdi_path):
+            print(f"Removing stale VDI so convertfromraw uses the current image: {vdi_path}")
+            try:
+                os.remove(vdi_path)
+            except OSError as exc:
+                print(f"[!] Could not remove VDI ({exc}); attempting VBox closemedium...")
+                subprocess.run(
+                    [vboxmanage, "closemedium", "disk", dst_path, "--delete"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+        print("Converting raw image to VDI...")
+        run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
+
+    def create_vm_registration() -> None:
+        # ``createvm --basefolder`` must be the parent ``VirtualBox VMs`` dir.
+        if not vm_is_registered(vboxmanage, VM_NAME):
+            existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
+            if existing_vbox:
+                reg_path = (
+                    wsl_to_windows_path(existing_vbox)
+                    if paths["is_wsl"]
+                    else existing_vbox
+                )
+                print(f"Registering existing settings file: {existing_vbox}")
+                run_vboxmanage(vboxmanage, ["registervm", reg_path])
+            else:
+                run_vboxmanage(
+                    vboxmanage,
+                    [
+                        "createvm",
+                        "--name",
+                        VM_NAME,
+                        "--ostype",
+                        "Linux_64",
+                        "--basefolder",
+                        vms_root_for_vbox,
+                        "--register",
+                    ],
+                )
+
+    def configure_vm_hardware_and_serial() -> None:
+        # Force BIOS firmware (command line uses modifyvm, not createvm).
+        run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--firmware", "bios"])
+
+        # NIC1 = LAN: matches OpenWrt default br-lan on eth0. NIC2 = WAN on eth1.
+        lan_nic_args = [
+            "--nic1",
+            "intnet",
+            "--intnet1",
+            LAN_INTNET_NAME,
+            "--nicpromisc1",
+            "allow-vms",
+        ]
+
+        bridge_interface = (
+            get_active_bridged_interface(vboxmanage)
+            if options.wan_mode == "bridged"
+            else None
+        )
+        if options.wan_mode == "bridged" and bridge_interface:
+            wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
+            wan_note = f"bridged -> {bridge_interface!r} (WAN / uplink)"
+        else:
+            # Host resolver is bootstrap only (NTP / WAN reachability before DoT).
+            # stubby packages are injected offline - no apk update over WAN required.
+            wan_nic_args = [
+                "--nic2",
+                "nat",
+                "--natdnshostresolver2",
+                "on",
+            ]
+            if options.wan_mode == "bridged":
+                wan_note = "NAT (WAN fallback - no bridged adapter; DNS host-resolver for stubby bootstrap)"
+            else:
+                wan_note = "NAT (WAN; DNS host-resolver for stubby/Mullvad DoT bootstrap)"
+
+        # Ensure VirtualBox can create VM log files.
+        logs_dir = Path(vm_base) / "Logs"
+        os.makedirs(logs_dir, exist_ok=True)
+
+        print(f"Configuring VM {VM_NAME}...")
+        print(f"  LAN (NIC1): internal network {LAN_INTNET_NAME!r} - stock OpenWrt ``br-lan`` on ``eth0``.")
+        print(f"  WAN (NIC2): {wan_note} - stock OpenWrt ``wan`` on ``eth1``.")
+        print("  Client VMs: ``--nic1 intnet`` on the same intnet name (see create_VM_client_browser.py).")
+
+        run_vboxmanage(
+            vboxmanage,
+            [
+                "modifyvm",
+                VM_NAME,
+                "--memory",
+                "512",
+                "--cpus",
+                "1",
+                "--graphicscontroller",
+                "vmsvga",
+                *lan_nic_args,
+                *wan_nic_args,
+            ],
+        )
+        configure_router_serial(vboxmanage, serial_endpoint)
+
+    def attach_storage() -> None:
+        try_remove_vbox_storage_controller_with_retry(vboxmanage, VM_NAME, "IDE")
+
+        run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
+        run_vboxmanage(
+            vboxmanage,
+            [
+                "storageattach",
+                VM_NAME,
+                "--storagectl",
+                "IDE",
+                "--port",
+                "0",
+                "--device",
+                "0",
+                "--type",
+                "hdd",
+                "--medium",
+                dst_path,
+            ],
+        )
+
+    def assign_fresh_router_macs() -> None:
+        # Fresh Verizon FiOS G3100-style MACs on every create. The VM must be powered off.
         assign_g3100_macs(vboxmanage)
 
-        print(f"Starting VM ({attempt_type})...")
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", attempt_type])
-        wait_for_router_running(vboxmanage, timeout_s=90.0)
-        print(f"[+] VM is running with --type {attempt_type!r}.")
+    def start_verify_and_connect() -> None:
+        helper = require_apply_helper()
+        if options.start_type == "none":
+            print("VM configured. Skipping start because --start-type none was selected.")
+            print(mullvad_dot_console_instructions(helper))
+            print(router_serial_instructions(vboxmanage, serial_endpoint))
+            return
 
-        # Apply + verify Mullvad DoT over serial before handing the console to the user.
-        # First-boot init is best-effort; this is the correctness guarantee for every create.
-        try:
-            ensure_mullvad_dot_over_serial(
-                timeout_s=240.0,
-                vboxmanage=vboxmanage,
-                allow_serial_upload=False,
-            )
-            break
-        except Exception as exc:
-            last_apply_error = exc
-            print(f"[!!] Mullvad DoT not active after start type {attempt_type!r}: {exc}")
-            if "Could not open router serial TCP" in str(exc) and attempt_no < len(start_attempts):
-                continue
-            print(f"[!!] FATAL: Mullvad DoT not active after create: {exc}")
-            print(mullvad_dot_console_instructions(apply_helper))
+        start_attempts = [options.start_type]
+        alternate = alternate_non_gui_start_type(options.start_type)
+        if alternate:
+            start_attempts.append(alternate)
+
+        last_apply_error: Exception | None = None
+        for attempt_no, attempt_type in enumerate(start_attempts, start=1):
+            if attempt_no > 1:
+                print(f"[!] Retrying router VM with non-GUI start type {attempt_type!r}.")
+                stop_router_for_start_retry(vboxmanage)
+                # Give the retry a fresh Verizon FiOS G3100-style pair too.
+                assign_g3100_macs(vboxmanage)
+
+            print(f"Starting VM ({attempt_type})...")
+            run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", attempt_type])
+            wait_for_router_running(vboxmanage, timeout_s=90.0)
+            print(f"[+] VM is running with --type {attempt_type!r}.")
+
+            # Apply + verify Mullvad DoT over serial before handing the console to the user.
+            # First-boot init is best-effort; this is the correctness guarantee for every create.
+            try:
+                ensure_mullvad_dot_over_serial(
+                    timeout_s=240.0,
+                    vboxmanage=vboxmanage,
+                    allow_serial_upload=False,
+                )
+                break
+            except Exception as exc:
+                last_apply_error = exc
+                print(f"[!!] Mullvad DoT not active after start type {attempt_type!r}: {exc}")
+                if "Could not open router serial TCP" in str(exc) and attempt_no < len(start_attempts):
+                    continue
+                print(f"[!!] FATAL: Mullvad DoT not active after create: {exc}")
+                print(mullvad_dot_console_instructions(helper))
+                print(router_serial_instructions(vboxmanage, serial_endpoint))
+                raise RuntimeError(
+                    "Router VM started but DNS is not Mullvad DoT. "
+                    "See /tmp/overdrive-mullvad-dot.log on the OpenWrt serial console."
+                ) from exc
+        else:
+            print(mullvad_dot_console_instructions(helper))
             print(router_serial_instructions(vboxmanage, serial_endpoint))
             raise RuntimeError(
                 "Router VM started but DNS is not Mullvad DoT. "
                 "See /tmp/overdrive-mullvad-dot.log on the OpenWrt serial console."
-            ) from exc
-    else:
-        print(mullvad_dot_console_instructions(apply_helper))
+            ) from last_apply_error
+
+        print(mullvad_dot_console_instructions(helper))
         print(router_serial_instructions(vboxmanage, serial_endpoint))
-        raise RuntimeError(
-            "Router VM started but DNS is not Mullvad DoT. "
-            "See /tmp/overdrive-mullvad-dot.log on the OpenWrt serial console."
-        ) from last_apply_error
 
-    print(mullvad_dot_console_instructions(apply_helper))
-    print(router_serial_instructions(vboxmanage, serial_endpoint))
+        if options.connect_serial:
+            time.sleep(1)
+            # New window by default - keep the create/start shell free.
+            spawned = spawn_serial_console_window(
+                Path(__file__).resolve(),
+                title="OpenWrt Router serial (2324)",
+                extra_args=["--force-interactive-serial"],
+                cwd=Path(SCRIPT_DIR),
+            )
+            if not spawned:
+                try:
+                    connect_router_serial_console(
+                        vboxmanage,
+                        serial_endpoint,
+                        force_interactive=True,
+                    )
+                except RuntimeError as exc:
+                    print(f"[!] Serial attach failed: {exc}")
+                    print(f"    Retry with: ./{Path(__file__).name} --serial-only")
 
-    if connect_serial:
-        time.sleep(1)
-        # New window by default — keep the create/start shell free.
-        spawned = spawn_serial_console_window(
-            Path(__file__).resolve(),
-            title="OpenWrt Router serial (2324)",
-            extra_args=["--force-interactive-serial"],
-            cwd=Path(SCRIPT_DIR),
-        )
-        if not spawned:
-            try:
-                connect_router_serial_console(
-                    vboxmanage,
-                    serial_endpoint,
-                    force_interactive=True,
-                )
-            except RuntimeError as exc:
-                print(f"[!] Serial attach failed: {exc}")
-                print(f"    Retry with: ./{Path(__file__).name} --serial-only")
+    steps = [
+        BuildStep("remove previous VM and disk", remove_previous_vm),
+        BuildStep("prepare workspace", ensure_workspace),
+        BuildStep("download OpenWrt base image", download_base_image),
+        BuildStep("prepare Mullvad DoT helper scripts", prepare_mullvad_dot_helpers),
+        BuildStep("inject Mullvad DoT packages and init", inject_mullvad_dot_assets),
+        BuildStep("convert image to VDI", convert_image_to_vdi),
+        BuildStep("create VirtualBox VM registration", create_vm_registration),
+        BuildStep("configure VM hardware and serial", configure_vm_hardware_and_serial),
+        BuildStep("attach VDI storage", attach_storage),
+        BuildStep("assign fresh Verizon router MACs", assign_fresh_router_macs),
+        BuildStep("start VM, verify DoT, and attach serial", start_verify_and_connect),
+    ]
+    run_openwrt_router_pipeline(steps)
 
 
 def enable_serial_on_existing_router() -> None:
@@ -1732,7 +1781,7 @@ def main() -> None:
             try:
                 setup_alpine_client_vm(
                     start_vm=True,
-                    connect_serial=True,
+                    connect_serial=not args.no_connect_serial,
                 )
                 print("[+] Alpine client VM started successfully.")
             except Exception as e:
