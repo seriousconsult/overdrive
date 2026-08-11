@@ -184,8 +184,10 @@ def _tmux_host_command(session_name: str, argv: list[str], *, ready_file: Path) 
                 "echo",
                 "echo \"[overdrive] run_VMs exited with status $rc\"",
                 f"echo \"Detach: Ctrl-b d    Reattach: tmux attach -t {session_name}\"",
-                "read -r -p 'Press Enter to close this host pane...' _",
-                "exit \"$rc\"",
+                "echo \"This host pane stays open. Type exit to close only this pane.\"",
+                "echo",
+                # Keep the layout alive after setup; do not exit on Enter.
+                "exec bash -i",
             ]
         )
     )
@@ -197,14 +199,85 @@ def print_tmux_host_help() -> None:
     print("  top:    host runner, logs, verification")
     print("  bottom: left Alpine client serial, right OpenWrt router serial")
     print()
-    print("Useful tmux commands")
-    print("  Ctrl-b arrow-key    move between panes")
-    print("  Ctrl-b z            zoom/unzoom the active pane")
-    print("  Ctrl-b [            scrollback; press q to leave copy mode")
-    print("  Ctrl-b d            detach from tmux")
+    print("Move between panes (prefix is Ctrl-b: press it, release, then the next key)")
+    print("  mouse click         focus a pane")
+    print("  Ctrl-b then o       cycle to the next pane")
+    print("  Ctrl-b then h/j/k/l left / down / up / right")
+    print("  Ctrl-b then q       show pane numbers; type a number to jump")
+    print()
+    print("Copy / paste")
+    print("  Shift+drag          select text (Windows Terminal / Cursor native copy)")
+    print("  Ctrl-b then [       tmux copy mode; y copies to Windows clipboard")
+    print("  right-click/Ctrl-v  paste (terminal paste)")
+    print()
+    print("Other")
+    print("  Ctrl-b then z       zoom/unzoom the active pane")
+    print("  Ctrl-b then d       detach from tmux")
+    print("  exit (in host pane) close only the host pane")
     print(f"  tmux attach -t {session_name}")
     print(f"  tmux kill-session -t {session_name}")
     print()
+    print(f"Host run log: run/logs/ (latest run_VMs_*.log under {REPO_ROOT / 'run' / 'logs'})")
+    print()
+
+
+def _configure_tmux_session(session_name: str) -> None:
+    """Session options/bindings that work better under WSL/Windows terminals."""
+    # Arrow keys after the prefix often never arrive from Windows Terminal / Cursor.
+    # Prefer mouse, hjkl, and pane-number jump.
+    subprocess.run(
+        ["tmux", "set-option", "-t", session_name, "mouse", "on"],
+        check=False,
+    )
+    subprocess.run(
+        ["tmux", "set-option", "-t", session_name, "-w", "xterm-keys", "on"],
+        check=False,
+    )
+    subprocess.run(
+        ["tmux", "set-option", "-g", "set-clipboard", "on"],
+        check=False,
+    )
+    # Mouse drag in copy-mode → Windows clipboard (clip.exe). Native select still
+    # works with Shift+drag when the terminal steals the mouse from tmux.
+    for table in ("copy-mode-vi", "copy-mode"):
+        subprocess.run(
+            [
+                "tmux",
+                "bind-key",
+                "-T",
+                table,
+                "MouseDragEnd1Pane",
+                "send-keys",
+                "-X",
+                "copy-pipe-and-cancel",
+                "clip.exe",
+            ],
+            check=False,
+        )
+        subprocess.run(
+            [
+                "tmux",
+                "bind-key",
+                "-T",
+                table,
+                "y",
+                "send-keys",
+                "-X",
+                "copy-pipe-and-cancel",
+                "clip.exe",
+            ],
+            check=False,
+        )
+    for key, direction in (
+        ("h", "-L"),
+        ("j", "-D"),
+        ("k", "-U"),
+        ("l", "-R"),
+    ):
+        subprocess.run(
+            ["tmux", "bind-key", "-T", "prefix", key, "select-pane", direction],
+            check=False,
+        )
 
 
 def mark_tmux_serial_ready(log: TextIO) -> None:
@@ -264,6 +337,12 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         ready_file=ready_file,
     )
 
+    # Detached sessions need an explicit size; tmux 3.4 also dropped split -p
+    # (use -l with a % suffix). Without both, split-window fails with "size missing".
+    cols, rows = shutil.get_terminal_size(fallback=(120, 40))
+    cols = max(cols, 100)
+    rows = max(rows, 30)
+
     subprocess.run(
         [
             "tmux",
@@ -273,6 +352,10 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             session_name,
             "-n",
             "lab",
+            "-x",
+            str(cols),
+            "-y",
+            str(rows),
             "-c",
             str(REPO_ROOT),
             host_command,
@@ -286,48 +369,52 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         )
         .strip()
     )
-    client_pane = (
-        subprocess.check_output(
-            [
-                "tmux",
-                "split-window",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                "-t",
-                host_pane,
-                "-v",
-                "-p",
-                "35",
-                "-c",
-                str(REPO_ROOT),
-                client_command,
-            ],
-            text=True,
+    try:
+        client_pane = (
+            subprocess.check_output(
+                [
+                    "tmux",
+                    "split-window",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-t",
+                    host_pane,
+                    "-v",
+                    "-l",
+                    "35%",
+                    "-c",
+                    str(REPO_ROOT),
+                    client_command,
+                ],
+                text=True,
+            )
+            .strip()
         )
-        .strip()
-    )
-    router_pane = (
-        subprocess.check_output(
-            [
-                "tmux",
-                "split-window",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                "-t",
-                client_pane,
-                "-h",
-                "-p",
-                "50",
-                "-c",
-                str(REPO_ROOT),
-                router_command,
-            ],
-            text=True,
+        router_pane = (
+            subprocess.check_output(
+                [
+                    "tmux",
+                    "split-window",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-t",
+                    client_pane,
+                    "-h",
+                    "-l",
+                    "50%",
+                    "-c",
+                    str(REPO_ROOT),
+                    router_command,
+                ],
+                text=True,
+            )
+            .strip()
         )
-        .strip()
-    )
+    except subprocess.CalledProcessError:
+        subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
+        raise
     for pane, title in (
         (host_pane, "host"),
         (client_pane, "client serial"),
@@ -335,6 +422,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     ):
         subprocess.run(["tmux", "select-pane", "-t", pane, "-T", title], check=True)
     subprocess.run(["tmux", "select-pane", "-t", host_pane], check=True)
+    _configure_tmux_session(session_name)
 
     if os.environ.get("TMUX"):
         subprocess.run(["tmux", "switch-client", "-t", session_name], check=True)
