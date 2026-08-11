@@ -4,7 +4,7 @@
 
 **NIC order vs stock OpenWrt:** The x86 image defaults to **LAN** on ``eth0`` (``br-lan``) and **WAN**
 on ``eth1``. VirtualBox presents adapters in order as ``eth0``, ``eth1``. So **NIC1** is the **LAN**
-leg (internal network ``openwrt-lan``) and **NIC2** is **WAN** (bridged or NAT). Client VMs use
+leg (internal network ``openwrt-lan``) and **NIC2** is **WAN** (bridged). Client VMs use
 ``--nic1 intnet`` on the same intnet name.
 
 **DNS:** Before convert, the script downloads stubby ``.apk`` deps (OpenWrt 25.12 uses
@@ -538,6 +538,17 @@ def _serial_exchange(sock, payload: str, *, wait_s: float = 2.0) -> str:
     return _serial_drain(sock, wait_s=wait_s)
 
 
+def _close_serial_socket(sock) -> None:
+    """Best-effort close for a VirtualBox TCP serial socket."""
+    import socket
+
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    sock.close()
+
+
 # OpenWrt ash + VBox serial wraps ~80 cols and corrupts long typed lines.
 _SERIAL_MAX_CMD = 76
 
@@ -607,7 +618,7 @@ def _remove_guest_apply_script(sock, marker: str) -> None:
     _serial_run_marked(sock, "rm -f /root/apply_mullvad_dot.sh", marker=marker, wait_s=3.0)
 
 
-def _serial_output_is_mullvad_whoami(sock, who_out: str) -> bool:
+def _serial_output_is_mullvad_whoami(sock, who_out: str, *, status_digit_func=None) -> bool:
     """True if whoami shows Mullvad anycast or a public IP via Mullvad-configured stubby."""
     import re
 
@@ -634,11 +645,17 @@ def _serial_output_is_mullvad_whoami(sock, who_out: str) -> bool:
 
     # Confirm stubby is aimed at Mullvad; whoami then returns PoP unicast (e.g. 193.148.18.30),
     # not necessarily 194.242.2.x. PTR via stubby is often NXDOMAIN, so do not require it.
-    digit = _serial_status_digit(
-        sock,
-        check_cmd="grep -q dns.mullvad.net /etc/stubby/stubby.yml; echo $? >/tmp/st",
-        marker="CF",
-    )
+    if status_digit_func is None:
+        digit = _serial_status_digit(
+            sock,
+            check_cmd="grep -q dns.mullvad.net /etc/stubby/stubby.yml; echo $? >/tmp/st",
+            marker="CF",
+        )
+    else:
+        digit = status_digit_func(
+            check_cmd="grep -q dns.mullvad.net /etc/stubby/stubby.yml; echo $? >/tmp/st",
+            marker="CF",
+        )
     if digit != "0":
         print("[overdrive] stubby.yml missing dns.mullvad.net — not Mullvad")
         return False
@@ -859,22 +876,91 @@ def ensure_mullvad_dot_over_serial(
     )
 
     endpoint = router_serial_endpoint(vboxmanage) if vboxmanage else None
-    sock = _open_router_serial_socket(
-        timeout_s=min(180.0, timeout_s),
-        vboxmanage=vboxmanage,
-        endpoint=endpoint,
-    )
+    def open_sock(*, timeout: float = 30.0):
+        return _open_router_serial_socket(
+            timeout_s=timeout,
+            vboxmanage=vboxmanage,
+            endpoint=endpoint,
+        )
+
+    sock = open_sock(timeout=min(180.0, timeout_s))
     try:
-        _wait_for_openwrt_shell(sock, timeout_s=min(180.0, timeout_s))
-        _set_openwrt_root_password(sock)
+        shell_deadline = time.monotonic() + min(180.0, timeout_s)
+        last_transport_error: OSError | None = None
+        while True:
+            try:
+                _wait_for_openwrt_shell(
+                    sock,
+                    timeout_s=max(5.0, shell_deadline - time.monotonic()),
+                )
+                break
+            except OSError as exc:
+                last_transport_error = exc
+                if time.monotonic() >= shell_deadline:
+                    raise RuntimeError(
+                        "OpenWrt serial dropped before a shell prompt appeared."
+                    ) from last_transport_error
+                print(f"[overdrive] Router serial dropped while waiting for shell ({exc}); reconnecting...")
+                _close_serial_socket(sock)
+                sock = open_sock(timeout=20.0)
+
+        try:
+            _set_openwrt_root_password(sock)
+        except (OSError, RuntimeError) as exc:
+            print(f"[overdrive] Could not set OpenWrt root password over serial ({exc}); reconnecting...")
+            _close_serial_socket(sock)
+            sock = open_sock(timeout=20.0)
+            _wait_for_openwrt_shell(sock, timeout_s=60.0)
+
+        def reconnect_serial(exc: OSError) -> None:
+            nonlocal sock
+            print(f"[overdrive] Router serial dropped during bootstrap ({exc}); reconnecting...")
+            _close_serial_socket(sock)
+            sock = open_sock(timeout=20.0)
+            _wait_for_openwrt_shell(sock, timeout_s=60.0)
+
+        def run_marked(command: str, *, marker: str, wait_s: float = 15.0) -> str:
+            attempts = 3
+            for attempt in range(1, attempts + 1):
+                try:
+                    return _serial_run_marked(sock, command, marker=marker, wait_s=wait_s)
+                except OSError as exc:
+                    if attempt >= attempts:
+                        raise
+                    reconnect_serial(exc)
+            raise RuntimeError(f"unreachable serial retry state for marker {marker!r}")
+
+        def status_digit(*, check_cmd: str, marker: str) -> str:
+            run_marked("rm -f /tmp/st", marker=f"{marker}0", wait_s=3.0)
+            run_marked(check_cmd, marker=f"{marker}1", wait_s=5.0)
+            out = run_marked("cat /tmp/st", marker=f"{marker}2", wait_s=3.0)
+            digit = "?"
+            for line in out.replace("\r", "\n").splitlines():
+                s = line.strip()
+                if s.isdigit() and len(s) <= 3:
+                    digit = s
+            return digit
+
+        def guest_has_apply_script() -> bool:
+            digit = status_digit(
+                check_cmd="grep -q verify_mullvad /root/apply_mullvad_dot.sh; echo $? >/tmp/st",
+                marker="HV",
+            )
+            return digit == "0"
+
+        def output_is_mullvad_whoami(who_out: str) -> bool:
+            return _serial_output_is_mullvad_whoami(
+                sock,
+                who_out,
+                status_digit_func=status_digit,
+            )
 
         # Stop any first-boot background apply so we own a single run.
-        _serial_run_marked(sock, "killall apply_mullvad_dot.sh", marker="K1", wait_s=3.0)
+        run_marked("killall apply_mullvad_dot.sh", marker="K1", wait_s=3.0)
 
         wan_deadline = time.monotonic() + min(120.0, timeout_s)
         while time.monotonic() < wan_deadline:
-            out = _serial_run_marked(
-                sock,
+            out = run_marked(
                 "ping -c1 -W2 1.1.1.1 >/dev/null && echo WAN_OK",
                 marker="WAN",
                 wait_s=6.0,
@@ -888,24 +974,22 @@ def ensure_mullvad_dot_over_serial(
             print("[!] WAN not confirmed; continuing apply anyway...")
 
         # Fast path first — does not need apply script (survives a bad serial upload).
-        who0 = _serial_run_marked(
-            sock,
+        who0 = run_marked(
             "nslookup whoami.akamai.net 127.0.0.1",
             marker="WHO0",
             wait_s=20.0,
         )
-        if _serial_output_is_mullvad_whoami(sock, who0):
-            _serial_run_marked(
-                sock,
+        if output_is_mullvad_whoami(who0):
+            run_marked(
                 "touch /etc/overdrive-mullvad-dot.done",
                 marker="DONE0",
                 wait_s=3.0,
             )
-            _remove_guest_apply_script(sock, marker="RMAPP0")
+            run_marked("rm -f /root/apply_mullvad_dot.sh", marker="RMAPP0", wait_s=3.0)
             print("[+] Mullvad DoT already active on OpenWrt.")
             return
 
-        if not _guest_has_apply_script(sock):
+        if not guest_has_apply_script():
             if not allow_serial_upload:
                 raise RuntimeError(
                     "/root/apply_mullvad_dot.sh missing on guest and DNS is not Mullvad yet. "
@@ -926,8 +1010,7 @@ def ensure_mullvad_dot_over_serial(
         else:
             print("[overdrive] Using /root/apply_mullvad_dot.sh from image.")
 
-        apk_digit = _serial_status_digit(
-            sock,
+        apk_digit = status_digit(
             check_cmd="ls /root/overdrive-apks/*.apk >/dev/null 2>&1; echo $? >/tmp/st",
             marker="AK",
         )
@@ -942,8 +1025,7 @@ def ensure_mullvad_dot_over_serial(
         # Capture exit code in the same line so $? is from apply, not from echo MARKER.
         apply_cmd = "FORCE=1 /root/apply_mullvad_dot.sh >/tmp/a.log 2>&1; echo $? >/tmp/a.ex"
         print("[overdrive] Running FORCE=1 /root/apply_mullvad_dot.sh ...")
-        apply_out = _serial_run_marked(
-            sock,
+        apply_out = run_marked(
             apply_cmd,
             marker="APDONE",
             wait_s=min(150.0, timeout_s),
@@ -951,31 +1033,28 @@ def ensure_mullvad_dot_over_serial(
         if not _serial_line_has_marker(apply_out, "APDONE"):
             print(f"[!] Apply did not finish cleanly:\n{apply_out[-2000:]}")
 
-        exit_digit = _serial_status_digit(
-            sock,
+        exit_digit = status_digit(
             check_cmd="cp /tmp/a.ex /tmp/st 2>/dev/null || echo 9 >/tmp/st",
             marker="EX",
         )
-        log_tail = _serial_run_marked(sock, "tail -30 /tmp/a.log", marker="LG", wait_s=10.0)
+        log_tail = run_marked("tail -30 /tmp/a.log", marker="LG", wait_s=10.0)
         print(f"[overdrive] Apply exit={exit_digit}")
         print(log_tail[-1500:])
 
-        who = _serial_run_marked(
-            sock,
+        who = run_marked(
             "nslookup whoami.akamai.net 127.0.0.1",
             marker="WHO",
             wait_s=25.0,
         )
-        if _serial_output_is_mullvad_whoami(sock, who):
+        if output_is_mullvad_whoami(who):
             # Guest apply may still exit non-zero if its verify only accepted 194.242.2.x;
             # host accepts Mullvad anycast PoP unicast (*.mullvad.net PTR) too.
-            _serial_run_marked(
-                sock,
+            run_marked(
                 "touch /etc/overdrive-mullvad-dot.done",
                 marker="DONE1",
                 wait_s=3.0,
             )
-            _remove_guest_apply_script(sock, marker="RMAPP1")
+            run_marked("rm -f /root/apply_mullvad_dot.sh", marker="RMAPP1", wait_s=3.0)
             print("[+] Mullvad DoT verified on OpenWrt.")
             return
 
@@ -983,34 +1062,30 @@ def ensure_mullvad_dot_over_serial(
         print("[!] whoami not Mullvad yet; one retry after short delay...")
         print(who[-1500:])
         time.sleep(8.0)
-        apply_out = _serial_run_marked(
-            sock,
+        apply_out = run_marked(
             apply_cmd,
             marker="AP2",
             wait_s=min(120.0, timeout_s),
         )
-        exit_digit = _serial_status_digit(
-            sock,
+        exit_digit = status_digit(
             check_cmd="cp /tmp/a.ex /tmp/st 2>/dev/null || echo 9 >/tmp/st",
             marker="EX2",
         )
-        log_tail = _serial_run_marked(sock, "tail -40 /tmp/a.log", marker="LG2", wait_s=10.0)
+        log_tail = run_marked("tail -40 /tmp/a.log", marker="LG2", wait_s=10.0)
         print(f"[overdrive] Retry apply exit={exit_digit}")
         print(log_tail[-2000:])
-        who = _serial_run_marked(
-            sock,
+        who = run_marked(
             "nslookup whoami.akamai.net 127.0.0.1",
             marker="WHO2",
             wait_s=25.0,
         )
-        if _serial_output_is_mullvad_whoami(sock, who):
-            _serial_run_marked(
-                sock,
+        if output_is_mullvad_whoami(who):
+            run_marked(
                 "touch /etc/overdrive-mullvad-dot.done",
                 marker="DONE2",
                 wait_s=3.0,
             )
-            _remove_guest_apply_script(sock, marker="RMAPP2")
+            run_marked("rm -f /root/apply_mullvad_dot.sh", marker="RMAPP2", wait_s=3.0)
             print("[+] Mullvad DoT verified on OpenWrt.")
             return
 
@@ -1021,11 +1096,7 @@ def ensure_mullvad_dot_over_serial(
             f"apply exit={exit_digit}\n{log_tail[-2500:]}\n{who[-1500:]}"
         )
     finally:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        sock.close()
+        _close_serial_socket(sock)
 
 
 def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
@@ -1053,7 +1124,7 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
         "  # expect 194.242.2.x OR PTR of that IP is *.mullvad.net\n"
         "  grep dns.mullvad.net /etc/stubby/stubby.yml\n"
         f"Verify on client:   dig +short whoami.akamai.net\n"
-        "  cat /etc/resolv.conf   # expect nameserver 192.168.1.1\n"
+        f"  cat /etc/resolv.conf   # expect nameserver {OPENWRT_LAN_DNS}\n"
     )
 
 
@@ -1361,12 +1432,10 @@ def remove_existing_router_vm(
 def setup_openwrt_vm(
     start_type: str = "gui",
     *,
-    wan_mode: str = "nat",
     connect_serial: bool = True,
 ) -> None:
     options = OpenWrtRouterBuildOptions(
         start_type=start_type,
-        wan_mode=wan_mode,
         connect_serial=connect_serial,
     )
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
@@ -1490,27 +1559,14 @@ def setup_openwrt_vm(
             "allow-vms",
         ]
 
-        bridge_interface = (
-            get_active_bridged_interface(vboxmanage)
-            if options.wan_mode == "bridged"
-            else None
-        )
-        if options.wan_mode == "bridged" and bridge_interface:
-            wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
-            wan_note = f"bridged -> {bridge_interface!r} (WAN / uplink)"
-        else:
-            # Host resolver is bootstrap only (NTP / WAN reachability before DoT).
-            # stubby packages are injected offline - no apk update over WAN required.
-            wan_nic_args = [
-                "--nic2",
-                "nat",
-                "--natdnshostresolver2",
-                "on",
-            ]
-            if options.wan_mode == "bridged":
-                wan_note = "NAT (WAN fallback - no bridged adapter; DNS host-resolver for stubby bootstrap)"
-            else:
-                wan_note = "NAT (WAN; DNS host-resolver for stubby/Mullvad DoT bootstrap)"
+        bridge_interface = get_active_bridged_interface(vboxmanage)
+        if not bridge_interface:
+            raise RuntimeError(
+                "Router WAN requires a bridged VirtualBox adapter, but VirtualBox reported none. "
+                "Connect or enable a host network adapter, then rebuild."
+            )
+        wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
+        wan_note = f"bridged -> {bridge_interface!r} (WAN / uplink)"
 
         # Ensure VirtualBox can create VM log files.
         logs_dir = Path(vm_base) / "Logs"
@@ -1701,12 +1757,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--wan-mode",
-        choices=("nat", "bridged"),
-        default="nat",
-        help="Router WAN VirtualBox mode. Default: nat.",
-    )
-    parser.add_argument(
         "--serial-only",
         action="store_true",
         help="Open OpenWrt serial in a new window (TCP 2324); do not recreate. Host shell stays free.",
@@ -1771,7 +1821,6 @@ def main() -> None:
         return
     setup_openwrt_vm(
         start_type=args.start_type,
-        wan_mode=args.wan_mode,
         connect_serial=not args.no_connect_serial,
     )
 

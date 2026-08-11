@@ -15,7 +15,6 @@ __all__ = [
 @dataclass(frozen=True)
 class OpenWrtRouterBuildOptions:
     start_type: str = "gui"
-    wan_mode: str = "nat"
     connect_serial: bool = True
 
 

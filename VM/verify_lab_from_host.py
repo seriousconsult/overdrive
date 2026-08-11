@@ -5,7 +5,7 @@ Verify VirtualBox wiring for the OpenWrt lab **from WSL or Linux on the host**.
 This checks what the hypervisor is configured to do. It does **not** prove DHCP or routing inside
 guests — run ``ip addr`` / ``ping`` **inside** the client VM for that (see LAB_TOPOLOGY.md).
 
-Why: the LAN segment (``192.168.1.0/24`` on intnet ``openwrt-lan``) is **not** visible to the host
+Why: the LAN segment (``192.168.50.0/24`` on intnet ``openwrt-lan``) is **not** visible to the host
 OS; only VirtualBox guests on that intnet can talk to each other there.
 
 Exit codes: 0 = all checks passed, 1 = failed check(s), 2 = VBoxManage not found.
@@ -154,9 +154,9 @@ def check_router(info: dict[str, str], verbose: bool) -> list[str]:
         errs.append(
             f"router intnet1: expected {LAN_INTNET_NAME!r}, got {int1!r}"
         )
-    if nic2 not in ("bridged", "nat"):
+    if nic2 != "bridged":
         errs.append(
-            f"router NIC2: expected bridged or nat (WAN), got {nic2!r}"
+            f"router NIC2: expected bridged (WAN), got {nic2!r}"
         )
     uart = info.get("uart1", "")
     if uart in ("", "off"):
@@ -164,25 +164,6 @@ def check_router(info: dict[str, str], verbose: bool) -> list[str]:
             f"  [!] {ROUTER_VM}: COM1/uart1 not enabled. "
             f"Run: python VM/openwrt_router/create_VM_OpenWrt_router.py --enable-serial"
         )
-    if nic2 == "nat":
-        # Keys vary by VirtualBox version; treat missing as "not clearly on".
-        nat_dns = (
-            info.get("natdnshostresolver2")
-            or info.get("NATDNSHostResolver2")
-            or ""
-        ).lower()
-        if nat_dns and nat_dns not in ("on", "1", "true"):
-            print(
-                f"  [!] {ROUTER_VM}: WAN is NAT but natdnshostresolver2={nat_dns!r}. "
-                "LAN clients may fail DNS (ping google.com). Enable with:\n"
-                f"      VBoxManage modifyvm {ROUTER_VM} --natdnshostresolver2 on"
-            )
-        elif not nat_dns:
-            print(
-                f"  [i] {ROUTER_VM}: WAN is NAT — ensure DNS host-resolver is on "
-                f"(modifyvm {ROUTER_VM} --natdnshostresolver2 on) if clients cannot resolve names."
-            )
-
     if verbose:
         print(
             f"  [{ROUTER_VM}] nic1={nic1!r} intnet1={int1!r} | nic2={nic2!r} "

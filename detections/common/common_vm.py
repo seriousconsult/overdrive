@@ -482,7 +482,17 @@ def remove_existing_vm(
             state = get_vm_state(vboxmanage, vm_name)
         if state in ("running", "paused", "stopping", "starting"):
             print(f"Powering off existing VM {vm_name!r} ({state})...")
-            subprocess.run([vboxmanage, "controlvm", vm_name, "poweroff"], check=False)
+            try:
+                subprocess.run(
+                    [vboxmanage, "controlvm", vm_name, "poweroff"],
+                    check=False,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"Timed out asking VirtualBox to power off {vm_name!r}. "
+                    "Close the VM window or VirtualBox Manager session that is holding it, then rerun."
+                ) from exc
             for _ in range(45):
                 time.sleep(1)
                 st = get_vm_state(vboxmanage, vm_name)
@@ -510,23 +520,54 @@ def remove_existing_vm(
 
 
 def vm_is_registered(vboxmanage: str, vm_name: str) -> bool:
-    r = subprocess.run(
-        [vboxmanage, "list", "vms"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return f'"{vm_name}"' in r.stdout
+    last_timeout: subprocess.TimeoutExpired | None = None
+    last_error_output = ""
+    for attempt in range(2):
+        try:
+            r = subprocess.run(
+                [vboxmanage, "list", "vms"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if r.returncode == 0:
+                return f'"{vm_name}"' in r.stdout
+            last_error_output = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+            if attempt == 0:
+                terminate_stale_vboxmanage_processes()
+                continue
+            detail = last_error_output or f"exit status {r.returncode} with no output"
+            raise RuntimeError(
+                "VirtualBox failed to list registered VMs after clearing stale VBoxManage.exe "
+                f"processes: {detail}"
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+            if attempt == 0:
+                terminate_stale_vboxmanage_processes()
+                continue
+            raise RuntimeError(
+                "Timed out listing VirtualBox VMs after clearing stale VBoxManage.exe processes. "
+                "Close VirtualBox Manager/VM windows, then rerun."
+            ) from last_timeout
+    raise RuntimeError("unreachable VirtualBox registration check state")
 
 
 def get_vm_state(vboxmanage: str, vm_name: str) -> str | None:
     if not vm_is_registered(vboxmanage, vm_name):
         return None
-    r = subprocess.run(
-        [vboxmanage, "showvminfo", vm_name, "--machinereadable"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        r = subprocess.run(
+            [vboxmanage, "showvminfo", vm_name, "--machinereadable"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Timed out reading VirtualBox VM state for {vm_name!r}. "
+            "Close VirtualBox Manager/VM windows, then rerun."
+        ) from exc
     if r.returncode != 0:
         return None
     for line in r.stdout.splitlines():

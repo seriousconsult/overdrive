@@ -1,5 +1,7 @@
 """Alpine client hardening scripts and OpenRC assets."""
 
+from VM.vm_config import OPENWRT_LAN_DNS
+
 __all__ = [
     "CLIENT_FIREWALL_INIT_ALPINE",
     "CLIENT_FIREWALL_SCRIPT",
@@ -37,7 +39,7 @@ CLIENT_FIREWALL_SCRIPT = r"""#!/bin/sh
 # - IPv6 blocked to avoid unmanaged network paths
 set -eu
 
-OPENWRT_DNS="192.168.1.1"
+OPENWRT_DNS="__OPENWRT_LAN_DNS__"
 SSDP_MCAST="239.255.255.250"
 MDNS_MCAST="224.0.0.251"
 
@@ -127,7 +129,7 @@ case "${1:-start}" in
   restart) stop_firewall; start_firewall ;;
   *) echo "usage: $0 {start|stop|restart}" >&2; exit 2 ;;
 esac
-"""
+""".replace("__OPENWRT_LAN_DNS__", OPENWRT_LAN_DNS)
 
 CLIENT_HARDENING_SCRIPT = r"""#!/bin/sh
 # Security hardening for the disposable Alpine client VM.

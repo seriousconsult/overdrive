@@ -9,7 +9,7 @@ DONE=/etc/overdrive-mullvad-dot.done
 # whoami.akamai.net returns the recursive resolver's source IP as seen by Akamai.
 # Mullvad publishes anycast 194.242.2.x; whoami often returns the PoP unicast behind
 # that anycast (e.g. 193.148.18.30 = us-nyc-dns-601.mullvad.net), NOT 194.242.2.x.
-# ISP/VBox NAT (e.g. Verizon 71.x) means dnsmasq is NOT going through stubby→Mullvad.
+# ISP DNS (e.g. Verizon 71.x) means dnsmasq is NOT going through stubby→Mullvad.
 parse_whoami_ip() {
   # Last public IPv4 in nslookup/dig output (skip 127.x / 10.x / 192.168.x answers).
   echo "$1" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | awk '
@@ -178,22 +178,27 @@ uci set dhcp.@dnsmasq[0].resolvfile='/tmp/resolv.conf.overdrive-empty'
 : > /tmp/resolv.conf.overdrive-empty
 uci set dhcp.@dnsmasq[0].localuse='1'
 uci -q delete dhcp.lan.dhcp_option
-uci add_list dhcp.lan.dhcp_option='6,192.168.1.1'
+uci add_list dhcp.lan.dhcp_option='6,192.168.50.1'
 uci commit dhcp
+
+echo "[overdrive] Setting lab LAN to 192.168.50.1/255.255.255.0..."
+uci set network.lan.ipaddr='192.168.50.1'
+uci set network.lan.netmask='255.255.255.0'
+uci commit network
 
 echo "[overdrive] Disable WAN plaintext DNS (peerdns) and reload network..."
 uci -q delete network.wan.dns
 uci set network.wan.peerdns='0'
 uci commit network
-# Critical: peerdns=0 does nothing until network reloads; otherwise VBox NAT DNS
-# (host→ISP) stays in /tmp/resolv.conf.d/resolv.conf.auto and dnsmasq may use it.
+# Critical: peerdns=0 does nothing until network reloads; otherwise WAN DHCP DNS
+# can stay in /tmp/resolv.conf.d/resolv.conf.auto and dnsmasq may use it.
 /etc/init.d/network reload 2>/dev/null || ubus call network reload 2>/dev/null || true
 sleep 2
 
 # Router itself must query local dnsmasq (which forwards to stubby → Mullvad DoT).
 mkdir -p /tmp/resolv.conf.d
 : > /tmp/resolv.conf.overdrive-empty
-# Neutralize auto resolv from WAN DHCP / natdnshostresolver.
+# Neutralize auto resolv from WAN DHCP.
 rm -f /tmp/resolv.conf.d/resolv.conf.auto
 echo "# overdrive: ISP resolv disabled; use dnsmasq→stubby" > /tmp/resolv.conf.d/resolv.conf.auto
 rm -f /tmp/resolv.conf
@@ -253,5 +258,5 @@ verify_mullvad_upstream || {
 }
 
 touch "$DONE"
-echo "[overdrive] Mullvad DoT active: client → 192.168.1.1 → stubby → Mullvad :853"
+echo "[overdrive] Mullvad DoT active: client → 192.168.50.1 → stubby → Mullvad :853"
 rm -f /root/apply_mullvad_dot.sh

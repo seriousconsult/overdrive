@@ -4,6 +4,8 @@ from VM.vm_config import (
     MULLVAD_DOT_PORT,
     MULLVAD_DOT_RESOLVERS,
     OPENWRT_LAN_DNS,
+    OPENWRT_LAN_IP,
+    OPENWRT_LAN_NETMASK,
     OPENWRT_STUBBY_LISTEN,
 )
 
@@ -41,7 +43,7 @@ DONE=/etc/overdrive-mullvad-dot.done
 # whoami.akamai.net returns the recursive resolver's source IP as seen by Akamai.
 # Mullvad publishes anycast 194.242.2.x; whoami often returns the PoP unicast behind
 # that anycast (e.g. 193.148.18.30 = us-nyc-dns-601.mullvad.net), NOT 194.242.2.x.
-# ISP/VBox NAT (e.g. Verizon 71.x) means dnsmasq is NOT going through stubby→Mullvad.
+# ISP DNS (e.g. Verizon 71.x) means dnsmasq is NOT going through stubby→Mullvad.
 parse_whoami_ip() {{
   # Last public IPv4 in nslookup/dig output (skip 127.x / 10.x / 192.168.x answers).
   echo "$1" | grep -Eo '([0-9]{{1,3}}\\.){{3}}[0-9]{{1,3}}' | awk '
@@ -201,19 +203,24 @@ uci -q delete dhcp.lan.dhcp_option
 uci add_list dhcp.lan.dhcp_option='6,{OPENWRT_LAN_DNS}'
 uci commit dhcp
 
+echo "[overdrive] Setting lab LAN to {OPENWRT_LAN_IP}/{OPENWRT_LAN_NETMASK}..."
+uci set network.lan.ipaddr='{OPENWRT_LAN_IP}'
+uci set network.lan.netmask='{OPENWRT_LAN_NETMASK}'
+uci commit network
+
 echo "[overdrive] Disable WAN plaintext DNS (peerdns) and reload network..."
 uci -q delete network.wan.dns
 uci set network.wan.peerdns='0'
 uci commit network
-# Critical: peerdns=0 does nothing until network reloads; otherwise VBox NAT DNS
-# (host→ISP) stays in /tmp/resolv.conf.d/resolv.conf.auto and dnsmasq may use it.
+# Critical: peerdns=0 does nothing until network reloads; otherwise WAN DHCP DNS
+# can stay in /tmp/resolv.conf.d/resolv.conf.auto and dnsmasq may use it.
 /etc/init.d/network reload 2>/dev/null || ubus call network reload 2>/dev/null || true
 sleep 2
 
 # Router itself must query local dnsmasq (which forwards to stubby → Mullvad DoT).
 mkdir -p /tmp/resolv.conf.d
 : > /tmp/resolv.conf.overdrive-empty
-# Neutralize auto resolv from WAN DHCP / natdnshostresolver.
+# Neutralize auto resolv from WAN DHCP.
 rm -f /tmp/resolv.conf.d/resolv.conf.auto
 echo "# overdrive: ISP resolv disabled; use dnsmasq→stubby" > /tmp/resolv.conf.d/resolv.conf.auto
 rm -f /tmp/resolv.conf
@@ -318,8 +325,11 @@ stop() {
 }
 """
 
-UCI_DEFAULTS_ENABLE_MULLVAD = """#!/bin/sh
+UCI_DEFAULTS_ENABLE_MULLVAD = f"""#!/bin/sh
 # Enable one-shot Mullvad DoT setup on first boot.
+uci set network.lan.ipaddr='{OPENWRT_LAN_IP}'
+uci set network.lan.netmask='{OPENWRT_LAN_NETMASK}'
+uci commit network
 [ -x /etc/init.d/overdrive-mullvad-dot ] && /etc/init.d/overdrive-mullvad-dot enable
 exit 0
 """

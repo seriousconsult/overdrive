@@ -161,12 +161,11 @@ def _tmux_serial_loop(title: str, command: list[str], *, ready_file: Path) -> st
 
 
 def _tmux_host_command(session_name: str, argv: list[str], *, ready_file: Path) -> str:
-    child_args = [arg for arg in argv if arg not in ("--tmux", "--no-tmux")]
+    child_args = [arg for arg in argv if arg != "--tmux"]
     child_command = [
         sys.executable,
         str(Path(__file__).resolve()),
         *child_args,
-        "--no-tmux",
     ]
     env_prefix = (
         f"{TMUX_ENV_FLAG}=1 "
@@ -599,12 +598,6 @@ def main() -> int:
         help="Run inside the managed tmux layout when stdout is interactive. Default: on.",
     )
     parser.add_argument(
-        "--no-tmux",
-        dest="tmux",
-        action="store_false",
-        help="Run in the current terminal without creating the tmux layout.",
-    )
-    parser.add_argument(
         "--include-todo",
         action="store_true",
         help="Also run create_VM_*.py scripts whose source contains TODO.",
@@ -662,7 +655,11 @@ def main() -> int:
             command = [sys.executable, str(script)]
             if script.name == "create_VM_OpenWrt_router.py":
                 command.extend(
-                    ["--start-type", "gui", "--wan-mode", "nat", "--start-alpine-client"]
+                    [
+                        "--start-type",
+                        "gui",
+                        "--start-alpine-client",
+                    ]
                 )
                 if os.environ.get(TMUX_ENV_FLAG):
                     command.append("--no-connect-serial")

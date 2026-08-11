@@ -5,7 +5,7 @@ Create an Alpine Linux VM in VirtualBox for use **behind** the OpenWrt router fr
 
 Networking (lab):
   * **NIC1** — VirtualBox **internal network** ``openwrt-lan`` (same name as the router’s LAN leg).
-    The guest gets DHCP from OpenWrt’s LAN; default gateway is the OpenWrt LAN IP (e.g. 192.168.1.1).
+    The guest gets DHCP from OpenWrt’s LAN; default gateway is the OpenWrt LAN IP.
 
 This VM is **not** bridged to your Windows/WSL LAN. To browse from the host
 through OpenWrt, use a second setup—this script targets the standard “client on
@@ -115,6 +115,7 @@ from VM.alpine_client.pipeline import (
 )
 from VM.vm_config import (
     CLIENT_NIC_OUI,
+    OPENWRT_LAN_DNS,
     alpine_client_root_password,
     format_mac_colon,
     random_client_mac_vbox,
@@ -124,8 +125,7 @@ LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
 VM_NAME = "OpenWrt_LAN_Client_Alpine"
 CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
-# Neutral name: must not match lab/client hostname regexes in DHCP / MAC probes.
-CLIENT_GUEST_HOSTNAME = "desktop"
+CLIENT_GUEST_HOSTNAME = "client"
 # Chromium + detection Python deps need more than the tiny cloud image default.
 CLIENT_VDI_SIZE_MIB = 8192
 CLIENT_MEMORY_MIB = 2048
@@ -427,15 +427,15 @@ ip -4 route show default 2>/dev/null || true
 echo ""
 echo "=== L3 vs DNS ==="
 echo "--- ping gateway ---"
-ping -c2 -W2 192.168.1.1 2>&1 || true
+ping -c2 -W2 {OPENWRT_LAN_DNS} 2>&1 || true
 echo "--- ping 8.8.8.8 ---"
 ping -c2 -W3 8.8.8.8 2>&1 || true
 echo "--- ping google.com ---"
 ping -c2 -W3 google.com 2>&1 || true
 echo ""
 if command -v dig >/dev/null 2>&1; then
-  echo "=== dig via OpenWrt (192.168.1.1) ==="
-  dig +time=2 +tries=1 +short @192.168.1.1 google.com 2>&1 || true
+  echo "=== dig via OpenWrt ({OPENWRT_LAN_DNS}) ==="
+  dig +time=2 +tries=1 +short @{OPENWRT_LAN_DNS} google.com 2>&1 || true
   echo ""
 fi
 """
