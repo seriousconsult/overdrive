@@ -14,8 +14,12 @@ Exit codes: 0 = all checks passed, 1 = failed check(s), 2 = VBoxManage not found
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
+import re
+import subprocess
 import sys
+from pathlib import Path
 
 # Ensure the repo package path is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +46,29 @@ from detections.common.common_vm import (
 ROUTER_VM = OPENWRT_ROUTER_VM_NAME
 CLIENT_VM = OPENWRT_CLIENT_VM_NAME
 LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
+
+
+def serial_attach_is_locked(port: int) -> bool:
+    """True when an Overdrive serial console already owns this TCP endpoint."""
+    if os.name == "nt":
+        return False
+    try:
+        import fcntl
+    except ImportError:
+        return False
+
+    lock_path = Path("/tmp") / f"overdrive-serial-{port}.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def check_client_serial_pipe(
@@ -71,6 +98,13 @@ def check_client_serial_pipe(
         print(
             f"  [i] {vm_name} is not running — serial TCP :{port} cannot accept connections yet "
             f"(uartmode1={uartmode1!r} looks configured)."
+        )
+        return errs
+
+    if serial_attach_is_locked(port):
+        print(
+            f"  [i] {vm_name} serial TCP :{port} is already attached; "
+            "skipping socket probe to avoid disrupting the console."
         )
         return errs
 
@@ -107,6 +141,30 @@ def resolve_lab_client_vm(vbox: str) -> tuple[str, int]:
     if vm_registered(vbox, CLIENT_VM):
         return CLIENT_VM, SERIAL_TCP_PORT
     return alpine, 2325
+
+
+def nic_promisc_policy(vbox: str, vm_name: str, info: dict[str, str], nic_index: int) -> str | None:
+    """Return a NIC promiscuous-mode policy, falling back to human-readable output."""
+    direct = info.get(f"promisc{nic_index}")
+    if direct:
+        return direct
+
+    try:
+        result = subprocess.run(
+            [vbox, "showvminfo", vm_name],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    pattern = re.compile(rf"^NIC {nic_index}:.*Promisc Policy:\s*([^,]+)", re.MULTILINE)
+    match = pattern.search(result.stdout)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def check_advanced_nic(info: dict[str, str], vm_name: str) -> list[str]:
@@ -248,7 +306,7 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
         # OpenWrt needs to 'see' traffic for other MACs (like clients) on its LAN port
         if vm == ROUTER_VM:
             # Assuming NIC1 is your LAN/Internal Network based on earlier logs
-            promisc = info.get("promisc1", "deny")
+            promisc = nic_promisc_policy(vbox, vm, info, 1)
             if promisc == "deny":
                 print(f"  [!] Warning: {vm} LAN is 'deny' promisc. OpenWrt bridges often need 'allow-vms'.")
 

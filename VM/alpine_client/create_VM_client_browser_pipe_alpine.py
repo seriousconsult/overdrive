@@ -577,17 +577,6 @@ def configure_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
     run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--uart1", "0x3F8", "4", "--uartmode1", uart_mode, endpoint])
 
 
-def refresh_live_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
-    if vboxmanage_targets_windows(vboxmanage):
-        uart_mode = "tcpserver"
-        print(f"Refreshing live serial TCP backend for {VM_NAME}: {SERIAL_TCP_HOST}:{endpoint}")
-    else:
-        uart_mode = "server"
-        print(f"Refreshing live serial socket backend for {VM_NAME}: {endpoint}")
-    run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", "disconnected"])
-    run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "changeuartmode1", uart_mode, endpoint])
-
-
 @contextlib.contextmanager
 def _raw_stdin_for_serial(input_fd: int | None = None):
     if platform.system().lower() != "linux":
@@ -754,15 +743,45 @@ def _open_tcp_serial_socket(host: str, port: int, *, timeout_s: float) -> socket
     raise RuntimeError(f"Could not connect to serial TCP endpoint: {last_error}")
 
 
+@contextlib.contextmanager
+def _serial_attach_lock(port: int):
+    """Prevent Overdrive helpers from competing for one VirtualBox TCP serial endpoint."""
+    if os.name == "nt":
+        yield
+        return
+
+    import fcntl
+
+    lock_path = Path("/tmp") / f"overdrive-serial-{port}.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"Serial TCP :{port} is already attached by another Overdrive process. "
+                "Close that serial pane/window first; not resetting VirtualBox COM1."
+            ) from exc
+        os.ftruncate(fd, 0)
+        os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def connect_tcp_serial_console(host: str, port: int, *, timeout_s: float = 20.0, force_interactive: bool = False) -> bool:
-    with _open_tcp_serial_socket(host, port, timeout_s=timeout_s) as sock:
-        sample = _probe_serial_guest_output(sock)
-        if not sample and not force_interactive:
-            return False
-        if os.name == "nt":
-            _connect_tcp_serial_windows(sock)
-        else:
-            _connect_tcp_serial_posix(sock)
+    with _serial_attach_lock(port):
+        with _open_tcp_serial_socket(host, port, timeout_s=timeout_s) as sock:
+            sample = _probe_serial_guest_output(sock)
+            if not sample and not force_interactive:
+                return False
+            if os.name == "nt":
+                _connect_tcp_serial_windows(sock)
+            else:
+                _connect_tcp_serial_posix(sock)
     return True
 
 
@@ -899,6 +918,14 @@ def prime_client_vdi_for_intnet_lab(
             "chmod 0755 /etc/init.d/client-firewall && "
             "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
             "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
+            "for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final; do "
+            "rm -f \"/etc/init.d/$svc\" \"/etc/conf.d/$svc\" 2>/dev/null || true; "
+            "for level in default boot sysinit shutdown nonetwork; do "
+            "rc-update del \"$svc\" \"$level\" >/dev/null 2>&1 || true; "
+            "rm -f \"/etc/runlevels/$level/$svc\" 2>/dev/null || true; "
+            "done; "
+            "done && "
+            "rm -f /etc/tiny-cloud.conf 2>/dev/null || true && "
             "rc-update add lab-net-up default && "
             "rc-update add overdrive-ip-timezone default && "
             "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
@@ -943,6 +970,15 @@ def prime_client_vdi_for_intnet_lab(
         ),
         "--run",
         str(hardening_script_host),
+        "--run-command",
+        (
+            "! find /etc/init.d /etc/runlevels /etc/conf.d "
+            "\\( -name 'sshd' -o -name 'ssh' -o -name 'dropbear' "
+            "-o -name 'tiny-cloud-*' -o -name 'cloud-init' -o -name 'cloud-final' \\) "
+            "-print -quit | grep -q . && "
+            "[ ! -e /etc/ssh ] && "
+            "[ ! -e /etc/tiny-cloud.conf ]"
+        ),
         "--run-command",
         (
             "rm -f "

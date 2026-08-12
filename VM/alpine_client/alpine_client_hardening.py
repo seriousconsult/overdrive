@@ -142,6 +142,7 @@ disable_service() {
   rc-service "$svc" stop >/dev/null 2>&1 || true
   for level in default boot sysinit shutdown nonetwork; do
     rc-update del "$svc" "$level" >/dev/null 2>&1 || true
+    rm -f "/etc/runlevels/$level/$svc" 2>/dev/null || true
   done
 }
 
@@ -305,6 +306,12 @@ clean_private_artifacts() {
 }
 
 remove_remote_login_artifacts() {
+  for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final; do
+    rm -f "/etc/init.d/$svc" "/etc/conf.d/$svc" 2>/dev/null || true
+    for level in default boot sysinit shutdown nonetwork; do
+      rm -f "/etc/runlevels/$level/$svc" 2>/dev/null || true
+    done
+  done
   rm -f \
     /usr/sbin/sshd \
     /usr/bin/ssh /usr/bin/scp /usr/bin/sftp \
@@ -313,7 +320,7 @@ remove_remote_login_artifacts() {
     /usr/bin/dropbearkey /usr/bin/dropbearconvert /usr/bin/dropbearmulti \
     /usr/bin/telnet /usr/bin/telnetd /usr/sbin/telnetd \
     2>/dev/null || true
-  rm -rf /etc/ssh /etc/dropbear /root/.ssh 2>/dev/null || true
+  rm -rf /etc/ssh /etc/dropbear /etc/tiny-cloud.conf /var/lib/cloud /root/.ssh 2>/dev/null || true
 }
 
 install_remote_service_guard() {
@@ -349,12 +356,13 @@ remove_matching_packages() {
   done
 }
 
-for svc in sshd ssh dropbear; do
+for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final; do
   disable_service "$svc"
 done
 
 remove_matching_packages openssh
 remove_matching_packages dropbear
+remove_matching_packages tiny-cloud
 
 pids="$(matching_remote_service_pids)"
 if [ -n "$pids" ]; then
@@ -371,7 +379,7 @@ description="Disable remote login daemons on the disposable lab client"
 
 depend() {
     need localmount
-    after bootmisc net ssh sshd dropbear cloud-init cloud-final
+    before net ssh sshd dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final
 }
 
 start() {
@@ -383,10 +391,11 @@ INIT
 
   chmod 0755 /usr/local/sbin/overdrive-no-remote-services
   chmod 0755 /etc/init.d/overdrive-no-remote-services
+  rc-update add overdrive-no-remote-services boot
   rc-update add overdrive-no-remote-services default
 }
 
-for svc in sshd ssh dropbear telnetd vsftpd lighttpd nginx apache2 crond chronyd ntpd; do
+for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final telnetd vsftpd lighttpd nginx apache2 crond chronyd ntpd; do
   disable_service "$svc"
 done
 
@@ -396,13 +405,14 @@ install_filesystem_hardening
 
 remove_matching_packages openssh
 remove_matching_packages dropbear
+remove_matching_packages tiny-cloud
 
-for pkg in openssh openssh-client openssh-client-common openssh-client-default openssh-keygen openssh-server openssh-server-common openssh-server-pam openssh-sftp-server dropbear dropbear-scp dropbear-ssh telnet-bsd busybox-extras; do
+for pkg in openssh openssh-client openssh-client-common openssh-client-default openssh-keygen openssh-server openssh-server-common openssh-server-common-openrc openssh-server-pam openssh-sftp-server dropbear dropbear-scp dropbear-ssh tiny-cloud tiny-cloud-nocloud tiny-cloud-openrc telnet-bsd busybox-extras; do
   remove_if_installed "$pkg"
 done
 remove_remote_login_artifacts
 
-for svc in sshd ssh dropbear; do
+for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final; do
   disable_service "$svc"
 done
 

@@ -122,6 +122,35 @@ def _tmux_session_exists(session_name: str) -> bool:
     )
 
 
+def _cleanup_legacy_tmux_serial_panes() -> None:
+    """Stop serial panes created by older run_VMs versions with infinite retry loops."""
+    result = subprocess.run(
+        ["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_start_command}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return
+
+    legacy_needles = (
+        "Retrying in 5s",
+        "create_VM_OpenWrt_router.py --serial-here",
+        "create_VM_client_browser_pipe_alpine.py --serial-here",
+    )
+    for line in result.stdout.splitlines():
+        try:
+            pane_id, start_command = line.split("\t", 1)
+        except ValueError:
+            continue
+        if "Retrying in 5s" not in start_command:
+            continue
+        if not any(needle in start_command for needle in legacy_needles[1:]):
+            continue
+        subprocess.run(["tmux", "kill-pane", "-t", pane_id], check=False)
+        print(f"[tmux] Stopped legacy serial retry pane {pane_id}.")
+
+
 def _available_tmux_session_name() -> str:
     if not _tmux_session_exists(TMUX_SESSION_BASE):
         return TMUX_SESSION_BASE
@@ -143,18 +172,17 @@ def _tmux_serial_loop(title: str, command: list[str], *, ready_file: Path) -> st
                 "  echo 'This pane will attach as soon as the host releases the serial endpoints.'",
                 "  sleep 3",
                 "done",
-                "while true; do",
                 "  clear",
                 f"  echo '[overdrive] {title}'",
-                "  echo 'Waiting for the VM serial endpoint; this pane retries automatically.'",
-                "  echo 'Press Ctrl-c in this pane to stop retrying.'",
+                "  echo 'Attaching to the VM serial endpoint.'",
+                "  echo 'Press Ctrl-] to detach. This pane will not auto-reconnect.'",
                 "  echo",
                 f"  {_shell_join(command)}",
                 "  rc=$?",
                 "  echo",
-                f"  echo '[overdrive] {title} exited with status '\"$rc\"'. Retrying in 5s...'",
-                "  sleep 5",
-                "done",
+                f"  echo '[overdrive] {title} exited with status '\"$rc\"'.'",
+                "  echo 'Run the attach command again when you want to reconnect.'",
+                "  exec bash -l",
             ]
         )
     )
@@ -306,6 +334,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     if not sys.stdout.isatty():
         return None
 
+    _cleanup_legacy_tmux_serial_panes()
     session_name = _available_tmux_session_name()
     ready_file = Path("/tmp") / f"overdrive-{session_name}-serial-ready"
     try:
@@ -661,7 +690,7 @@ def main() -> int:
                         "--start-alpine-client",
                     ]
                 )
-                if os.environ.get(TMUX_ENV_FLAG):
+                if os.environ.get(TMUX_ENV_FLAG) or not sys.stdout.isatty():
                     command.append("--no-connect-serial")
             steps.append((step_label(script), command, script))
 
