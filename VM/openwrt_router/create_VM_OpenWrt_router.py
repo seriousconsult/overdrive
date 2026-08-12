@@ -1209,24 +1209,6 @@ def wait_for_router_running(vboxmanage: str, *, timeout_s: float = 60.0) -> None
     raise RuntimeError(f"{VM_NAME} did not reach running state; last state={last_state!r}")
 
 
-def stop_router_for_start_retry(vboxmanage: str) -> None:
-    """Power off the newly-created router before retrying a different frontend."""
-    try:
-        if get_vm_state(vboxmanage, VM_NAME) == "running":
-            run_vboxmanage(vboxmanage, ["controlvm", VM_NAME, "poweroff"], lock_retries=10, lock_retry_s=1.0)
-    except Exception as exc:
-        print(f"[!] Could not power off router before start retry: {exc}")
-    time.sleep(3.0)
-
-
-def alternate_non_gui_start_type(start_type: str) -> str | None:
-    if start_type == "headless":
-        return "separate"
-    if start_type == "separate":
-        return "headless"
-    return None
-
-
 def router_serial_instructions(vboxmanage: str, endpoint: str) -> str:
     """Host-specific attach instructions for the OpenWrt serial console."""
     if vboxmanage_targets_windows(vboxmanage):
@@ -1443,11 +1425,18 @@ def setup_openwrt_vm(
     serial_endpoint = router_serial_endpoint(vboxmanage)
     apply_helper: Path | None = None
     apk_dir: Path | None = None
+    router_started = False
+    dot_verified = False
 
     def require_apply_helper() -> Path:
         if apply_helper is None:
             raise RuntimeError("Mullvad DoT helper was not prepared before router start.")
         return apply_helper
+
+    def require_apk_dir() -> Path:
+        if apk_dir is None:
+            raise RuntimeError("OpenWrt Stubby APK cache was not prepared before image injection.")
+        return apk_dir
 
     def remove_previous_vm() -> None:
         print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
@@ -1471,17 +1460,22 @@ def setup_openwrt_vm(
         # Keep a copy beside the script for manual use.
         write_mullvad_dot_helpers(Path(SCRIPT_DIR))
 
-    def inject_mullvad_dot_assets() -> None:
+    def fetch_mullvad_dot_packages() -> None:
         nonlocal apk_dir
         apk_dir = fetch_openwrt_stubby_apks()
-        injected = inject_mullvad_dot_into_openwrt_image(img_path, apk_dir=apk_dir)
+
+    def inject_mullvad_dot_assets() -> None:
+        injected = inject_mullvad_dot_into_openwrt_image(
+            img_path,
+            apk_dir=require_apk_dir(),
+        )
         if not injected:
             raise RuntimeError(
                 "Image inject failed (need guestfish/virt-customize + libguestfs). "
                 "Offline stubby APKs + apply script must be baked into the disk - "
                 "serial upload is too slow/fragile for OpenWrt 25.12 apk packages.\n"
                 f"Host apply script: {require_apply_helper()}\n"
-                f"APK cache: {apk_dir}"
+                f"APK cache: {require_apk_dir()}"
             )
 
     def convert_image_to_vdi() -> None:
@@ -1528,10 +1522,11 @@ def setup_openwrt_vm(
                     ],
                 )
 
-    def configure_vm_hardware_and_serial() -> None:
+    def configure_vm_firmware() -> None:
         # Force BIOS firmware (command line uses modifyvm, not createvm).
         run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--firmware", "bios"])
 
+    def configure_vm_network_and_hardware() -> None:
         # NIC1 = LAN: matches OpenWrt default br-lan on eth0. NIC2 = WAN on eth1.
         lan_nic_args = [
             "--nic1",
@@ -1575,6 +1570,8 @@ def setup_openwrt_vm(
                 *wan_nic_args,
             ],
         )
+
+    def configure_vm_serial() -> None:
         configure_router_serial(vboxmanage, serial_endpoint)
 
     def attach_storage() -> None:
@@ -1603,59 +1600,49 @@ def setup_openwrt_vm(
         # Fresh Verizon FiOS G3100-style MACs on every create. The VM must be powered off.
         assign_g3100_macs(vboxmanage)
 
-    def start_verify_and_connect() -> None:
-        helper = require_apply_helper()
+    def start_router_vm() -> None:
+        nonlocal router_started
         if options.start_type == "none":
             print("VM configured. Skipping start because --start-type none was selected.")
-            print(mullvad_dot_console_instructions(helper))
-            print(router_serial_instructions(vboxmanage, serial_endpoint))
             return
 
-        start_attempts = [options.start_type]
-        alternate = alternate_non_gui_start_type(options.start_type)
-        if alternate:
-            start_attempts.append(alternate)
+        print(f"Starting VM ({options.start_type})...")
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", options.start_type])
+        wait_for_router_running(vboxmanage, timeout_s=90.0)
+        print(f"[+] VM is running with --type {options.start_type!r}.")
+        router_started = True
 
-        dot_verified = False
-        for attempt_no, attempt_type in enumerate(start_attempts, start=1):
-            if attempt_no > 1:
-                print(f"[!] Retrying router VM with non-GUI start type {attempt_type!r}.")
-                stop_router_for_start_retry(vboxmanage)
-                # Give the retry a fresh Verizon FiOS G3100-style pair too.
-                assign_g3100_macs(vboxmanage)
+    def bootstrap_mullvad_dot() -> None:
+        nonlocal dot_verified
+        if not router_started:
+            return
+        # First boot has an injected init.d job that applies Mullvad DoT. Serial verification
+        # is useful when available, but VirtualBox's TCP serial backend can be flaky on GUI
+        # starts; do not fail the whole VM build solely because COM1 is unavailable.
+        try:
+            ensure_mullvad_dot_over_serial(
+                timeout_s=30.0,
+                vboxmanage=vboxmanage,
+                allow_serial_upload=False,
+            )
+            dot_verified = True
+        except Exception as exc:
+            print(f"[!] Mullvad DoT serial verification did not complete: {exc}")
+            print(
+                "[!] Continuing VM build; OpenWrt first-boot init will apply the injected "
+                "Mullvad DoT config. Re-run --apply-mullvad-only later for strict verification."
+            )
 
-            print(f"Starting VM ({attempt_type})...")
-            run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", attempt_type])
-            wait_for_router_running(vboxmanage, timeout_s=90.0)
-            print(f"[+] VM is running with --type {attempt_type!r}.")
-
-            # First boot has an injected init.d job that applies Mullvad DoT. Serial verification
-            # is useful when available, but VirtualBox's TCP serial backend can be flaky on GUI
-            # starts; do not fail the whole VM build solely because COM1 is unavailable.
-            try:
-                ensure_mullvad_dot_over_serial(
-                    timeout_s=30.0,
-                    vboxmanage=vboxmanage,
-                    allow_serial_upload=False,
-                )
-                dot_verified = True
-                break
-            except Exception as exc:
-                print(f"[!] Mullvad DoT serial verification did not complete after start type {attempt_type!r}: {exc}")
-                print(
-                    "[!] Continuing VM build; OpenWrt first-boot init will apply the injected "
-                    "Mullvad DoT config. Re-run --apply-mullvad-only later for strict verification."
-                )
-                break
-        else:
-            print(mullvad_dot_console_instructions(helper))
-            print(router_serial_instructions(vboxmanage, serial_endpoint))
-
+    def print_router_access_instructions() -> None:
+        helper = require_apply_helper()
         print(mullvad_dot_console_instructions(helper))
         print(router_serial_instructions(vboxmanage, serial_endpoint))
         if not dot_verified:
             print("[!] Mullvad DoT was not serial-verified during create.")
 
+    def attach_router_serial() -> None:
+        if not router_started:
+            return
         if options.connect_serial:
             time.sleep(1)
             # New window by default - keep the create/start shell free.
@@ -1677,17 +1664,28 @@ def setup_openwrt_vm(
                     print(f"    Retry with: ./{Path(__file__).name} --serial-only")
 
     steps = [
-        BuildStep("remove previous VM and disk", remove_previous_vm),
-        BuildStep("prepare workspace", ensure_workspace),
-        BuildStep("download OpenWrt base image", download_base_image),
-        BuildStep("prepare Mullvad DoT helper scripts", prepare_mullvad_dot_helpers),
-        BuildStep("inject Mullvad DoT packages and init", inject_mullvad_dot_assets),
-        BuildStep("convert image to VDI", convert_image_to_vdi),
-        BuildStep("create VirtualBox VM registration", create_vm_registration),
-        BuildStep("configure VM hardware and serial", configure_vm_hardware_and_serial),
-        BuildStep("attach VDI storage", attach_storage),
-        BuildStep("assign fresh Verizon router MACs", assign_fresh_router_macs),
-        BuildStep("start VM and bootstrap DoT", start_verify_and_connect),
+        BuildStep("cleanup.existing-vm", "remove previous VM and disk", remove_previous_vm),
+        BuildStep("workspace.prepare", "prepare workspace", ensure_workspace),
+        BuildStep("image.download-base", "download OpenWrt base image", download_base_image),
+        BuildStep("dot.helpers", "prepare Mullvad DoT helper scripts", prepare_mullvad_dot_helpers),
+        BuildStep(
+            "dot.package-cache",
+            "download Mullvad DoT package cache",
+            fetch_mullvad_dot_packages,
+            description="Future optional boundary for Stubby and DNS-over-TLS package injection.",
+        ),
+        BuildStep("dot.inject-assets", "inject Mullvad DoT scripts and packages", inject_mullvad_dot_assets),
+        BuildStep("disk.convert-vdi", "convert image to VDI", convert_image_to_vdi),
+        BuildStep("vbox.register", "create VirtualBox VM registration", create_vm_registration),
+        BuildStep("vbox.firmware", "configure VM firmware", configure_vm_firmware),
+        BuildStep("vbox.network", "configure router network adapters", configure_vm_network_and_hardware),
+        BuildStep("vbox.serial", "configure router serial endpoint", configure_vm_serial),
+        BuildStep("vbox.storage", "attach VDI storage", attach_storage),
+        BuildStep("vbox.macs", "assign fresh Verizon router MACs", assign_fresh_router_macs),
+        BuildStep("vbox.start", "start router VM", start_router_vm, enabled=options.start_type != "none"),
+        BuildStep("dot.bootstrap", "bootstrap and verify Mullvad DoT", bootstrap_mullvad_dot, enabled=lambda: router_started),
+        BuildStep("instructions.print", "print router access instructions", print_router_access_instructions),
+        BuildStep("serial.attach", "open router serial console", attach_router_serial, enabled=lambda: router_started and options.connect_serial),
     ]
     run_openwrt_router_pipeline(steps)
 
@@ -1730,8 +1728,7 @@ def main() -> None:
         default="gui",
         help=(
             "How to start the VM after creation.\n"
-            "Default: gui. If headless/separate is selected and cannot expose serial, "
-            "the other non-GUI type is retried."
+            "Default: gui."
         ),
     )
     parser.add_argument(

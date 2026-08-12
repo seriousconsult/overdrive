@@ -59,9 +59,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import dataclass
+import glob
 import json
 import os
 import platform
+import re
 import shutil
 import select
 import socket
@@ -69,8 +72,6 @@ import subprocess
 import sys
 import threading
 import time
-import glob
-import re
 import tarfile
 import urllib.request
 from pathlib import Path
@@ -792,20 +793,123 @@ def connect_serial_console(vboxmanage: str, endpoint: str, *, force_interactive:
     return True
 
 
-def prime_client_vdi_for_intnet_lab(
-    vdi_linux: str,
-    work_root: Path,
-    *,
-    skip_prime: bool,
-) -> bool:
-    vc = require_vdi_prime_tools(skip_prime=skip_prime)
-    virt_env = _libguestfs_env()
+CLIENT_IDENTITY_COMMAND = (
+    "mkdir -p /usr/local/sbin /root && "
+    f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname"
+)
 
+INSTALL_DETECTION_LIBRARIES_COMMAND = "cd /root && python3 /root/install.py --non-interactive"
+
+REMOTE_BOOT_SERVICE_CLEANUP_COMMAND = (
+    "for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main "
+    "tiny-cloud-final cloud-init cloud-final; do "
+    "rm -f \"/etc/init.d/$svc\" \"/etc/conf.d/$svc\" 2>/dev/null || true; "
+    "for level in default boot sysinit shutdown nonetwork; do "
+    "rc-update del \"$svc\" \"$level\" >/dev/null 2>&1 || true; "
+    "rm -f \"/etc/runlevels/$level/$svc\" 2>/dev/null || true; "
+    "done; "
+    "done && "
+    "rm -f /etc/tiny-cloud.conf 2>/dev/null || true"
+)
+
+CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND = (
+    "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
+    "mv /etc/init.d/lab-net-up.init /etc/init.d/lab-net-up && "
+    "mv /etc/init.d/client-firewall.init /etc/init.d/client-firewall && "
+    "mv /etc/init.d/overdrive-ip-timezone.init /etc/init.d/overdrive-ip-timezone && "
+    "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
+    "chmod 0755 /usr/local/sbin/lab-net-up && "
+    "chmod 0755 /usr/local/sbin/client-firewall && "
+    "chmod 0755 /usr/local/sbin/overdrive-ip-timezone && "
+    "chmod 0755 /etc/init.d/lab-net-up && "
+    "chmod 0755 /etc/init.d/client-firewall && "
+    "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
+    "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
+    f"{REMOTE_BOOT_SERVICE_CLEANUP_COMMAND} && "
+    "rc-update add lab-net-up default && "
+    "rc-update add overdrive-ip-timezone default && "
+    "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
+    "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
+    # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox
+    # serial noise cancels TIMEOUT so the menu waits forever for Enter.
+    # Boot the MENU DEFAULT / first LABEL directly + TOTALTIMEOUT.
+    "for f in /boot/extlinux.conf /boot/syslinux/syslinux.cfg /boot/syslinux.cfg "
+    "/media/*/boot/syslinux/syslinux.cfg; do "
+    "[ -f \"$f\" ] || continue; "
+    "DEF=$(awk 'BEGIN{l=\"\"} "
+    "tolower($1)==\"label\"{l=$2; next} "
+    "tolower($1)==\"menu\" && tolower($2)==\"default\"{print l; exit}' \"$f\"); "
+    "[ -n \"$DEF\" ] || DEF=$(awk 'tolower($1)==\"label\"{print $2; exit}' \"$f\"); "
+    "tmp=$(mktemp); "
+    "awk 'BEGIN{ignore=0} "
+    "tolower($1)==\"serial\"{next} "
+    "tolower($1)==\"timeout\"{next} "
+    "tolower($1)==\"totaltimeout\"{next} "
+    "tolower($1)==\"prompt\"{next} "
+    "tolower($1)==\"default\"{next} "
+    "tolower($1)==\"noescape\"{next} "
+    "tolower($1)==\"ui\"{next} "
+    "tolower($1)==\"menu\" && (tolower($2)==\"title\"||tolower($2)==\"hidden\"||tolower($2)==\"autoboot\"||tolower($2)==\"separator\"){next} "
+    "{print}' \"$f\" > \"$tmp\"; "
+    "{ "
+    "echo 'SERIAL 0 115200'; "
+    "echo 'PROMPT 0'; "
+    "echo 'NOESCAPE 1'; "
+    "echo 'TIMEOUT 5'; "
+    "echo 'TOTALTIMEOUT 20'; "
+    "[ -n \"$DEF\" ] && echo \"DEFAULT $DEF\"; "
+    "echo; "
+    "cat \"$tmp\"; "
+    "} > \"$f.new\"; "
+    "mv \"$f.new\" \"$f\"; rm -f \"$tmp\"; "
+    "grep -q 'console=ttyS0' \"$f\" || "
+    "sed -i -E 's/^([[:space:]]*(APPEND|append)[[:space:]].*)$/\\1 console=ttyS0,115200/' \"$f\"; "
+    "echo \"[overdrive] unattended bootloader: $f default=${DEF:-none}\"; "
+    "done"
+)
+
+ASSERT_NO_REMOTE_BOOT_HOOKS_COMMAND = (
+    "! find /etc/init.d /etc/runlevels /etc/conf.d "
+    "\\( -name 'sshd' -o -name 'ssh' -o -name 'dropbear' "
+    "-o -name 'tiny-cloud-*' -o -name 'cloud-init' -o -name 'cloud-final' \\) "
+    "-print -quit | grep -q . && "
+    "[ ! -e /etc/ssh ] && "
+    "[ ! -e /etc/tiny-cloud.conf ]"
+)
+
+CLEAN_CLIENT_PRIME_HELPERS_COMMAND = (
+    "rm -f "
+    "/root/install-client-packages.sh /root/harden-client.sh "
+    "/tmp/install-client-packages.sh /tmp/harden-client.sh "
+    "/var/tmp/install-client-packages.sh /var/tmp/harden-client.sh"
+)
+
+
+@dataclass(frozen=True)
+class ClientPrimeAssets:
+    interfaces_host: Path
+    troubleshoot_host: Path
+    lab_net_up_host: Path
+    lab_net_up_init_host: Path
+    client_firewall_host: Path
+    client_firewall_init_host: Path
+    hardening_script_host: Path
+    package_script_host: Path
+    timezone_script_host: Path
+    timezone_init_host: Path
+    root_password_file: Path
+    local_host_payload_host: Path
+    detections_payload_host: Path
+    setup_venv_host: Path
+
+
+def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
+    """Write host-side files that later virt-customize stages copy into the guest."""
     interfaces_host = work_root / "interfaces"
     interfaces_host.write_text(LAB_INTERFACES_ALPINE, encoding="utf-8", newline="\n")
 
-    script_host = work_root / "lab_net_troubleshoot.sh"
-    script_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8", newline="\n")
+    troubleshoot_host = work_root / "lab_net_troubleshoot.sh"
+    troubleshoot_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8", newline="\n")
 
     lab_net_up_host = work_root / "lab-net-up"
     lab_net_up_host.write_text(LAB_NET_UP_SCRIPT, encoding="utf-8", newline="\n")
@@ -860,134 +964,169 @@ def prime_client_vdi_for_intnet_lab(
     setup_venv_host = work_root / "install.py"
     shutil.copy2(Path(REPO_ROOT) / "install.py", setup_venv_host)
 
-    print("Injecting custom configuration and packages into Alpine image...")
-    commands = [
-        vc,
-        "-a",
+    return ClientPrimeAssets(
+        interfaces_host=interfaces_host,
+        troubleshoot_host=troubleshoot_host,
+        lab_net_up_host=lab_net_up_host,
+        lab_net_up_init_host=lab_net_up_init_host,
+        client_firewall_host=client_firewall_host,
+        client_firewall_init_host=client_firewall_init_host,
+        hardening_script_host=hardening_script_host,
+        package_script_host=package_script_host,
+        timezone_script_host=timezone_script_host,
+        timezone_init_host=timezone_init_host,
+        root_password_file=root_password_file,
+        local_host_payload_host=local_host_payload_host,
+        detections_payload_host=detections_payload_host,
+        setup_venv_host=setup_venv_host,
+    )
+
+
+def run_client_virt_customize(
+    vdi_linux: str,
+    args: list[str],
+    *,
+    skip_prime: bool,
+    network: bool = False,
+) -> None:
+    vc = require_vdi_prime_tools(skip_prime=skip_prime)
+    virt_env = _libguestfs_env()
+    command = [vc, "-a", vdi_linux]
+    if network:
+        command.append("--network")
+    command.extend(args)
+    subprocess.run(command, check=True, env=virt_env)
+
+
+def prime_client_identity_and_base_packages(
+    vdi_linux: str,
+    assets: ClientPrimeAssets,
+    *,
+    skip_prime: bool,
+) -> None:
+    """Set guest identity/password and install only bootstrap OS packages."""
+    run_client_virt_customize(
         vdi_linux,
-        "--network",
-        "--hostname",
-        CLIENT_GUEST_HOSTNAME,
-        "--root-password",
-        f"file:{root_password_file}",
-        "--run-command",
-        (
-            "mkdir -p /usr/local/sbin /root && "
-            f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname"
-        ),
-        "--run",
-        str(package_script_host),
-        "--copy-in",
-        f"{interfaces_host}:/etc/network",
-        "--copy-in",
-        f"{script_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{lab_net_up_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{lab_net_up_init_host}:/etc/init.d",
-        "--copy-in",
-        f"{client_firewall_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{client_firewall_init_host}:/etc/init.d",
-        "--copy-in",
-        f"{timezone_script_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{timezone_init_host}:/etc/init.d",
-        "--copy-in",
-        f"{local_host_payload_host}:/root",
-        "--copy-in",
-        f"{detections_payload_host}:/root",
-        "--copy-in",
-        f"{setup_venv_host}:/root",
-        "--run-command",
-        (
-            "cd /root && "
-            "python3 /root/install.py --non-interactive"
-        ),
-        "--run-command",
-        (
-            "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
-            "mv /etc/init.d/lab-net-up.init /etc/init.d/lab-net-up && "
-            "mv /etc/init.d/client-firewall.init /etc/init.d/client-firewall && "
-            "mv /etc/init.d/overdrive-ip-timezone.init /etc/init.d/overdrive-ip-timezone && "
-            "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
-            "chmod 0755 /usr/local/sbin/lab-net-up && "
-            "chmod 0755 /usr/local/sbin/client-firewall && "
-            "chmod 0755 /usr/local/sbin/overdrive-ip-timezone && "
-            "chmod 0755 /etc/init.d/lab-net-up && "
-            "chmod 0755 /etc/init.d/client-firewall && "
-            "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
-            "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
-            "for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main tiny-cloud-final cloud-init cloud-final; do "
-            "rm -f \"/etc/init.d/$svc\" \"/etc/conf.d/$svc\" 2>/dev/null || true; "
-            "for level in default boot sysinit shutdown nonetwork; do "
-            "rc-update del \"$svc\" \"$level\" >/dev/null 2>&1 || true; "
-            "rm -f \"/etc/runlevels/$level/$svc\" 2>/dev/null || true; "
-            "done; "
-            "done && "
-            "rm -f /etc/tiny-cloud.conf 2>/dev/null || true && "
-            "rc-update add lab-net-up default && "
-            "rc-update add overdrive-ip-timezone default && "
-            "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
-            "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
-            # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox
-            # serial noise cancels TIMEOUT so the menu waits forever for Enter.
-            # Boot the MENU DEFAULT / first LABEL directly + TOTALTIMEOUT.
-            "for f in /boot/extlinux.conf /boot/syslinux/syslinux.cfg /boot/syslinux.cfg "
-            "/media/*/boot/syslinux/syslinux.cfg; do "
-            "[ -f \"$f\" ] || continue; "
-            "DEF=$(awk 'BEGIN{l=\"\"} "
-            "tolower($1)==\"label\"{l=$2; next} "
-            "tolower($1)==\"menu\" && tolower($2)==\"default\"{print l; exit}' \"$f\"); "
-            "[ -n \"$DEF\" ] || DEF=$(awk 'tolower($1)==\"label\"{print $2; exit}' \"$f\"); "
-            "tmp=$(mktemp); "
-            "awk 'BEGIN{ignore=0} "
-            "tolower($1)==\"serial\"{next} "
-            "tolower($1)==\"timeout\"{next} "
-            "tolower($1)==\"totaltimeout\"{next} "
-            "tolower($1)==\"prompt\"{next} "
-            "tolower($1)==\"default\"{next} "
-            "tolower($1)==\"noescape\"{next} "
-            "tolower($1)==\"ui\"{next} "
-            "tolower($1)==\"menu\" && (tolower($2)==\"title\"||tolower($2)==\"hidden\"||tolower($2)==\"autoboot\"||tolower($2)==\"separator\"){next} "
-            "{print}' \"$f\" > \"$tmp\"; "
-            "{ "
-            "echo 'SERIAL 0 115200'; "
-            "echo 'PROMPT 0'; "
-            "echo 'NOESCAPE 1'; "
-            "echo 'TIMEOUT 5'; "
-            "echo 'TOTALTIMEOUT 20'; "
-            "[ -n \"$DEF\" ] && echo \"DEFAULT $DEF\"; "
-            "echo; "
-            "cat \"$tmp\"; "
-            "} > \"$f.new\"; "
-            "mv \"$f.new\" \"$f\"; rm -f \"$tmp\"; "
-            # Ensure kernel gets a serial console.
-            "grep -q 'console=ttyS0' \"$f\" || "
-            "sed -i -E 's/^([[:space:]]*(APPEND|append)[[:space:]].*)$/\\1 console=ttyS0,115200/' \"$f\"; "
-            "echo \"[overdrive] unattended bootloader: $f default=${DEF:-none}\"; "
-            "done"
-        ),
-        "--run",
-        str(hardening_script_host),
-        "--run-command",
-        (
-            "! find /etc/init.d /etc/runlevels /etc/conf.d "
-            "\\( -name 'sshd' -o -name 'ssh' -o -name 'dropbear' "
-            "-o -name 'tiny-cloud-*' -o -name 'cloud-init' -o -name 'cloud-final' \\) "
-            "-print -quit | grep -q . && "
-            "[ ! -e /etc/ssh ] && "
-            "[ ! -e /etc/tiny-cloud.conf ]"
-        ),
-        "--run-command",
-        (
-            "rm -f "
-            "/root/install-client-packages.sh /root/harden-client.sh "
-            "/tmp/install-client-packages.sh /tmp/harden-client.sh "
-            "/var/tmp/install-client-packages.sh /var/tmp/harden-client.sh"
-        ),
-    ]
-    subprocess.run(commands, check=True, env=virt_env)
+        [
+            "--hostname",
+            CLIENT_GUEST_HOSTNAME,
+            "--root-password",
+            f"file:{assets.root_password_file}",
+            "--run-command",
+            CLIENT_IDENTITY_COMMAND,
+            "--run",
+            str(assets.package_script_host),
+        ],
+        skip_prime=skip_prime,
+        network=True,
+    )
+
+
+def copy_client_payloads_and_service_assets(
+    vdi_linux: str,
+    assets: ClientPrimeAssets,
+    *,
+    skip_prime: bool,
+) -> None:
+    """Copy local payloads and service scripts into the guest image."""
+    run_client_virt_customize(
+        vdi_linux,
+        [
+            "--copy-in",
+            f"{assets.interfaces_host}:/etc/network",
+            "--copy-in",
+            f"{assets.troubleshoot_host}:/usr/local/sbin",
+            "--copy-in",
+            f"{assets.lab_net_up_host}:/usr/local/sbin",
+            "--copy-in",
+            f"{assets.lab_net_up_init_host}:/etc/init.d",
+            "--copy-in",
+            f"{assets.client_firewall_host}:/usr/local/sbin",
+            "--copy-in",
+            f"{assets.client_firewall_init_host}:/etc/init.d",
+            "--copy-in",
+            f"{assets.timezone_script_host}:/usr/local/sbin",
+            "--copy-in",
+            f"{assets.timezone_init_host}:/etc/init.d",
+            "--copy-in",
+            f"{assets.local_host_payload_host}:/root",
+            "--copy-in",
+            f"{assets.detections_payload_host}:/root",
+            "--copy-in",
+            f"{assets.setup_venv_host}:/root",
+        ],
+        skip_prime=skip_prime,
+    )
+
+
+def install_client_detection_libraries(
+    vdi_linux: str,
+    *,
+    skip_prime: bool,
+) -> None:
+    """Run repo install.py inside the guest; installs network/detection libraries."""
+    run_client_virt_customize(
+        vdi_linux,
+        [
+            "--run-command",
+            INSTALL_DETECTION_LIBRARIES_COMMAND,
+        ],
+        skip_prime=skip_prime,
+        network=True,
+    )
+
+
+def configure_client_guest_services_and_boot(
+    vdi_linux: str,
+    *,
+    skip_prime: bool,
+) -> None:
+    """Wire copied scripts into OpenRC and make the bootloader serial/unattended."""
+    run_client_virt_customize(
+        vdi_linux,
+        [
+            "--run-command",
+            CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND,
+        ],
+        skip_prime=skip_prime,
+    )
+
+
+def harden_and_clean_client_guest_image(
+    vdi_linux: str,
+    assets: ClientPrimeAssets,
+    *,
+    skip_prime: bool,
+) -> None:
+    """Apply privacy hardening and prove unwanted remote-login hooks are absent."""
+    run_client_virt_customize(
+        vdi_linux,
+        [
+            "--run",
+            str(assets.hardening_script_host),
+            "--run-command",
+            ASSERT_NO_REMOTE_BOOT_HOOKS_COMMAND,
+            "--run-command",
+            CLEAN_CLIENT_PRIME_HELPERS_COMMAND,
+        ],
+        skip_prime=skip_prime,
+    )
+
+
+def prime_client_vdi_for_intnet_lab(
+    vdi_linux: str,
+    work_root: Path,
+    *,
+    skip_prime: bool,
+) -> bool:
+    """Compatibility wrapper for older callers; setup_client_vm uses discrete steps."""
+    print("Injecting custom configuration and packages into Alpine image...")
+    assets = prepare_client_prime_assets(work_root)
+    prime_client_identity_and_base_packages(vdi_linux, assets, skip_prime=skip_prime)
+    copy_client_payloads_and_service_assets(vdi_linux, assets, skip_prime=skip_prime)
+    install_client_detection_libraries(vdi_linux, skip_prime=skip_prime)
+    configure_client_guest_services_and_boot(vdi_linux, skip_prime=skip_prime)
+    harden_and_clean_client_guest_image(vdi_linux, assets, skip_prime=skip_prime)
     return True
 
 
@@ -1050,6 +1189,12 @@ def setup_client_vm(
     src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
 
     serial_endpoint = serial_endpoint_for_vbox(vboxmanage, tcp_port=ALPINE_SERIAL_TCP_PORT)
+    prime_assets: ClientPrimeAssets | None = None
+
+    def require_prime_assets() -> ClientPrimeAssets:
+        if prime_assets is None:
+            raise RuntimeError("Alpine guest prime assets were not prepared before image customization.")
+        return prime_assets
 
     def remove_previous_vm() -> None:
         print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
@@ -1080,10 +1225,40 @@ def setup_client_vm(
     def expand_disk() -> None:
         expand_client_vdi_for_packages(vboxmanage, vdi_wsl, target_mib=CLIENT_VDI_SIZE_MIB)
 
-    def prime_guest_image() -> None:
-        prime_client_vdi_for_intnet_lab(
+    def prepare_guest_prime_assets() -> None:
+        nonlocal prime_assets
+        prime_assets = prepare_client_prime_assets(Path(download_dir))
+
+    def install_guest_identity_and_base_packages() -> None:
+        prime_client_identity_and_base_packages(
             vdi_wsl,
-            Path(download_dir),
+            require_prime_assets(),
+            skip_prime=options.skip_vdi_prime,
+        )
+
+    def copy_guest_payloads_and_service_assets() -> None:
+        copy_client_payloads_and_service_assets(
+            vdi_wsl,
+            require_prime_assets(),
+            skip_prime=options.skip_vdi_prime,
+        )
+
+    def install_guest_detection_libraries() -> None:
+        install_client_detection_libraries(
+            vdi_wsl,
+            skip_prime=options.skip_vdi_prime,
+        )
+
+    def configure_guest_services_and_boot() -> None:
+        configure_client_guest_services_and_boot(
+            vdi_wsl,
+            skip_prime=options.skip_vdi_prime,
+        )
+
+    def harden_guest_image() -> None:
+        harden_and_clean_client_guest_image(
+            vdi_wsl,
+            require_prime_assets(),
             skip_prime=options.skip_vdi_prime,
         )
 
@@ -1177,18 +1352,49 @@ def setup_client_vm(
                 connect_serial_console(vboxmanage, serial_endpoint, force_interactive=True)
 
     steps = [
-        BuildStep("remove previous VM and disk", remove_previous_vm),
-        BuildStep("prepare workspace", ensure_workspace),
-        BuildStep("download Alpine base image", download_base_image),
-        BuildStep("convert image to VDI", convert_base_image),
-        BuildStep("expand client disk", expand_disk),
-        BuildStep("prime guest image with packages, hardening, and payloads", prime_guest_image),
-        BuildStep("create VirtualBox VM registration", create_vm_registration),
-        BuildStep("configure VM hardware and serial", configure_vm_hardware),
-        BuildStep("attach VDI storage", attach_storage),
+        BuildStep("cleanup.existing-vm", "remove previous VM and disk", remove_previous_vm),
+        BuildStep("workspace.prepare", "prepare workspace", ensure_workspace),
+        BuildStep("image.download-base", "download Alpine base image", download_base_image),
+        BuildStep("disk.convert-vdi", "convert image to VDI", convert_base_image),
+        BuildStep("disk.expand", "expand client disk", expand_disk),
+        BuildStep(
+            "guest-assets.prepare",
+            "prepare guest customization assets",
+            prepare_guest_prime_assets,
+        ),
+        BuildStep(
+            "guest.base-packages",
+            "set guest identity and install base packages",
+            install_guest_identity_and_base_packages,
+            description="Installs only bootstrap packages needed for later customization.",
+        ),
+        BuildStep(
+            "guest.payloads",
+            "copy payloads and service assets",
+            copy_guest_payloads_and_service_assets,
+        ),
+        BuildStep(
+            "guest.detection-libs",
+            "install detection/network libraries",
+            install_guest_detection_libraries,
+            description="Future optional boundary for Chromium, network tools, and Python detection dependencies.",
+        ),
+        BuildStep(
+            "guest.services-boot",
+            "configure guest services and unattended boot",
+            configure_guest_services_and_boot,
+        ),
+        BuildStep("guest.hardening", "apply hardening and cleanup", harden_guest_image),
+        BuildStep("vbox.register", "create VirtualBox VM registration", create_vm_registration),
+        BuildStep("vbox.hardware", "configure VM hardware and serial", configure_vm_hardware),
+        BuildStep("vbox.storage", "attach VDI storage", attach_storage),
+        BuildStep(
+            "vbox.start",
+            "start VM and attach serial",
+            start_and_connect,
+            enabled=options.start_vm,
+        ),
     ]
-    if options.start_vm:
-        steps.append(BuildStep("start VM and attach serial", start_and_connect))
 
     run_alpine_client_pipeline(steps)
 
