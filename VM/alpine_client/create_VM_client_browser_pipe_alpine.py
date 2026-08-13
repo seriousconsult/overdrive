@@ -131,11 +131,90 @@ CLIENT_GUEST_HOSTNAME = "client"
 CLIENT_VDI_SIZE_MIB = 8192
 CLIENT_MEMORY_MIB = 2048
 CLIENT_ROOT_DEVICE = "/dev/sda"
+CLIENT_WINDOWS_FONT_DIR_NAME = "overdrive-windows-fonts"
 
 ALPINE_SERIAL_TCP_PORT = 2325
 
 ALPINE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
 ALPINE_IMAGE_NAME = "nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
+
+WINDOWS_BROWSER_FONT_FILENAMES = (
+    # Core web fonts.
+    "arial.ttf",
+    "arialbd.ttf",
+    "arialbi.ttf",
+    "ariali.ttf",
+    "ariblk.ttf",
+    "comic.ttf",
+    "comicbd.ttf",
+    "comici.ttf",
+    "comicz.ttf",
+    "cour.ttf",
+    "courbd.ttf",
+    "courbi.ttf",
+    "couri.ttf",
+    "georgia.ttf",
+    "georgiab.ttf",
+    "georgiai.ttf",
+    "georgiaz.ttf",
+    "impact.ttf",
+    "times.ttf",
+    "timesbd.ttf",
+    "timesbi.ttf",
+    "timesi.ttf",
+    "trebuc.ttf",
+    "trebucbd.ttf",
+    "trebucbi.ttf",
+    "trebucit.ttf",
+    "verdana.ttf",
+    "verdanab.ttf",
+    "verdanai.ttf",
+    "verdanaz.ttf",
+    "webdings.ttf",
+    # Windows UI and Office-era families commonly exposed in desktop Chrome.
+    "calibri.ttf",
+    "calibrib.ttf",
+    "calibrii.ttf",
+    "calibriz.ttf",
+    "calibril.ttf",
+    "calibrili.ttf",
+    "cambria.ttc",
+    "cambriab.ttf",
+    "cambriai.ttf",
+    "cambriaz.ttf",
+    "candara.ttf",
+    "candarab.ttf",
+    "candarai.ttf",
+    "candaraz.ttf",
+    "candaral.ttf",
+    "candarali.ttf",
+    "consola.ttf",
+    "consolab.ttf",
+    "consolai.ttf",
+    "consolaz.ttf",
+    "lucon.ttf",
+    "l_10646.ttf",
+    "micross.ttf",
+    "pala.ttf",
+    "palab.ttf",
+    "palabi.ttf",
+    "palai.ttf",
+    "segoeui.ttf",
+    "segoeuib.ttf",
+    "segoeuii.ttf",
+    "segoeuiz.ttf",
+    "segoeuil.ttf",
+    "seguili.ttf",
+    "segoeuisl.ttf",
+    "seguisli.ttf",
+    "seguisb.ttf",
+    "seguisbi.ttf",
+    "seguiemj.ttf",
+    "seguisym.ttf",
+    "tahoma.ttf",
+    "tahomabd.ttf",
+    "wingding.ttf",
+)
 
 
 def _find_existing_fixed_appliance_dir() -> str | None:
@@ -885,6 +964,50 @@ CLEAN_CLIENT_PRIME_HELPERS_COMMAND = (
 )
 
 
+def _host_windows_font_dirs() -> list[Path]:
+    candidates = [
+        Path("/mnt/c/Windows/Fonts"),
+        Path("/mnt/c/windows/Fonts"),
+    ]
+    windir = os.environ.get("WINDIR") or os.environ.get("windir")
+    if windir:
+        candidates.append(Path(windir) / "Fonts")
+    return candidates
+
+
+def prepare_windows_browser_fonts(work_root: Path) -> Path | None:
+    """Copy locally available Windows browser fonts into a staging directory."""
+    source_dir = next((path for path in _host_windows_font_dirs() if path.is_dir()), None)
+    if source_dir is None:
+        print("[overdrive] Windows font import skipped: no host Windows Fonts directory found.")
+        return None
+
+    available = {
+        path.name.lower(): path
+        for path in source_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".ttf", ".ttc", ".otf"}
+    }
+    selected = [available[name] for name in WINDOWS_BROWSER_FONT_FILENAMES if name in available]
+    if not selected:
+        print(f"[overdrive] Windows font import skipped: no allowlisted fonts found in {source_dir}.")
+        return None
+
+    font_dir = work_root / CLIENT_WINDOWS_FONT_DIR_NAME
+    if font_dir.exists():
+        shutil.rmtree(font_dir)
+    font_dir.mkdir(parents=True)
+    for source in selected:
+        shutil.copy2(source, font_dir / source.name)
+
+    missing = len(WINDOWS_BROWSER_FONT_FILENAMES) - len(selected)
+    print(
+        "[overdrive] Staged Windows browser fonts: "
+        f"{len(selected)} copied from {source_dir}"
+        + (f", {missing} allowlisted files missing." if missing else ".")
+    )
+    return font_dir
+
+
 @dataclass(frozen=True)
 class ClientPrimeAssets:
     interfaces_host: Path
@@ -901,6 +1024,7 @@ class ClientPrimeAssets:
     local_host_payload_host: Path
     detections_payload_host: Path
     setup_venv_host: Path
+    windows_fonts_host: Path | None
 
 
 def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
@@ -963,6 +1087,7 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
     )
     setup_venv_host = work_root / "install.py"
     shutil.copy2(Path(REPO_ROOT) / "install.py", setup_venv_host)
+    windows_fonts_host = prepare_windows_browser_fonts(work_root)
 
     return ClientPrimeAssets(
         interfaces_host=interfaces_host,
@@ -979,6 +1104,7 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
         local_host_payload_host=local_host_payload_host,
         detections_payload_host=detections_payload_host,
         setup_venv_host=setup_venv_host,
+        windows_fonts_host=windows_fonts_host,
     )
 
 
@@ -1029,32 +1155,42 @@ def copy_client_payloads_and_service_assets(
     skip_prime: bool,
 ) -> None:
     """Copy local payloads and service scripts into the guest image."""
+    customize_args = [
+        "--copy-in",
+        f"{assets.interfaces_host}:/etc/network",
+        "--copy-in",
+        f"{assets.troubleshoot_host}:/usr/local/sbin",
+        "--copy-in",
+        f"{assets.lab_net_up_host}:/usr/local/sbin",
+        "--copy-in",
+        f"{assets.lab_net_up_init_host}:/etc/init.d",
+        "--copy-in",
+        f"{assets.client_firewall_host}:/usr/local/sbin",
+        "--copy-in",
+        f"{assets.client_firewall_init_host}:/etc/init.d",
+        "--copy-in",
+        f"{assets.timezone_script_host}:/usr/local/sbin",
+        "--copy-in",
+        f"{assets.timezone_init_host}:/etc/init.d",
+        "--copy-in",
+        f"{assets.local_host_payload_host}:/root",
+        "--copy-in",
+        f"{assets.detections_payload_host}:/root",
+        "--copy-in",
+        f"{assets.setup_venv_host}:/root",
+    ]
+    if assets.windows_fonts_host is not None:
+        customize_args.extend(
+            [
+                "--run-command",
+                "mkdir -p /usr/share/fonts",
+                "--copy-in",
+                f"{assets.windows_fonts_host}:/usr/share/fonts",
+            ]
+        )
     run_client_virt_customize(
         vdi_linux,
-        [
-            "--copy-in",
-            f"{assets.interfaces_host}:/etc/network",
-            "--copy-in",
-            f"{assets.troubleshoot_host}:/usr/local/sbin",
-            "--copy-in",
-            f"{assets.lab_net_up_host}:/usr/local/sbin",
-            "--copy-in",
-            f"{assets.lab_net_up_init_host}:/etc/init.d",
-            "--copy-in",
-            f"{assets.client_firewall_host}:/usr/local/sbin",
-            "--copy-in",
-            f"{assets.client_firewall_init_host}:/etc/init.d",
-            "--copy-in",
-            f"{assets.timezone_script_host}:/usr/local/sbin",
-            "--copy-in",
-            f"{assets.timezone_init_host}:/etc/init.d",
-            "--copy-in",
-            f"{assets.local_host_payload_host}:/root",
-            "--copy-in",
-            f"{assets.detections_payload_host}:/root",
-            "--copy-in",
-            f"{assets.setup_venv_host}:/root",
-        ],
+        customize_args,
         skip_prime=skip_prime,
     )
 

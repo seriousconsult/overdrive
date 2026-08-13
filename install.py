@@ -58,6 +58,39 @@ NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
     "apk": ("curl", "iproute2", "iptables", "iputils"),
 }
 
+# Real, non-GUI runtime assets that make headless Chromium less skeletal on the
+# Alpine lab client. These improve measured fonts/rendering/media capability;
+# they do not mask headless automation or spoof browser identity.
+ALPINE_BROWSER_SUPPORT_PACKAGES: tuple[str, ...] = (
+    "fontconfig",
+    "ttf-dejavu",
+    "ttf-liberation",
+    "msttcorefonts-installer",
+    "font-croscore",
+    "font-crosextra-caladea",
+    "font-crosextra-carlito",
+    "font-noto",
+    "font-noto-cjk",
+    "font-noto-emoji",
+    "font-noto-extra",
+    "font-roboto",
+    "font-droid",
+    "ttf-opensans",
+    "freetype",
+    "harfbuzz",
+    "icu-data-full",
+    "musl-locales",
+    "musl-locales-lang",
+    "mesa-dri-gallium",
+    "mesa-egl",
+    "mesa-gl",
+    "libdrm",
+    "alsa-lib",
+    "alsa-plugins",
+    "alsa-utils",
+    "pulseaudio-libs",
+)
+
 APT_LOCK_TIMEOUT_SECONDS = 180
 APT_LOCK_WAIT_SECONDS = 60
 APT_LOCK_POLL_SECONDS = 2
@@ -457,6 +490,40 @@ def install_first_available(
         raise last_exc
 
 
+def install_optional_packages(
+    info,
+    packages: list[str],
+    *,
+    non_interactive: bool = False,
+) -> None:
+    """Install optional runtime packages one-by-one, warning but continuing on miss."""
+    for package in packages:
+        if package_installed(info, package):
+            print(f"[*] Optional package already installed: {package}")
+            continue
+        try:
+            print(f"[*] Installing optional package: {package}...")
+            install_packages(info, [package], non_interactive=non_interactive)
+        except subprocess.CalledProcessError:
+            print(f"[-] Optional package unavailable or failed to install: {package}; continuing.")
+
+
+def refresh_font_cache_if_available() -> None:
+    if have_cmd("update-ms-fonts"):
+        try:
+            print("[*] Installing Microsoft core web fonts via update-ms-fonts...")
+            run_cmd(["update-ms-fonts"], use_sudo=False)
+        except subprocess.CalledProcessError:
+            print("[-] Microsoft core web font install failed; continuing.")
+    if not have_cmd("fc-cache"):
+        return
+    try:
+        print("[*] Refreshing fontconfig cache...")
+        run_cmd(["fc-cache", "-f"], use_sudo=False)
+    except subprocess.CalledProcessError:
+        print("[-] Fontconfig cache refresh failed; continuing.")
+
+
 def package_installed(info, package: str) -> bool:
     if package.startswith("/") or package.endswith(".deb"):
         return False
@@ -567,7 +634,16 @@ def install_system_deps(*, non_interactive: bool = False):
     else:
         print("[*] Chrome already installed.")
 
-    # 4) Core networking (lab client + hosts): curl, iproute, iptables, ping
+    # 4) Alpine no-GUI browser runtime support: fonts, media, and software GL.
+    if mgr == "apk":
+        install_optional_packages(
+            info,
+            list(ALPINE_BROWSER_SUPPORT_PACKAGES),
+            non_interactive=non_interactive,
+        )
+        refresh_font_cache_if_available()
+
+    # 5) Core networking (lab client + hosts): curl, iproute, iptables, ping
     net_pkgs = list(NET_BASE_PACKAGES_BY_MGR.get(mgr, NET_BASE_PACKAGES_BY_MGR["apk"]))
     net_needed = [pkg for pkg in net_pkgs if not package_installed(info, pkg)]
     # Also treat missing CLIs as needing install (busybox may shadow package checks).
@@ -588,7 +664,7 @@ def install_system_deps(*, non_interactive: bool = False):
     else:
         print(f"[*] Network base packages already present: {' '.join(net_pkgs)}.")
 
-    # 5) Network diagnostics + helpers: nmap, dig, tcpdump, socat [, minicom]
+    # 6) Network diagnostics + helpers: nmap, dig, tcpdump, socat [, minicom]
     diag_cmds = [
         ("nmap", info["nmap"]),
         ("tcpdump", info.get("tcpdump") or "tcpdump"),
@@ -615,7 +691,7 @@ def install_system_deps(*, non_interactive: bool = False):
             print(f"[*] Installing {dig_pkg} (provides dig)...")
             install_packages(info, [dig_pkg], non_interactive=non_interactive)
 
-    # 6) guestfs tools (for virt-customize on host builders — skip on Alpine guests)
+    # 7) guestfs tools (for virt-customize on host builders — skip on Alpine guests)
     if info.get("guestfs_sets"):
         if not have_cmd("virt-customize"):
             print("[*] Installing guestfs tools for virt-customize (first available option)...")
@@ -627,7 +703,7 @@ def install_system_deps(*, non_interactive: bool = False):
         else:
             print("[*] virt-customize already available.")
 
-    # 7) capability tool provider (setcap)
+    # 8) capability tool provider (setcap)
     if not have_cmd("setcap"):
         print("[*] Installing libcap tooling (first available option)...")
         install_first_available(

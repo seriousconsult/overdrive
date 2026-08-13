@@ -78,7 +78,10 @@ def build_driver() -> webdriver.Chrome:
     """Build a Chrome/Chromium WebDriver with common headless options for browser detection."""
     opts = Options()
     opts.add_argument("--headless=new")
-    opts.add_argument("--disable-gpu")
+    opts.add_argument("--enable-webgl")
+    opts.add_argument("--ignore-gpu-blocklist")
+    opts.add_argument("--use-gl=swiftshader")
+    opts.add_argument("--enable-unsafe-swiftshader")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1280,800")

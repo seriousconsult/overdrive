@@ -2,7 +2,7 @@
 """
 User-Agent and User-Agent Client Hints identification.
 
-Runs a real browser through Selenium, serves a local localhost page, and captures:
+Runs a browser through Selenium, serves a local localhost page, and captures:
 
 - Request User-Agent and Sec-CH-UA* headers seen by a server.
 - JavaScript-visible navigator.userAgent and navigator.userAgentData.

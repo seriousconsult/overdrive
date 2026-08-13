@@ -2,26 +2,31 @@
 """
 Cookie Tracking Detection
 
-Detects whether browser cookies are available and behave like a typical
-residential browser. A browser that blocks or fails to persist cookies is
-less likely to match a normal home browser profile.
+Detects whether cookies and related client-side storage behave like a typical
+Windows Chrome residential browser with default settings. A browser that blocks,
+partitions, or fails to persist same-origin state is less likely to match that
+baseline.
 
 Measured attributes:
 - navigator.cookieEnabled
 - document.cookie write/read roundtrip
-- browser profile coherence around automation signals
+- server-set, HttpOnly, SameSite, overwrite, expiry, and deletion behavior
+- localStorage, sessionStorage, IndexedDB, Cache API, and Cookie Store surface
 
 Score: 1-5
 1 = authentic residential browser cookie behavior
-2 = mostly normal cookie behavior with minor browser anomalies
+2 = mostly normal cookie/storage behavior with minor deviations
 3 = inconclusive browser/javascript result
 4 = unusual browser behavior for a typical home setup
-5 = strongly non-home-like automation/browser profile
+5 = strongly non-home-like cookie/storage behavior
 """
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -38,174 +43,497 @@ from detections.common.common_browser import (
 COOKIE_PROBE_JS = r"""
 const done = arguments[arguments.length - 1];
 
-function makeProfile() {
-  return {
-    userAgent: navigator.userAgent || "",
-    vendor: navigator.vendor || "",
-    platform: navigator.platform || "",
-    languages: Array.from(navigator.languages || []),
-    language: navigator.language || "",
-    webdriver: navigator.webdriver === true,
-    pluginsLength: navigator.plugins ? navigator.plugins.length : null,
-    mimeTypesLength: navigator.mimeTypes ? navigator.mimeTypes.length : null,
-    hardwareConcurrency: navigator.hardwareConcurrency || null,
-    deviceMemory: navigator.deviceMemory || null,
-    maxTouchPoints: navigator.maxTouchPoints || 0,
-    cookieEnabled: navigator.cookieEnabled,
-    screenWidth: screen.width || null,
-    screenHeight: screen.height || null,
-    colorDepth: screen.colorDepth || null,
-    pixelDepth: screen.pixelDepth || null,
-    outerWidth: window.outerWidth || null,
-    outerHeight: window.outerHeight || null,
-  };
+function cookieText() {
+  return document.cookie || "";
 }
 
-try {
-  const profile = makeProfile();
-  const cookieProbeName = "overdrive_cookie_tracking_probe";
-  const cookieProbeValue = "1";
-  const cookieEnabled = Boolean(navigator.cookieEnabled);
+function hasCookie(name, value = null) {
+  const wanted = value === null ? `${name}=` : `${name}=${value}`;
+  return cookieText().split(/;\s*/).some((item) => item === wanted || (value === null && item.startsWith(wanted)));
+}
 
-  let canSetCookie = false;
-  let cookieString = "";
-  let reason = null;
+function setCookie(line) {
+  document.cookie = line;
+}
 
-  try {
-    document.cookie = `${cookieProbeName}=${cookieProbeValue}; path=/`;
-    cookieString = document.cookie || "";
-    canSetCookie = cookieString.includes(`${cookieProbeName}=${cookieProbeValue}`);
-    if (!canSetCookie) {
-      document.cookie = `${cookieProbeName}=${cookieProbeValue}; path=/; SameSite=Lax`;
-      cookieString = document.cookie || "";
-      canSetCookie = cookieString.includes(`${cookieProbeName}=${cookieProbeValue}`);
-    }
-  } catch (e) {
-    reason = String(e && e.message ? e.message : e);
+function deleteCookie(name) {
+  document.cookie = `${name}=; path=/; Max-Age=0; SameSite=Lax`;
+}
+
+async function fetchJson(path) {
+  const response = await fetch(path, { credentials: "include", cache: "no-store" });
+  return response.json();
+}
+
+async function testStorage(name, storage) {
+  if (!storage) {
+    return { available: false, writeRead: false, remove: false, error: "storage object unavailable" };
   }
-
-  done({
-    ok: true,
-    profile,
-    cookieEnabled,
-    canSetCookie,
-    cookieString,
-    reason: reason || "cookie probe completed",
-  });
-} catch (e) {
-  done({ ok: false, error: String(e && e.message ? e.message : e) });
+  try {
+    const key = `overdrive_${name}_probe`;
+    storage.setItem(key, "alpha");
+    const writeRead = storage.getItem(key) === "alpha";
+    storage.removeItem(key);
+    const remove = storage.getItem(key) === null;
+    return { available: true, writeRead, remove, error: null };
+  } catch (e) {
+    return { available: true, writeRead: false, remove: false, error: String(e && e.message ? e.message : e) };
+  }
 }
+
+function getStorageObject(name) {
+  try {
+    return window[name];
+  } catch (e) {
+    return null;
+  }
+}
+
+async function testIndexedDB() {
+  if (!window.indexedDB) {
+    return { available: false, open: false, writeRead: false, deleteDb: false, error: "indexedDB unavailable" };
+  }
+  const dbName = "overdrive_cookie_probe_db";
+  return new Promise((resolve) => {
+    const request = indexedDB.open(dbName, 1);
+    let settled = false;
+    const finish = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("kv")) {
+        db.createObjectStore("kv");
+      }
+    };
+    request.onerror = () => finish({
+      available: true,
+      open: false,
+      writeRead: false,
+      deleteDb: false,
+      error: String(request.error && request.error.message ? request.error.message : request.error),
+    });
+    request.onsuccess = () => {
+      const db = request.result;
+      try {
+        const tx = db.transaction("kv", "readwrite");
+        const store = tx.objectStore("kv");
+        store.put("alpha", "probe");
+        tx.oncomplete = () => {
+          const readTx = db.transaction("kv", "readonly");
+          const getReq = readTx.objectStore("kv").get("probe");
+          getReq.onsuccess = () => {
+            const writeRead = getReq.result === "alpha";
+            db.close();
+            const delReq = indexedDB.deleteDatabase(dbName);
+            delReq.onsuccess = () => finish({ available: true, open: true, writeRead, deleteDb: true, error: null });
+            delReq.onerror = () => finish({ available: true, open: true, writeRead, deleteDb: false, error: "deleteDatabase failed" });
+          };
+          getReq.onerror = () => {
+            db.close();
+            finish({ available: true, open: true, writeRead: false, deleteDb: false, error: "read failed" });
+          };
+        };
+        tx.onerror = () => {
+          db.close();
+          finish({ available: true, open: true, writeRead: false, deleteDb: false, error: "write transaction failed" });
+        };
+      } catch (e) {
+        db.close();
+        finish({ available: true, open: true, writeRead: false, deleteDb: false, error: String(e && e.message ? e.message : e) });
+      }
+    };
+    setTimeout(() => finish({ available: true, open: false, writeRead: false, deleteDb: false, error: "indexedDB timeout" }), 3000);
+  });
+}
+
+async function testCacheStorage() {
+  if (!window.caches) {
+    return { available: false, open: false, deleteCache: false, error: "Cache API unavailable" };
+  }
+  const cacheName = "overdrive-cookie-probe-cache";
+  try {
+    await caches.open(cacheName);
+    const deleteCache = await caches.delete(cacheName);
+    return { available: true, open: true, deleteCache, error: null };
+  } catch (e) {
+    return { available: true, open: false, deleteCache: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+(async () => {
+  try {
+    const checks = {
+      navigatorCookieEnabled: Boolean(navigator.cookieEnabled),
+      documentCookieAccessor: typeof document.cookie === "string",
+      jsCookie: {},
+      serverCookie: {},
+      storage: {},
+      cookieStoreApi: {
+        available: Boolean(window.cookieStore),
+      },
+    };
+
+    await fetch("/clear", { credentials: "include", cache: "no-store" });
+
+    setCookie("overdrive_js_session=alpha; path=/; SameSite=Lax");
+    checks.jsCookie.sessionWriteRead = hasCookie("overdrive_js_session", "alpha");
+
+    setCookie("overdrive_js_session=beta; path=/; SameSite=Lax");
+    checks.jsCookie.overwrite = hasCookie("overdrive_js_session", "beta") && !hasCookie("overdrive_js_session", "alpha");
+
+    setCookie("overdrive_js_strict=strict; path=/; SameSite=Strict");
+    checks.jsCookie.sameSiteStrict = hasCookie("overdrive_js_strict", "strict");
+
+    setCookie("overdrive_js_maxage=maxage; path=/; Max-Age=60; SameSite=Lax");
+    checks.jsCookie.maxAge = hasCookie("overdrive_js_maxage", "maxage");
+
+    const future = new Date(Date.now() + 60000).toUTCString();
+    setCookie(`overdrive_js_expires=expires; path=/; expires=${future}; SameSite=Lax`);
+    checks.jsCookie.expires = hasCookie("overdrive_js_expires", "expires");
+
+    setCookie("overdrive_js_multi_a=a; path=/; SameSite=Lax");
+    setCookie("overdrive_js_multi_b=b; path=/; SameSite=Lax");
+    checks.jsCookie.multipleCookies = hasCookie("overdrive_js_multi_a", "a") && hasCookie("overdrive_js_multi_b", "b");
+
+    deleteCookie("overdrive_js_session");
+    checks.jsCookie.delete = !hasCookie("overdrive_js_session");
+
+    await fetch("/set-http-cookie", { credentials: "include", cache: "no-store" });
+    const httpOnlyEcho = await fetchJson("/echo-cookie");
+    checks.serverCookie.httpOnlySentToServer = String(httpOnlyEcho.cookieHeader || "").includes("overdrive_http_only=server");
+    checks.serverCookie.httpOnlyHiddenFromDocument = !hasCookie("overdrive_http_only");
+
+    await fetch("/set-readable-cookie", { credentials: "include", cache: "no-store" });
+    const readableEcho = await fetchJson("/echo-cookie");
+    checks.serverCookie.readableSentToServer = String(readableEcho.cookieHeader || "").includes("overdrive_server_readable=server");
+    checks.serverCookie.readableVisibleToDocument = hasCookie("overdrive_server_readable", "server");
+
+    checks.storage.localStorage = await testStorage("local_storage", getStorageObject("localStorage"));
+    checks.storage.sessionStorage = await testStorage("session_storage", getStorageObject("sessionStorage"));
+    checks.storage.indexedDB = await testIndexedDB();
+    checks.storage.cacheStorage = await testCacheStorage();
+
+    done({
+      ok: true,
+      checks,
+      cookieTextLength: cookieText().length,
+      reason: "cookie/storage probe completed",
+    });
+  } catch (e) {
+    done({ ok: false, error: String(e && e.message ? e.message : e) });
+  }
+})();
 """
 
+class CookieProbeHandler(BaseHTTPRequestHandler):
+    server_version = "OverdriveCookieProbe/1.0"
+    COOKIE_NAMES = (
+        "overdrive_http_only",
+        "overdrive_server_readable",
+        "overdrive_js_session",
+        "overdrive_js_strict",
+        "overdrive_js_maxage",
+        "overdrive_js_expires",
+        "overdrive_js_multi_a",
+        "overdrive_js_multi_b",
+    )
 
-def _browser_profile_issues(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
-    strong: list[str] = []
-    soft: list[str] = []
+    def log_message(self, _fmt: str, *_args) -> None:
+        return
 
-    ua = str(profile.get("userAgent") or "")
-    vendor = str(profile.get("vendor") or "")
-    languages = profile.get("languages") or []
-    plugins_len = profile.get("pluginsLength")
-    color_depth = profile.get("colorDepth")
-    width = profile.get("screenWidth")
-    height = profile.get("screenHeight")
-    outer_width = profile.get("outerWidth")
-    outer_height = profile.get("outerHeight")
+    def _send_bytes(
+        self,
+        body: bytes,
+        *,
+        content_type: str = "text/plain; charset=utf-8",
+        set_cookies: list[str] | None = None,
+    ) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        if set_cookies:
+            for cookie in set_cookies:
+                self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-    ua_lower = ua.lower()
-    is_chrome = "chrome/" in ua_lower or "chromium/" in ua_lower or "edg/" in ua_lower
-    is_firefox = "firefox/" in ua_lower
-    is_safari = "safari/" in ua_lower and "chrome/" not in ua_lower
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/clear":
+            expired = [
+                f"{name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax"
+                for name in self.COOKIE_NAMES
+            ]
+            self._send_bytes(b"{}", content_type="application/json", set_cookies=expired)
+            return
+        if path == "/set-http-cookie":
+            self._send_bytes(
+                b"{}",
+                content_type="application/json",
+                set_cookies=["overdrive_http_only=server; Path=/; SameSite=Lax; HttpOnly"],
+            )
+            return
+        if path == "/set-readable-cookie":
+            self._send_bytes(
+                b"{}",
+                content_type="application/json",
+                set_cookies=["overdrive_server_readable=server; Path=/; SameSite=Lax"],
+            )
+            return
+        if path == "/echo-cookie":
+            body = json.dumps(
+                {"cookieHeader": self.headers.get("Cookie", "")},
+                sort_keys=True,
+            ).encode("utf-8")
+            self._send_bytes(body, content_type="application/json")
+            return
 
-    if profile.get("webdriver"):
-        strong.append("navigator.webdriver is true")
-    if "headless" in ua_lower:
-        strong.append("User-Agent exposes headless browser")
-    if not any((is_chrome, is_firefox, is_safari)):
-        strong.append("User-Agent does not look like a common residential browser")
+        body = b"<!doctype html><meta charset='utf-8'><title>Cookie Probe</title>"
+        self._send_bytes(body, content_type="text/html; charset=utf-8")
 
-    if is_chrome and "google inc" not in vendor.lower() and "microsoft" not in vendor.lower():
-        soft.append("Chrome-like UA has an unusual navigator.vendor")
-    if not languages:
-        soft.append("navigator.languages is empty")
-    if plugins_len == 0 and (is_chrome or is_firefox):
-        soft.append("navigator.plugins is empty")
-    if color_depth not in (24, 30, 32, None):
-        soft.append(f"unusual screen color depth {color_depth}")
-    if isinstance(width, int) and isinstance(height, int) and (width < 800 or height < 600):
-        soft.append(f"unusually small screen size {width}x{height}")
-    if outer_width == 0 or outer_height == 0:
-        soft.append("window.outerWidth/outerHeight are zero")
 
-    return strong, soft
+def start_cookie_probe_server() -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CookieProbeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True, name="cookie-probe")
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}/"
+
+
+POPULAR_WINDOWS_COOKIE_BASELINE = (
+    "Windows 11 + Google Chrome default residential cookie/storage behavior"
+)
+
+
+def _bool_deviation(value: Any, label: str, expected: bool = True) -> str | None:
+    if value is expected:
+        return None
+    return f"{label} is {value!r}, expected {expected!r}"
+
+
+def popular_windows_cookie_deviation_report(result: dict[str, Any]) -> dict[str, list[str]]:
+    if not result.get("ok"):
+        return {
+            "probe": [f"probe failed: {result.get('error', 'unknown error')}"],
+            "cookie": [],
+            "server_cookie": [],
+            "storage": [],
+            "notes": [],
+        }
+
+    checks = result.get("checks") or {}
+    if not isinstance(checks, dict):
+        return {
+            "probe": ["checks table is missing or malformed"],
+            "cookie": [],
+            "server_cookie": [],
+            "storage": [],
+            "notes": [],
+        }
+
+    cookie_deviations: list[str] = []
+    server_deviations: list[str] = []
+    storage_deviations: list[str] = []
+    notes: list[str] = []
+
+    for key, label in (
+        ("navigatorCookieEnabled", "navigator.cookieEnabled"),
+        ("documentCookieAccessor", "document.cookie accessor"),
+    ):
+        deviation = _bool_deviation(checks.get(key), label)
+        if deviation:
+            cookie_deviations.append(deviation)
+
+    js_cookie = checks.get("jsCookie") or {}
+    if not isinstance(js_cookie, dict):
+        cookie_deviations.append("JavaScript cookie results are missing or malformed")
+    else:
+        for key, label in (
+            ("sessionWriteRead", "session cookie write/read"),
+            ("overwrite", "cookie overwrite semantics"),
+            ("sameSiteStrict", "SameSite=Strict cookie write/read"),
+            ("maxAge", "Max-Age cookie write/read"),
+            ("expires", "Expires cookie write/read"),
+            ("multipleCookies", "multiple same-origin cookies"),
+            ("delete", "cookie deletion"),
+        ):
+            deviation = _bool_deviation(js_cookie.get(key), label)
+            if deviation:
+                cookie_deviations.append(deviation)
+
+    server_cookie = checks.get("serverCookie") or {}
+    if not isinstance(server_cookie, dict):
+        server_deviations.append("server-observed cookie results are missing or malformed")
+    else:
+        for key, label in (
+            ("httpOnlySentToServer", "server-set HttpOnly cookie sent back to server"),
+            ("httpOnlyHiddenFromDocument", "HttpOnly cookie hidden from document.cookie"),
+            ("readableSentToServer", "server-set readable cookie sent back to server"),
+            ("readableVisibleToDocument", "server-set readable cookie visible to document.cookie"),
+        ):
+            deviation = _bool_deviation(server_cookie.get(key), label)
+            if deviation:
+                server_deviations.append(deviation)
+
+    storage = checks.get("storage") or {}
+    if not isinstance(storage, dict):
+        storage_deviations.append("storage results are missing or malformed")
+    else:
+        storage_expectations = {
+            "localStorage": ("localStorage", ("available", "writeRead", "remove")),
+            "sessionStorage": ("sessionStorage", ("available", "writeRead", "remove")),
+            "indexedDB": ("IndexedDB", ("available", "open", "writeRead", "deleteDb")),
+            "cacheStorage": ("Cache API", ("available", "open", "deleteCache")),
+        }
+        for key, (label, expected_keys) in storage_expectations.items():
+            data = storage.get(key) or {}
+            if not isinstance(data, dict):
+                storage_deviations.append(f"{label} result is missing or malformed")
+                continue
+            for expected_key in expected_keys:
+                deviation = _bool_deviation(data.get(expected_key), f"{label}.{expected_key}")
+                if deviation:
+                    storage_deviations.append(deviation)
+            if data.get("error"):
+                storage_deviations.append(f"{label} error: {data.get('error')}")
+
+    cookie_store = checks.get("cookieStoreApi") or {}
+    if isinstance(cookie_store, dict) and cookie_store.get("available") is not True:
+        notes.append("Cookie Store API unavailable; not scored because availability varies by Chrome build/context")
+
+    if not cookie_deviations and not server_deviations and not storage_deviations:
+        notes.append("no built-in popular-Windows cookie/storage deviations found")
+
+    return {
+        "probe": [],
+        "cookie": cookie_deviations,
+        "server_cookie": server_deviations,
+        "storage": storage_deviations,
+        "notes": notes,
+    }
+
+
+def _deviation_count(report: dict[str, list[str]]) -> int:
+    return sum(len(rows) for key, rows in report.items() if key != "notes")
+
+
+def _print_rows(title: str, rows: list[str]) -> None:
+    print(title)
+    if not rows:
+        print("  - none")
+        return
+    for row in rows:
+        print(f"  - {row}")
+
+
+def print_cookie_deviation_report(result: dict[str, Any]) -> None:
+    report = popular_windows_cookie_deviation_report(result)
+    print()
+    print("Popular Windows Residential Cookie/Storage Baseline")
+    print(f"Reference: {POPULAR_WINDOWS_COOKIE_BASELINE}")
+    print(f"Deviation count: {_deviation_count(report)}")
+    print()
+    _print_rows("Cookie deviations:", report["cookie"])
+    print()
+    _print_rows("Server-observed cookie deviations:", report["server_cookie"])
+    print()
+    _print_rows("Storage deviations:", report["storage"])
+    if report["probe"]:
+        print()
+        _print_rows("Probe deviations:", report["probe"])
+    if report["notes"]:
+        print()
+        _print_rows("Notes:", report["notes"])
 
 
 def _score_cookie_result(result: dict[str, Any]) -> tuple[int, str]:
     if not result.get("ok"):
         return 3, f"Inconclusive: cookie probe failed: {result.get('error', 'unknown error')}"
 
-    strong_issues, soft_issues = _browser_profile_issues(result.get("profile") or {})
-    cookie_enabled = result.get("cookieEnabled") is True
-    can_set = result.get("canSetCookie") is True
-    cookie_string = str(result.get("cookieString") or "")
-    reason = result.get("reason") or "cookie probe completed"
+    report = popular_windows_cookie_deviation_report(result)
+    cookie_count = len(report["cookie"])
+    server_count = len(report["server_cookie"])
+    storage_count = len(report["storage"])
+    total = _deviation_count(report)
+    reason = result.get("reason") or "cookie/storage probe completed"
 
-    if not cookie_enabled or not can_set:
-        score = 5 if strong_issues else 4
-        return (
-            score,
-            f"Unusual cookie behavior: cookies are not writable/readable in this browser probe. {reason}."
-        )
+    if cookie_count + server_count >= 4:
+        score = 5
+    elif cookie_count + server_count:
+        score = 4
+    elif storage_count >= 3:
+        score = 3
+    elif storage_count:
+        score = 2
+    else:
+        score = 1
 
-    if strong_issues:
-        return (
-            5,
-            "Strongly non-home-like profile: cookies are available, but browser signals indicate automation: "
-            f"{' ; '.join(strong_issues)}. {reason}."
-        )
-
-    if soft_issues:
-        return (
-            2,
-            "Mostly home-like cookie behavior with minor browser anomalies: "
-            f"{reason}. Issues: {'; '.join(soft_issues)}."
-        )
-
-    return 1, f"Home-like cookie behavior detected: {reason}."
+    return (
+        score,
+        f"{reason}. Popular Windows cookie/storage baseline deviations: {total}.",
+    )
 
 
-def check_cookie_tracking() -> tuple[int, str]:
+def _run_selenium_cookie_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
+    server = None
     try:
         driver = build_driver_with_fallback()
     except Exception as exc:
-        return 3, f"Unable to start Selenium WebDriver: {type(exc).__name__}: {exc}"
+        return None, f"Unable to start Selenium WebDriver: {type(exc).__name__}: {exc}"
 
     try:
-        driver.set_script_timeout(DEFAULT_TIMEOUT)
-        driver.get("about:blank")
-        result = driver.execute_script(COOKIE_PROBE_JS)
+        server, url = start_cookie_probe_server()
+        driver.set_script_timeout(timeout)
+        driver.get(url)
+        result = driver.execute_async_script(COOKIE_PROBE_JS)
     except Exception as exc:
         try:
             driver.quit()
         except Exception:
             pass
-        return 3, f"Selenium run failed: {type(exc).__name__}: {exc}"
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        return None, f"Selenium run failed: {type(exc).__name__}: {exc}"
 
     try:
         driver.quit()
     except Exception:
         pass
+    if server is not None:
+        server.shutdown()
+        server.server_close()
 
     if not isinstance(result, dict):
-        return 3, "Cookie tracking detection returned unexpected data."
+        return None, "Cookie tracking detection returned unexpected data."
+
+    return result, None
+
+
+def check_cookie_tracking(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
+    result, error = _run_selenium_cookie_probe(timeout)
+    if result is None:
+        return 3, error or "Cookie tracking detection failed."
 
     return _score_cookie_result(result)
 
 
-def main():
+def main() -> None:
     print_browser_detection_header("Cookie Tracking Detection")
-    score, description = check_cookie_tracking()
+    result, error = _run_selenium_cookie_probe(DEFAULT_TIMEOUT)
+    if result is None:
+        score, description = 3, error or "Cookie tracking detection failed."
+    else:
+        score, description = _score_cookie_result(result)
     print_browser_detection_score_footer(score, description)
+    print(f"STATUS: {description}")
+    if result is not None:
+        print_cookie_deviation_report(result)
 
 
 if __name__ == "__main__":

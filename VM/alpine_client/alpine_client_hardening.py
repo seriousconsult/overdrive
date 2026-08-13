@@ -184,6 +184,19 @@ kill_matching_processes() {
 
 install_privacy_profile() {
   mkdir -p /etc/profile.d
+  cat > /etc/profile.d/98-overdrive-venv.sh <<'PROFILE'
+# Use the Overdrive client virtualenv for interactive detection work.
+if [ -z "${VIRTUAL_ENV:-}" ] && [ -d /root/virtual_env ]; then
+  if [ -r /root/virtual_env/bin/activate ]; then
+    . /root/virtual_env/bin/activate
+  elif [ -d /root/virtual_env/bin ]; then
+    export VIRTUAL_ENV=/root/virtual_env
+    export PATH="/root/virtual_env/bin:$PATH"
+  fi
+fi
+PROFILE
+  chmod 0644 /etc/profile.d/98-overdrive-venv.sh
+
   cat > /etc/profile.d/99-overdrive-privacy.sh <<'PROFILE'
 # Overdrive disposable client privacy defaults.
 umask 077
