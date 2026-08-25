@@ -5,9 +5,9 @@ Bootstrap a project-local Python virtual environment for Overdrive automation.
 - Creates ./virtual_env next to this script
 - Installs Python deps into the venv (requests, selenium, httpx, scapy, zeroconf)
 - Installs OS deps via apt (Ubuntu/Debian), dnf (Fedora/RHEL), or apk (Alpine) —
-  including curl/iproute/iptables/ping (distro package names vary; Debian uses
-  ``iputils-ping``), network diagnostics (nmap, dig, tcpdump), and a browser/driver
-  for Selenium
+  including curl/iproute/iptables/ping/WireGuard tools (distro package names vary;
+  Debian uses ``iputils-ping``), network diagnostics (nmap, dig, tcpdump), and a
+  browser/driver for Selenium
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
 - Drops into an interactive bash with venv activated (skipped with ``--non-interactive``)
 
@@ -53,9 +53,9 @@ DIG_PACKAGE_BY_MGR = {
 # Installed here — not by VM/alpine_client/package_assets.py.
 # Package names differ by distro (Debian has iputils-ping, not iputils).
 NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
-    "apt": ("curl", "iproute2", "iptables", "iputils-ping"),
-    "dnf": ("curl", "iproute", "iptables", "iputils"),
-    "apk": ("curl", "iproute2", "iptables", "iputils"),
+    "apt": ("curl", "iproute2", "iptables", "iputils-ping", "wireguard-tools"),
+    "dnf": ("curl", "iproute", "iptables", "iputils", "wireguard-tools"),
+    "apk": ("curl", "iproute2", "iptables", "iputils", "wireguard-tools"),
 }
 
 # Real, non-GUI runtime assets that make headless Chromium less skeletal on the
@@ -643,7 +643,7 @@ def install_system_deps(*, non_interactive: bool = False):
         )
         refresh_font_cache_if_available()
 
-    # 5) Core networking (lab client + hosts): curl, iproute, iptables, ping
+    # 5) Core networking (lab client + hosts): curl, iproute, iptables, ping, WireGuard tools
     net_pkgs = list(NET_BASE_PACKAGES_BY_MGR.get(mgr, NET_BASE_PACKAGES_BY_MGR["apk"]))
     net_needed = [pkg for pkg in net_pkgs if not package_installed(info, pkg)]
     # Also treat missing CLIs as needing install (busybox may shadow package checks).
@@ -654,6 +654,7 @@ def install_system_deps(*, non_interactive: bool = False):
         "ip": ip_pkg,
         "iptables": "iptables",
         "ping": ping_pkg,
+        "wg": "wireguard-tools",
     }
     for cmd, pkg in cli_to_pkg.items():
         if not have_cmd(cmd) and pkg not in net_needed:
