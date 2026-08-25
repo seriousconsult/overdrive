@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +54,11 @@ DETECTIONS_DIR = BASE_DIR / "detections"
 EXCLUDE_SCRIPT_NAMES = frozenset(
     {
         "run_detections.py",
+        "run_browser_detections.py",
+        "run_network_detections.py",
+        "run_router_detections.py",
+        "run_vpn_detections.py",
+        "insecure_vpn_tunnel_for_testing.py",
         "install.py",
         "setup_virtual_env.py",
         "verify_lab_from_host.py",
@@ -75,6 +81,13 @@ SKIP_SUBDIRS = frozenset(
 
 # Scripts that need sudo (run with elevated privileges; Scapy capture on Linux/WSL)
 SUDO_SCRIPTS = frozenset({"TCP_stack.py", "TTL.py", "NAT_OS.py", "DHCP.py", "client_mac_exposure.py"})
+
+CATEGORY_RUNNERS: tuple[tuple[str, str], ...] = (
+    ("vpn", "run_vpn_detections.py"),
+    ("browser", "run_browser_detections.py"),
+    ("network", "run_network_detections.py"),
+    ("router", "run_router_detections.py"),
+)
 
 
 def discover_detection_scripts() -> tuple[dict[str, list[str]], list[str]]:
@@ -595,16 +608,29 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
     return "".join(parts)
 
 
-def main():
-    start_time = time.time()
-    print("=" * 60)
-    print("OVERDRIVE DETECTION SUITE")
-    print("=" * 60)
-    print()
-
+def select_detection_folders(
+    folders: list[str] | None = None,
+) -> tuple[dict[str, list[str]], list[str], int]:
     scripts_map, folder_order = discover_detection_scripts()
+    if not folders:
+        return scripts_map, folder_order, 0
 
-    results: dict[str, list] = {k: [] for k in folder_order}
+    wanted = {folder.lower() for folder in folders}
+    unknown = sorted(wanted - {folder.lower() for folder in folder_order})
+    if unknown:
+        print(f"Unknown detection folder(s): {', '.join(unknown)}")
+        return {}, [], 2
+
+    folder_order = [folder for folder in folder_order if folder.lower() in wanted]
+    scripts_map = {folder: scripts_map.get(folder, []) for folder in folder_order}
+    return scripts_map, folder_order, 0
+
+
+def collect_detection_results(
+    scripts_map: dict[str, list[str]],
+    folder_order: list[str],
+) -> dict[str, list[tuple[str, str, str]]]:
+    results: dict[str, list[tuple[str, str, str]]] = {k: [] for k in folder_order}
 
     for folder in folder_order:
         script_names = scripts_map.get(folder, [])
@@ -653,6 +679,13 @@ def main():
                     print(f"    → {comment[:100]}")
                 results[folder].append((script_name, score, comment))
 
+    return results
+
+
+def print_results_summary(
+    results: dict[str, list[tuple[str, str, str]]],
+    folder_order: list[str],
+) -> None:
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
@@ -666,9 +699,29 @@ def main():
             tail = f" — {comment[:60]}…" if comment and len(comment) > 60 else (f" — {comment}" if comment else "")
             print(f"  {script_name}: {score}{tail}")
 
+
+def run_detection_suite(
+    *,
+    folders: list[str] | None = None,
+    report_name: str = "detection_results.html",
+    suite_title: str = "OVERDRIVE DETECTION SUITE",
+) -> int:
+    start_time = time.time()
+    print("=" * 60)
+    print(suite_title)
+    print("=" * 60)
+    print()
+
+    scripts_map, folder_order, rc = select_detection_folders(folders)
+    if rc != 0:
+        return rc
+
+    results = collect_detection_results(scripts_map, folder_order)
+    print_results_summary(results, folder_order)
+
     elapsed_time = time.time() - start_time
     html_content = generate_html_report(results, folder_order, elapsed_time)
-    html_path = BASE_DIR / "detection_results.html"
+    html_path = BASE_DIR / report_name
     html_path.write_text(html_content, encoding="utf-8")
 
     minutes, seconds = divmod(int(elapsed_time), 60)
@@ -676,7 +729,70 @@ def main():
     print("=" * 60)
     print(f"Total execution time: {minutes}m {seconds}s")
     print("=" * 60)
+    return 0
+
+
+def run_category_scripts() -> int:
+    start_time = time.time()
+    print("=" * 60)
+    print("OVERDRIVE DETECTION SUITE")
+    print("=" * 60)
+    print()
+
+    for category, script_name in CATEGORY_RUNNERS:
+        script_path = DETECTIONS_DIR / script_name
+        print(f"\n{'=' * 40}")
+        print(f"CATEGORY: {category.upper()}")
+        print(f"{'=' * 40}")
+        result = subprocess.run(
+            VENV_PYTHON + [str(script_path)],
+            cwd=str(BASE_DIR),
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"\n[!] {script_name} failed with exit code {result.returncode}")
+            return result.returncode
+
+    elapsed_time = time.time() - start_time
+    minutes, seconds = divmod(int(elapsed_time), 60)
+    print("\n" + "=" * 60)
+    print(f"All category detection scripts completed in {minutes}m {seconds}s")
+    print("=" * 60)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run all Overdrive detection category scripts.",
+    )
+    parser.add_argument(
+        "--folder",
+        action="append",
+        choices=["vpn", "browser", "network", "router"],
+        help=(
+            "Run one detection folder in-process instead of orchestrating all category "
+            "scripts. Used by the per-category wrappers; repeat to run multiple folders."
+        ),
+    )
+    parser.add_argument(
+        "--report-name",
+        default=None,
+        help="HTML report filename for --folder mode.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.folder:
+        folder_part = "_".join(args.folder)
+        report_name = args.report_name or f"{folder_part}_detection_results.html"
+        title = f"OVERDRIVE {' + '.join(f.upper() for f in args.folder)} DETECTION SUITE"
+        return run_detection_suite(
+            folders=args.folder,
+            report_name=report_name,
+            suite_title=title,
+        )
+
+    return run_category_scripts()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -34,6 +34,7 @@ from detections.common.common_dns import (
     KNOWN_PUBLIC_DNS,
     classify_resolver,
     is_mullvad_dot_ip,
+    mullvad_dot_whoami_pop,
     resolv_nameservers,
     reverse_dns,
 )
@@ -66,18 +67,25 @@ _HOSTING_DNS_HINTS = (
     "cloudflare-dns",  # anycast public is handled separately
 )
 
+_KNOWN_MULLVAD_DNS_POP_IPS = frozenset(
+    {
+        # Mullvad public encrypted DNS anycast PoPs commonly observed by leak tests.
+        "193.148.18.30",
+        "2a0d:5600:24:1382::2",
+    }
+)
 
-def _is_ipv6(value: str) -> bool:
+
+def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
-        return ipaddress.ip_address(value.split("%", 1)[0]).version == 6
+        return ipaddress.ip_address((value or "").split("%", 1)[0])
     except ValueError:
-        return ":" in value
+        return None
 
 
 def _ip_scope(value: str) -> str:
-    try:
-        addr = ipaddress.ip_address(value.split("%", 1)[0])
-    except ValueError:
+    addr = _parse_ip(value)
+    if addr is None:
         return "unknown"
     if addr.is_loopback:
         return "loopback"
@@ -145,6 +153,16 @@ def row_type(row: dict[str, Any]) -> str:
     return _pick(row, "type", "status", "leak", "privacy")
 
 
+def row_is_dns_resolver(row: dict[str, Any]) -> bool:
+    """True for bash.ws rows that describe DNS resolvers, not client IP/conclusion rows."""
+    typ = row_type(row).strip().lower()
+    if typ in {"ip", "conclusion"}:
+        return False
+    if typ:
+        return "dns" in typ or typ == "vpn"
+    return bool(row_ip(row))
+
+
 def row_is_vpn(row: dict[str, Any]) -> bool:
     value = row.get("type")
     if isinstance(value, str) and value.lower() == "vpn":
@@ -158,24 +176,68 @@ def row_is_vpn(row: dict[str, Any]) -> bool:
     return False
 
 
-def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _row_text(row: dict[str, Any]) -> str:
+    return json.dumps(row, sort_keys=True, default=str).lower()
+
+
+def row_is_protected(
+    row: dict[str, Any],
+    *,
+    mullvad_pop_reference: str | None = None,
+) -> bool:
+    """True when bash.ws or local heuristics identify a protected/Mullvad row."""
+    if row_is_vpn(row):
+        return True
+    ip = row_ip(row)
+    if not ip:
+        return False
+    bucket = _classify_resolver_bucket(
+        ip,
+        bashws_vpn=False,
+        mullvad_pop_reference=mullvad_pop_reference,
+        row=row,
+    )
+    return bucket == "vpn"
+
+
+def summarize_rows(
+    rows: list[dict[str, Any]],
+    *,
+    mullvad_pop_reference: str | None = None,
+) -> dict[str, Any]:
     unique_by_ip: dict[str, dict[str, Any]] = {}
     unknown_rows: list[dict[str, Any]] = []
+    metadata_rows: list[dict[str, Any]] = []
     for row in rows:
+        if not row_is_dns_resolver(row):
+            metadata_rows.append(row)
+            continue
         ip = row_ip(row)
-        if ip:
+        if ip and _parse_ip(ip) is not None:
             unique_by_ip.setdefault(ip, row)
         else:
             unknown_rows.append(row)
 
     unique_rows = list(unique_by_ip.values()) + unknown_rows
-    non_vpn_rows = [row for row in unique_rows if not row_is_vpn(row)]
-    vpn_rows = [row for row in unique_rows if row_is_vpn(row)]
+    non_vpn_rows = [
+        row for row in unique_rows
+        if not row_is_protected(row, mullvad_pop_reference=mullvad_pop_reference)
+    ]
+    vpn_rows = [
+        row for row in unique_rows
+        if row_is_protected(row, mullvad_pop_reference=mullvad_pop_reference)
+    ]
     non_vpn_ipv4 = [
-        row for row in non_vpn_rows if row_ip(row) and not _is_ipv6(row_ip(row))
+        row for row in non_vpn_rows
+        if row_ip(row)
+        and (addr := _parse_ip(row_ip(row))) is not None
+        and addr.version == 4
     ]
     non_vpn_ipv6 = [
-        row for row in non_vpn_rows if row_ip(row) and _is_ipv6(row_ip(row))
+        row for row in non_vpn_rows
+        if row_ip(row)
+        and (addr := _parse_ip(row_ip(row))) is not None
+        and addr.version == 6
     ]
 
     return {
@@ -185,27 +247,41 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total_servers": len(unique_rows),
         "vpn_servers": len(vpn_rows),
         "non_vpn_servers": len(non_vpn_rows),
+        "metadata_rows": metadata_rows,
+        "metadata_row_count": len(metadata_rows),
         "has_ipv4_leak": bool(non_vpn_ipv4),
         "has_ipv6_leak": bool(non_vpn_ipv6),
         "non_vpn_ipv4_count": len(non_vpn_ipv4),
         "non_vpn_ipv6_count": len(non_vpn_ipv6),
+        "mullvad_pop_reference": mullvad_pop_reference,
     }
 
 
-def _classify_resolver_bucket(ip: str, *, bashws_vpn: bool = False) -> str:
+def _classify_resolver_bucket(
+    ip: str,
+    *,
+    bashws_vpn: bool = False,
+    mullvad_pop_reference: str | None = None,
+    row: dict[str, Any] | None = None,
+) -> str:
     """Return one of: lan, public, vpn, hosting, isp_public, unknown."""
     if bashws_vpn:
         return "vpn"
     base = (ip or "").split("%", 1)[0].strip()
     if not base:
         return "unknown"
-    try:
-        addr = ipaddress.ip_address(base)
-    except ValueError:
+    addr = _parse_ip(base)
+    if addr is None:
         return "unknown"
     if addr.is_loopback or addr.is_private or addr.is_link_local:
         return "lan"
     if is_mullvad_dot_ip(base):
+        return "vpn"
+    if base in _KNOWN_MULLVAD_DNS_POP_IPS:
+        return "vpn"
+    if mullvad_pop_reference and base == mullvad_pop_reference:
+        return "vpn"
+    if row is not None and "mullvad" in _row_text(row):
         return "vpn"
     if base in _PUBLIC_RESOLVER_IPS or base in {
         "1.1.1.1",
@@ -232,27 +308,71 @@ def _classify_resolver_bucket(ip: str, *, bashws_vpn: bool = False) -> str:
     return "unknown"
 
 
-def score_dns_authenticity(summary: dict[str, Any]) -> tuple[int, str]:
+def score_dns_authenticity(
+    summary: dict[str, Any],
+    *,
+    mullvad_pop_reference: str | None = None,
+) -> tuple[int, str]:
     """Score whether DNS paths look like a normal home setup (low) vs VPN/DC (high)."""
     rows = list(summary.get("unique_rows") or [])
+    mullvad_pop_reference = mullvad_pop_reference or summary.get("mullvad_pop_reference")
     local = resolv_nameservers()
-    buckets: list[str] = []
+    local_buckets: list[str] = []
+    row_buckets: list[str] = []
     for ns in local:
-        buckets.append(_classify_resolver_bucket(ns))
+        local_buckets.append(
+            _classify_resolver_bucket(
+                ns,
+                mullvad_pop_reference=mullvad_pop_reference,
+            )
+        )
     for row in rows:
         ip = row_ip(row)
         if not ip:
             continue
-        buckets.append(_classify_resolver_bucket(ip, bashws_vpn=row_is_vpn(row)))
+        row_buckets.append(
+            _classify_resolver_bucket(
+                ip,
+                bashws_vpn=row_is_vpn(row),
+                mullvad_pop_reference=mullvad_pop_reference,
+                row=row,
+            )
+        )
 
+    buckets = local_buckets + row_buckets
     if not buckets and int(summary.get("total_servers") or 0) == 0:
         return 3, "Inconclusive: no local nameservers and bash.ws returned no resolver rows."
     if not buckets:
         return 3, "Inconclusive: could not classify any DNS resolvers."
 
     counts = {k: buckets.count(k) for k in ("lan", "isp_public", "public", "vpn", "hosting", "unknown")}
+    row_counts = {k: row_buckets.count(k) for k in counts}
 
     if counts["vpn"] or counts["hosting"]:
+        row_non_vpn = (
+            row_counts["isp_public"]
+            + row_counts["public"]
+            + row_counts["hosting"]
+            + row_counts["unknown"]
+        )
+        if row_counts["vpn"] and not row_non_vpn:
+            if counts["lan"]:
+                return (
+                    4,
+                    "Privacy-VPN DNS resolvers observed behind a local LAN forwarder; "
+                    "expected for router-to-Mullvad DNS.",
+                )
+            return (
+                4,
+                f"Privacy-VPN DNS resolvers observed ({counts['vpn']}); "
+                "uncommon for a vanilla home PC.",
+            )
+        if row_counts["vpn"] and row_non_vpn:
+            return (
+                4,
+                f"Mixed Mullvad/VPN DNS and non-Mullvad DNS resolver rows observed "
+                f"(vpn={row_counts['vpn']}, other={row_non_vpn}); possible DNS leak.",
+            )
         if counts["vpn"] and counts["hosting"]:
             return (
                 5,
@@ -288,9 +408,13 @@ def score_dns_authenticity(summary: dict[str, Any]) -> tuple[int, str]:
     return 3, "DNS resolver mix inconclusive for residential vs non-home classification."
 
 
-def score_dns_leak(summary: dict[str, Any]) -> tuple[int, str]:
+def score_dns_leak(
+    summary: dict[str, Any],
+    *,
+    mullvad_pop_reference: str | None = None,
+) -> tuple[int, str]:
     """Backward-compatible name — residential authenticity scoring."""
-    return score_dns_authenticity(summary)
+    return score_dns_authenticity(summary, mullvad_pop_reference=mullvad_pop_reference)
 
 
 def print_local_dns_context() -> None:
@@ -303,8 +427,42 @@ def print_local_dns_context() -> None:
         print(f"  [{idx}] {ns} - {classify_resolver(ns)}")
 
 
-def print_bashws_rows(rows: list[dict[str, Any]]) -> None:
-    print("\nbash.ws observed DNS resolvers:")
+def _row_bucket_label(
+    row: dict[str, Any],
+    *,
+    mullvad_pop_reference: str | None = None,
+) -> str:
+    ip = row_ip(row)
+    bucket = _classify_resolver_bucket(
+        ip,
+        bashws_vpn=row_is_vpn(row),
+        mullvad_pop_reference=mullvad_pop_reference,
+        row=row,
+    )
+    if bucket == "vpn":
+        base = ip.split("%", 1)[0]
+        if is_mullvad_dot_ip(base):
+            return "Mullvad anycast/protected"
+        if mullvad_pop_reference and base == mullvad_pop_reference:
+            return "Mullvad DoT PoP/protected"
+        return "VPN/protected"
+    if bucket == "isp_public":
+        return "ISP/public leak"
+    if bucket == "lan":
+        return "LAN/local"
+    if bucket == "public":
+        return "public DNS"
+    if bucket == "hosting":
+        return "hosting/datacenter"
+    return "unknown"
+
+
+def print_bashws_dns_rows(
+    rows: list[dict[str, Any]],
+    *,
+    mullvad_pop_reference: str | None = None,
+) -> None:
+    print("\nbash.ws DNS resolver rows (COUNTED for DNS leak verdict):")
     if not rows:
         print("  (no resolver rows returned)")
         return
@@ -312,9 +470,10 @@ def print_bashws_rows(rows: list[dict[str, Any]]) -> None:
     for idx, row in enumerate(rows, start=1):
         ip = row_ip(row) or "(no ip field)"
         typ = row_type(row) or ("vpn" if row_is_vpn(row) else "non-vpn/unknown")
-        family = "IPv6" if ip != "(no ip field)" and _is_ipv6(ip) else "IPv4"
+        addr = _parse_ip(ip) if ip != "(no ip field)" else None
+        family = f"IPv{addr.version}" if addr is not None else "unknown-family"
         scope = _ip_scope(ip) if ip != "(no ip field)" else "unknown"
-        ptr = _reverse_dns(ip) if ip != "(no ip field)" and scope == "public" else None
+        ptr = _reverse_dns(ip) if addr is not None and scope == "public" else None
         provider = _pick(
             row,
             "provider",
@@ -328,8 +487,16 @@ def print_bashws_rows(rows: list[dict[str, Any]]) -> None:
         )
         country = _pick(row, "country", "country_name", "countryCode", "country_code")
         city = _pick(row, "city", "region", "region_name")
-        leak_state = "VPN/protected" if row_is_vpn(row) else "NON-VPN/LEAK"
-        print(f"  [{idx}] {ip}  {family}  {leak_state}  type={typ or '-'}  scope={scope}")
+        leak_state = (
+            "VPN/protected"
+            if row_is_protected(row, mullvad_pop_reference=mullvad_pop_reference)
+            else "NON-VPN/LEAK"
+        )
+        label = _row_bucket_label(row, mullvad_pop_reference=mullvad_pop_reference)
+        print(
+            f"  [{idx}] {ip}  {family}  {leak_state}  "
+            f"type={typ or '-'}  scope={scope}  class={label}"
+        )
         if provider or country or city or ptr:
             bits = []
             if provider:
@@ -381,13 +548,81 @@ def print_bashws_rows(rows: list[dict[str, Any]]) -> None:
             print(f"      extra: {rendered}")
 
 
+def print_bashws_metadata_rows(rows: list[dict[str, Any]]) -> None:
+    print("\nbash.ws non-DNS metadata rows (NOT counted as DNS leaks):")
+    if not rows:
+        print("  (none)")
+        return
+
+    for idx, row in enumerate(rows, start=1):
+        ip = row_ip(row) or "(no ip field)"
+        typ = row_type(row) or "unknown"
+        scope = _ip_scope(ip) if _parse_ip(ip) is not None else "unknown"
+        ptr = _reverse_dns(ip) if _parse_ip(ip) is not None and scope == "public" else None
+        note = "metadata row"
+        if typ.strip().lower() == "ip":
+            note = (
+                "your public web/HTTP egress IP, not a DNS resolver. "
+                "With Mullvad DNS-only this may still be your ISP."
+            )
+        elif typ.strip().lower() == "conclusion":
+            note = "bash.ws conclusion text, not a resolver."
+        print(f"  [{idx}] {ip}  type={typ}  scope={scope}")
+        print(f"      note: {note}")
+        if ptr:
+            print(f"      ptr={ptr}")
+
+
 def print_summary(summary: dict[str, Any]) -> None:
     print("\nDNS leak summary:")
     print(f"  Total unique resolver rows: {summary['total_servers']}")
+    if summary.get("metadata_row_count"):
+        print(
+            "  Ignored non-resolver rows:  "
+            f"{summary['metadata_row_count']} (client IP/conclusion metadata)"
+        )
     print(f"  VPN/protected rows:        {summary['vpn_servers']}")
     print(f"  Non-VPN rows:              {summary['non_vpn_servers']}")
     print(f"  Non-VPN IPv4 rows:         {summary['non_vpn_ipv4_count']}")
     print(f"  Non-VPN IPv6 rows:         {summary['non_vpn_ipv6_count']}")
+
+
+def print_plain_english_verdict(summary: dict[str, Any]) -> None:
+    total = int(summary.get("total_servers") or 0)
+    protected = int(summary.get("vpn_servers") or 0)
+    non_vpn = int(summary.get("non_vpn_servers") or 0)
+    metadata_count = int(summary.get("metadata_row_count") or 0)
+
+    print("\nPlain-English DNS result:")
+    if total == 0:
+        print("  RESULT: INCONCLUSIVE - bash.ws did not return DNS resolver rows.")
+    elif protected and not non_vpn:
+        print("  RESULT: OK - DNS resolver rows are Mullvad/protected.")
+        print(
+            "  Meaning: client -> local router DNS is fine; router -> upstream DNS "
+            "appears to be Mullvad."
+        )
+    elif protected and non_vpn:
+        print("  RESULT: POSSIBLE DNS LEAK - both Mullvad and non-Mullvad DNS resolvers appeared.")
+        print("  Meaning: some DNS queries may be bypassing the Mullvad path.")
+    else:
+        print("  RESULT: NOT MULLVAD - DNS resolver rows are not identified as Mullvad/protected.")
+
+    if metadata_count:
+        print(
+            "  Note: ignored metadata rows can include your public web IP. "
+            "That is not a DNS resolver and is normal when using DNS-only instead of a VPN tunnel."
+        )
+
+
+def print_manual_verification_hints() -> None:
+    print("\nManual verification:")
+    print("  dig +short whoami.akamai.net")
+    print("  dig +short @192.168.50.1 whoami.akamai.net")
+    print(
+        "  Expected in this lab: both commands return the same Mullvad DNS PoP "
+        "(for example 193.148.18.30), not a Verizon/FiOS resolver."
+    )
 
 
 def trigger_dns_queries(session: requests.Session, session_id: str) -> None:
@@ -420,6 +655,15 @@ def run_dns_leak_test() -> int:
     print(f"Trigger queries: {TRIGGER_COUNT} unique subdomains under {API_DOMAIN}")
 
     print_local_dns_context()
+    mullvad_pop_reference, mullvad_pop_detail = mullvad_dot_whoami_pop(timeout=3.0)
+    if mullvad_pop_reference:
+        print(
+            "\nMullvad DoT reference:"
+            f" whoami.akamai.net via 194.242.2.2 -> {mullvad_pop_reference}"
+            f" ({mullvad_pop_detail})"
+        )
+    else:
+        print(f"\nMullvad DoT reference unavailable: {mullvad_pop_detail}")
 
     session = requests.Session()
     trigger_dns_queries(session, session_id)
@@ -448,12 +692,19 @@ def run_dns_leak_test() -> int:
         if raw_payload is not None:
             print(f"Raw response sample: {_compact(raw_payload, 800)}")
 
-    summary = summarize_rows(rows)
-    print_bashws_rows(summary["unique_rows"])
+    summary = summarize_rows(rows, mullvad_pop_reference=mullvad_pop_reference)
+    print_bashws_dns_rows(summary["unique_rows"], mullvad_pop_reference=mullvad_pop_reference)
+    print_bashws_metadata_rows(summary["metadata_rows"])
     print_summary(summary)
+    print_plain_english_verdict(summary)
+    print_manual_verification_hints()
 
-    score, message = score_dns_leak(summary)
+    score, message = score_dns_leak(summary, mullvad_pop_reference=mullvad_pop_reference)
     print("-" * 40)
+    print(
+        "Detection heuristic score: higher means less like plain home/ISP DNS; "
+        "Mullvad DNS-only is expected to score higher and is not a leak by itself."
+    )
     print(f"SCORE: {score}")
     print(f"STATUS: {message}")
     print("-" * 40)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IPv6 Leak Detection
+IPv6 Exposure / Leak Detection
 
 Many VPNs tunnel only IPv4. If the host still has working IPv6 to the Internet,
 traffic or DNS can bypass the VPN. This script reports both:
@@ -14,7 +14,7 @@ the address is public Internet-routable. This probe separates ULA/private IPv6
 from public global unicast IPv6.
 
 Score (1-5):
-  5 = Strong signs of IPv6 taking a different exit than IPv4 (likely leak)
+  5 = Strong signs of IPv6 taking a different exit than IPv4 (likely leak if VPN is active)
   4 = IPv6 egress works; could not fully validate or only soft mismatch
   3 = Inconclusive (partial failures, broken route, odd local vs egress)
   2 = No working public IPv6 egress / low IPv6 leak surface
@@ -479,6 +479,16 @@ def print_report(report: dict[str, Any]) -> None:
             print(f"    {line}")
     else:
         print(f"  Default route(s): none {routes.get('default_error') or ''}".rstrip())
+    usable_defaults = routes.get("usable_default_routes") or []
+    if usable_defaults:
+        print("  Usable Internet default route(s):")
+        for line in usable_defaults:
+            print(f"    {line}")
+    elif defaults:
+        print(
+            "  Usable Internet default route(s): none "
+            "(loopback/default-placeholder routes are not Internet IPv6 egress)"
+        )
     route_get = routes.get("route_get")
     if route_get:
         print(f"  Route to {routes.get('route_get_target')}: {route_get}")
@@ -528,20 +538,65 @@ def print_report(report: dict[str, Any]) -> None:
                 print(f"  {label} {ip}: metadata unavailable ({meta.get('message') or 'request failed'})")
 
 
+def print_plain_english_result(report: dict[str, Any], score: int, description: str) -> None:
+    ipv6 = report.get("ipv6")
+    public_local = report.get("public_local_addresses") or []
+    routes = report.get("routes") or {}
+    usable_defaults = routes.get("usable_default_routes") or []
+    dns_v6 = report.get("dns_ipv6_nameservers") or []
+    sysctls = report.get("sysctls") or {}
+    ipv6_disabled = (
+        sysctls.get("all.disable_ipv6") == "1"
+        or sysctls.get("default.disable_ipv6") == "1"
+    )
+
+    print("\n[Plain-English IPv6 result]")
+    if not ipv6 and not public_local and not usable_defaults:
+        print("  RESULT: OK - no working public IPv6 path was found.")
+        print(
+            "  Meaning: this host does not appear able to reach the Internet over IPv6, "
+            "so IPv6 is not bypassing anything."
+        )
+    elif ipv6:
+        print(f"  RESULT: IPv6 EGRESS PRESENT - public IPv6 traffic works as {ipv6}.")
+        print(
+            "  Meaning: if you were using an IPv4-only VPN, this could bypass that VPN. "
+            "If you are not using a VPN, this simply means IPv6 Internet access is enabled."
+        )
+    else:
+        print("  RESULT: INCONCLUSIVE - IPv6 is partly configured but public egress did not work.")
+        print("  Meaning: IPv6 may be disabled, blocked, or locally present without Internet reachability.")
+
+    if ipv6_disabled:
+        print("  Evidence: kernel IPv6 is disabled by sysctl.")
+    if not dns_v6:
+        print("  Evidence: no IPv6 DNS nameservers are configured in /etc/resolv.conf.")
+    if score == 2:
+        print("  Score meaning: low IPv6 exposure surface, not a leak finding.")
+    else:
+        print(f"  Score meaning: {description}")
+    print("  Note: without a VPN, treat this as an IPv6 availability/exposure check.")
+
+
 def check_ipv6_leak() -> tuple[int, str]:
     return score_ipv6_report(build_ipv6_report())
 
 
 def main() -> int:
     print("=" * 60)
-    print("IPv6 Leak Detection")
+    print("IPv6 Exposure / Leak Detection")
     print("=" * 60)
 
     report = build_ipv6_report()
     print_report(report)
     score, description = score_ipv6_report(report)
+    print_plain_english_result(report, score, description)
 
     print("\n" + "-" * 40)
+    print(
+        "Detection heuristic score: higher matters most when a VPN is active; "
+        "without a VPN this is an IPv6 exposure/availability score."
+    )
     print(f"SCORE: {score}")
     print(f"STATUS: {description}")
     print("-" * 40)
