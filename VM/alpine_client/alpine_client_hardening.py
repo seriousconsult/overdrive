@@ -310,6 +310,7 @@ scrub_tracking_identifiers() {
 }
 
 clean_private_artifacts() {
+  find /root /tmp /var/tmp -maxdepth 4 -name 'install.py' -type f -delete 2>/dev/null || true
   rm -f /etc/ssh/ssh_host_* /etc/dropbear/dropbear_* 2>/dev/null || true
   rm -f /root/.ash_history /root/.wget-hsts /root/.python_history /root/.lesshst /root/.bash_history 2>/dev/null || true
   find /tmp /var/tmp -mindepth 1 -maxdepth 1 -name 'overdrive-*' -exec rm -rf {} + 2>/dev/null || true

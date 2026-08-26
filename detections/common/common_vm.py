@@ -62,6 +62,7 @@ __all__ = [
     "ensure_vm_ready_to_start",
     "close_medium_best_effort",
     "wait_after_disk_operation",
+    "ensure_kvm_accessible",
     "try_unregistervm_delete",
     "vbox_closemedium_disk_delete_best_effort",
     "vm_is_registered",
@@ -95,6 +96,53 @@ OSBOXES_ARCHIVE_NAME = "ubuntu_osboxes_2404.7z"
 OSBOXES_LOGIN_USER = "osboxes"
 OSBOXES_LOGIN_PASSWORD_HINT = "configured by OSBOXES_LOGIN_PASSWORD in VM/.env"
 CLIENT_VDI_NAME = "client_browser.vdi"
+
+
+@functools.lru_cache(maxsize=1)
+def ensure_kvm_accessible() -> bool:
+    """Make ``/dev/kvm`` usable so libguestfs/qemu use KVM instead of slow TCG emulation."""
+    if platform.system().lower() != "linux":
+        return False
+
+    kvm = Path("/dev/kvm")
+    if not kvm.exists():
+        print("[overdrive] /dev/kvm not present; libguestfs will use slow emulation.")
+        return False
+    if os.access(kvm, os.R_OK | os.W_OK):
+        return True
+
+    if not shutil.which("sudo"):
+        print("[overdrive] /dev/kvm not accessible and sudo is missing; libguestfs may be slow.")
+        return False
+
+    print("[overdrive] Opening /dev/kvm for fast libguestfs (sudo chmod 0666 /dev/kvm)...")
+    for cmd in (
+        ["sudo", "-n", "chmod", "0666", str(kvm)],
+        ["sudo", "chmod", "0666", str(kvm)],
+    ):
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[overdrive] sudo chmod /dev/kvm failed: {exc}")
+            continue
+        if proc.returncode == 0 and os.access(kvm, os.R_OK | os.W_OK):
+            print("[overdrive] /dev/kvm is now accessible (KVM acceleration enabled).")
+            return True
+        if proc.returncode != 0 and proc.stderr:
+            err = proc.stderr.strip()
+            if err and cmd[1] != "-n":
+                print(f"[overdrive] sudo chmod /dev/kvm: {err}")
+
+    if os.access(kvm, os.R_OK | os.W_OK):
+        return True
+    print("[overdrive] /dev/kvm still not accessible; libguestfs will run without KVM (slow).")
+    return False
 
 
 @functools.lru_cache(maxsize=1)

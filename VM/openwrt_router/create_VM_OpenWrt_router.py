@@ -45,6 +45,7 @@ from detections.common.common_vm import (
     ROUTER_SERIAL_UNIX_SOCKET_PATH,
     SERIAL_BAUD,
     SERIAL_TCP_HOST,
+    ensure_kvm_accessible,
     find_vboxmanage,
     get_active_bridged_interface,
     get_linux_distro_id,
@@ -231,6 +232,7 @@ def fetch_openwrt_stubby_apks(*, cache_dir: Path | None = None) -> Path:
 
 def _libguestfs_env() -> dict[str, str]:
     """Environment for guestfish/virt-customize (WSL-friendly, same as Alpine priming)."""
+    ensure_kvm_accessible()
     import glob
     import re
     import tarfile

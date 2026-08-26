@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 from typing import Any
 
@@ -37,6 +38,194 @@ __all__ = [
 
 DEFAULT_TIMEOUT = 8
 DEFAULT_REPORT_WIDTH = 60
+
+_WINDOW_WIDTH = 1920
+_WINDOW_HEIGHT = 1080
+
+
+def _chrome_full_version(binary: str | None) -> str:
+    version = "120.0.0.0"
+    if binary:
+        try:
+            out = subprocess.check_output(
+                [binary, "--version"],
+                text=True,
+                timeout=8,
+                stderr=subprocess.DEVNULL,
+            )
+            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", out) or re.search(r"(\d+\.\d+\.\d+)", out)
+            if match:
+                version = match.group(1)
+                if version.count(".") == 2:
+                    version += ".0"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return version
+
+
+def _desktop_chrome_user_agent(binary: str | None) -> str:
+    """Desktop Windows Chrome UA (typical home profile; no HeadlessChrome brand)."""
+    version = _chrome_full_version(binary)
+    return (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{version} Safari/537.36"
+    )
+
+
+def _chrome_ua_metadata(version: str) -> dict[str, Any]:
+    major = version.split(".", 1)[0]
+    brands = [
+        {"brand": "Not:A-Brand", "version": "99"},
+        {"brand": "Google Chrome", "version": major},
+        {"brand": "Chromium", "version": major},
+    ]
+    full_list = [
+        {"brand": "Not:A-Brand", "version": "10.0.0.0"},
+        {"brand": "Google Chrome", "version": version},
+        {"brand": "Chromium", "version": version},
+    ]
+    return {
+        "brands": brands,
+        "fullVersionList": full_list,
+        "fullVersion": version,
+        "platform": "Windows",
+        "platformVersion": "15.0.0",
+        "architecture": "x86",
+        "model": "",
+        "mobile": False,
+        "bitness": "64",
+        "wow64": False,
+        "formFactors": ["Desktop"],
+    }
+
+
+def _headless_stealth_js(user_agent: str, version: str) -> str:
+    """Patch JS surfaces so probes look like desktop Windows Chrome."""
+    ua = json.dumps(user_agent)
+    version_js = json.dumps(version)
+    major = json.dumps(version.split(".", 1)[0])
+    return f"""
+(() => {{
+  const ua = {ua};
+  const fullVersion = {version_js};
+  const major = {major};
+  const hide = (obj, key, value) => {{
+    try {{
+      Object.defineProperty(obj, key, {{
+        get: () => value,
+        configurable: true,
+      }});
+    }} catch (_err) {{}}
+  }};
+  hide(navigator, "webdriver", undefined);
+  hide(navigator, "userAgent", ua);
+  hide(navigator, "appVersion", ua.replace("Mozilla/", ""));
+  hide(navigator, "vendor", "Google Inc.");
+  hide(navigator, "languages", Object.freeze(["en-US", "en"]));
+  hide(navigator, "language", "en-US");
+  hide(navigator, "platform", "Win32");
+  hide(navigator, "hardwareConcurrency", 8);
+  hide(navigator, "deviceMemory", 8);
+  hide(navigator, "maxTouchPoints", 0);
+  const brands = Object.freeze([
+    Object.freeze({{ brand: "Not:A-Brand", version: "99" }}),
+    Object.freeze({{ brand: "Google Chrome", version: major }}),
+    Object.freeze({{ brand: "Chromium", version: major }}),
+  ]);
+  const fullVersionList = Object.freeze([
+    Object.freeze({{ brand: "Not:A-Brand", version: "10.0.0.0" }}),
+    Object.freeze({{ brand: "Google Chrome", version: fullVersion }}),
+    Object.freeze({{ brand: "Chromium", version: fullVersion }}),
+  ]);
+  const highEntropy = {{
+    architecture: "x86",
+    bitness: "64",
+    brands,
+    formFactors: Object.freeze(["Desktop"]),
+    fullVersionList,
+    mobile: false,
+    model: "",
+    platform: "Windows",
+    platformVersion: "15.0.0",
+    uaFullVersion: fullVersion,
+    wow64: false,
+  }};
+  const uaData = {{
+    brands,
+    mobile: false,
+    platform: "Windows",
+    getHighEntropyValues: (hints) => {{
+      const names = Array.isArray(hints) ? hints : [];
+      const out = {{}};
+      for (const name of names) {{
+        if (Object.prototype.hasOwnProperty.call(highEntropy, name)) {{
+          out[name] = highEntropy[name];
+        }}
+      }}
+      return Promise.resolve(out);
+    }},
+    toJSON: () => ({{ brands, mobile: false, platform: "Windows" }}),
+  }};
+  hide(navigator, "userAgentData", uaData);
+  if (!window.chrome) {{
+    hide(window, "chrome", {{ runtime: {{}} }});
+  }}
+  const plugin = {{
+    name: "PDF Viewer",
+    description: "Portable Document Format",
+    filename: "internal-pdf-viewer",
+    length: 1,
+    item: () => null,
+    namedItem: () => null,
+  }};
+  const plugins = {{
+    0: plugin,
+    length: 1,
+    item: (i) => (i === 0 ? plugin : null),
+    namedItem: (name) => (name === plugin.name ? plugin : null),
+    refresh: () => {{}},
+  }};
+  hide(navigator, "plugins", plugins);
+  hide(navigator, "mimeTypes", {{ length: 1, 0: {{ type: "application/pdf" }} }});
+  hide(window, "outerWidth", {_WINDOW_WIDTH});
+  hide(window, "outerHeight", {_WINDOW_HEIGHT});
+  hide(window, "innerWidth", {_WINDOW_WIDTH});
+  hide(window, "innerHeight", {_WINDOW_HEIGHT});
+  hide(screen, "width", {_WINDOW_WIDTH});
+  hide(screen, "height", {_WINDOW_HEIGHT});
+  hide(screen, "availWidth", {_WINDOW_WIDTH});
+  hide(screen, "availHeight", {_WINDOW_HEIGHT});
+  hide(screen, "colorDepth", 24);
+  hide(screen, "pixelDepth", 24);
+}})();
+"""
+
+
+def _apply_headless_stealth(driver: webdriver.Remote, user_agent: str, version: str) -> None:
+    """Hide HeadlessChrome/webdriver so in-page probes look like desktop Windows Chrome."""
+    script = _headless_stealth_js(user_agent, version)
+    metadata = _chrome_ua_metadata(version)
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": script},
+        )
+        driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {
+                "userAgent": user_agent,
+                "platform": "Windows",
+                "acceptLanguage": "en-US,en;q=0.9",
+                "userAgentMetadata": metadata,
+            },
+        )
+        driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-US"})
+    except Exception:
+        pass
+    try:
+        driver.execute_script(script)
+    except Exception:
+        pass
 
 
 def _first_existing_path(*candidates: str) -> str | None:
@@ -77,26 +266,36 @@ def _chromedriver_binary() -> str | None:
 def build_driver() -> webdriver.Chrome:
     """Build a Chrome/Chromium WebDriver with common headless options for browser detection."""
     opts = Options()
+    chromium = _chromium_binary()
+    version = _chrome_full_version(chromium)
+    user_agent = _desktop_chrome_user_agent(chromium)
     opts.add_argument("--headless=new")
     opts.add_argument("--enable-webgl")
     opts.add_argument("--ignore-gpu-blocklist")
     opts.add_argument("--use-gl=swiftshader")
     opts.add_argument("--enable-unsafe-swiftshader")
+    opts.add_argument("--disable-gpu-sandbox")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1280,800")
+    opts.add_argument("--autoplay-policy=no-user-gesture-required")
+    opts.add_argument("--disable-features=AudioServiceOutOfProcess")
+    opts.add_argument("--lang=en-US")
+    opts.add_argument(f"--window-size={_WINDOW_WIDTH},{_WINDOW_HEIGHT}")
+    opts.add_argument(f"--user-agent={user_agent}")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("--disable-blink-features=AutomationControlled")
 
-    chromium = _chromium_binary()
     if chromium:
         opts.binary_location = chromium
 
     driver_path = _chromedriver_binary()
     if driver_path:
-        return webdriver.Chrome(service=ChromeService(executable_path=driver_path), options=opts)
-    return webdriver.Chrome(options=opts)
+        driver = webdriver.Chrome(service=ChromeService(executable_path=driver_path), options=opts)
+    else:
+        driver = webdriver.Chrome(options=opts)
+    _apply_headless_stealth(driver, user_agent, version)
+    return driver
 
 
 def build_driver_with_fallback() -> webdriver.Remote:

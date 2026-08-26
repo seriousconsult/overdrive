@@ -27,6 +27,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_runner import file_contains_token
+from detections.common.common_vm import ensure_kvm_accessible
 
 
 RUN_DIR = Path(__file__).resolve().parent
@@ -652,6 +653,7 @@ def main() -> int:
         help="Deprecated no-op; the client VM and serial pipe are always required.",
     )
     args = parser.parse_args()
+    ensure_kvm_accessible()
     if args.tmux:
         tmux_rc = launch_tmux_layout(sys.argv[1:])
         if tmux_rc is not None:

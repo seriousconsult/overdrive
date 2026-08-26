@@ -42,8 +42,15 @@ from detections.common.common_browser import (
 )
 
 
+FONT_PROBE_TIMEOUT = max(DEFAULT_TIMEOUT, 25)
+
 FONT_PROBE_JS = r"""
-const done = arguments[arguments.length - 1];
+const callback = arguments[arguments.length - 1];
+function finish(value) {
+  if (typeof callback === "function") {
+    callback(value);
+  }
+}
 
 const CANDIDATE_FONTS = [
   "Arial",
@@ -375,11 +382,11 @@ async function detectFonts() {
       outerWidth: window.outerWidth || null,
       outerHeight: window.outerHeight || null,
     };
-    done({ ok: true, fontProbe, profile });
+    finish({ ok: true, fontProbe, profile });
   } catch (e) {
-    done({ ok: false, error: String(e && e.message ? e.message : e) });
+    finish({ ok: false, error: String(e && e.message ? e.message : e) });
   }
-})();
+})().then(undefined, (e) => finish({ ok: false, error: String(e && e.message ? e.message : e) }));
 """
 
 POPULAR_WINDOWS_BASELINE_NAME = "popular Windows residential desktop"
@@ -601,7 +608,7 @@ def _score_font_result(result: dict[str, Any]) -> tuple[int, str]:
     return 1, f"Strongly home-like: stable, platform-plausible font surface; {font_summary}."
 
 
-def _run_selenium_font_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
+def _run_selenium_font_probe(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
     """Run the in-browser font probe and return raw result data."""
     try:
         import selenium  # noqa: F401
@@ -620,7 +627,7 @@ def _run_selenium_font_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str, 
         driver.get("about:blank")
         result = driver.execute_async_script(FONT_PROBE_JS)
         if not isinstance(result, dict):
-            return None, f"Font probe returned unexpected data: {result!r}"
+            return None, "Font enumeration returned unexpected data."
         return result, None
     except Exception as exc:
         return None, f"Browser font probe failed: {type(exc).__name__}: {exc}"
@@ -632,7 +639,7 @@ def _run_selenium_font_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str, 
             pass
 
 
-def _try_selenium_font_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
+def _try_selenium_font_check(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[int, str]:
     """Run an in-browser font probe and return ``(score, description)``."""
     result, error = _run_selenium_font_probe(timeout)
     if result is None:
@@ -642,7 +649,7 @@ def _try_selenium_font_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
     return _score_font_result(result)
 
 
-def check_font_enumeration(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
+def check_font_enumeration(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[int, str]:
     """Check whether browser font enumeration looks home-like."""
     return _try_selenium_font_check(timeout)
 
@@ -1203,7 +1210,7 @@ def print_baseline_comparison(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check and compare browser font enumeration behavior.")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
+    parser.add_argument("--timeout", type=int, default=FONT_PROBE_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
     parser.add_argument(
         "--write-baseline",
         type=Path,

@@ -45,10 +45,16 @@ from detections.common.common_browser import (
 
 DRIVER_START_TIMEOUT = 45
 PROGRESS_INTERVAL = 5
+AUDIO_PROBE_TIMEOUT = max(DEFAULT_TIMEOUT, 25)
 
 
 AUDIO_PROBE_JS = r"""
-const done = arguments[arguments.length - 1];
+const callback = arguments[arguments.length - 1];
+function finish(value) {
+  if (typeof callback === "function") {
+    callback(value);
+  }
+}
 
 function toHex(buffer) {
   const view = new Uint8Array(buffer);
@@ -384,7 +390,7 @@ async function collectMediaDeviceSurface() {
     const mediaDevices = await collectMediaDeviceSurface();
 
     if (!AudioContextClass && !OfflineAudioContextClass) {
-      done({
+      finish({
         ok: true,
         apis,
         profile,
@@ -491,7 +497,7 @@ async function collectMediaDeviceSurface() {
     });
     const hash = availableGraphs.map((graph) => graph.summary && graph.summary.hash).filter(Boolean).join("|") || null;
 
-    done({
+    finish({
       ok: true,
       apis,
       profile,
@@ -507,9 +513,9 @@ async function collectMediaDeviceSurface() {
       reason: availableGraphs.length ? "Audio probe completed" : "Audio APIs exist but no render graph completed",
     });
   } catch (e) {
-    done({ ok: false, error: String(e && e.message ? e.message : e) });
+    finish({ ok: false, error: String(e && e.message ? e.message : e) });
   }
-})();
+})().then(undefined, (e) => finish({ ok: false, error: String(e && e.message ? e.message : e) }));
 """
 
 
@@ -1092,7 +1098,7 @@ def _start_driver_with_progress(timeout: int) -> tuple[Any | None, str | None]:
         return None, f"Unable to start Selenium WebDriver: {type(value).__name__}: {value}"
 
 
-def _run_selenium_audio_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
+def _run_selenium_audio_probe(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
     """Run the in-browser audio probe and return raw result data."""
     server = None
     driver = None
@@ -1106,6 +1112,7 @@ def _run_selenium_audio_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str,
         print("[audio] Starting local audio probe server...", flush=True)
         server, url = start_audio_probe_server()
         print(f"[audio] Loading probe page: {url}", flush=True)
+        driver.set_page_load_timeout(timeout)
         driver.set_script_timeout(timeout)
         driver.get(url)
         print("[audio] Running browser audio probe JavaScript...", flush=True)
@@ -1137,7 +1144,7 @@ def _run_selenium_audio_probe(timeout: int = DEFAULT_TIMEOUT) -> tuple[dict[str,
     return result, None
 
 
-def check_audio_fingerprint(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
+def check_audio_fingerprint(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[int, str]:
     """
     Check for audio context fingerprinting.
     Returns (score, description)
@@ -1151,7 +1158,7 @@ def check_audio_fingerprint(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Detect and compare browser audio fingerprint behavior.")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
+    parser.add_argument("--timeout", type=int, default=AUDIO_PROBE_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
     parser.add_argument(
         "--write-baseline",
         type=Path,

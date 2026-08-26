@@ -88,7 +88,6 @@ ALPINE_BROWSER_SUPPORT_PACKAGES: tuple[str, ...] = (
     "alsa-lib",
     "alsa-plugins",
     "alsa-utils",
-    "pulseaudio-libs",
 )
 
 APT_LOCK_TIMEOUT_SECONDS = 180

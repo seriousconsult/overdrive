@@ -51,9 +51,9 @@ lab-like to discovery probes.
 Detection Python libs (Scapy, Selenium, …), WireGuard tools, and network
 diagnostics (nmap, dig, tcpdump, Chromium) are NOT installed by the base
 package script (bootstrap does install ``iptables`` so ``client-firewall`` can
-harden without them). Priming copies ``install.py`` and runs it inside the guest
+harden without them). Priming copies ``install.py`` temporarily, runs it inside the guest
 so deps land in ``/root/virtual_env`` (plus remaining OS packages via that
-script's apk path).
+script's apk path), then deletes ``install.py`` from the guest image.
 """
 
 from __future__ import annotations
@@ -90,6 +90,7 @@ from detections.common.common_vm import (
     get_system_paths,
     OPENWRT_LAN_INTNET_NAME,
     close_medium_best_effort,
+    ensure_kvm_accessible,
     remove_existing_vm,
     resolve_vbox_settings_path,
     run_vboxmanage,
@@ -115,6 +116,15 @@ from VM.alpine_client.pipeline import (
     BuildStep,
     run_alpine_client_pipeline,
 )
+from VM.alpine_client.guest_prime import (
+    ClientPrimeAssets,
+    copy_client_payloads_and_service_assets,
+    configure_client_guest_services_and_boot,
+    harden_and_clean_client_guest_image,
+    install_client_detection_libraries,
+    prepare_client_prime_assets,
+    prime_client_identity_and_base_packages,
+)
 from VM.vm_config import (
     CLIENT_NIC_OUI,
     OPENWRT_LAN_DNS,
@@ -132,90 +142,12 @@ CLIENT_GUEST_HOSTNAME = "client"
 CLIENT_VDI_SIZE_MIB = 8192
 CLIENT_MEMORY_MIB = 2048
 CLIENT_ROOT_DEVICE = "/dev/sda"
-CLIENT_WINDOWS_FONT_DIR_NAME = "overdrive-windows-fonts"
 
 ALPINE_SERIAL_TCP_PORT = 2325
 
 ALPINE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
 ALPINE_IMAGE_NAME = "nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
 
-WINDOWS_BROWSER_FONT_FILENAMES = (
-    # Core web fonts.
-    "arial.ttf",
-    "arialbd.ttf",
-    "arialbi.ttf",
-    "ariali.ttf",
-    "ariblk.ttf",
-    "comic.ttf",
-    "comicbd.ttf",
-    "comici.ttf",
-    "comicz.ttf",
-    "cour.ttf",
-    "courbd.ttf",
-    "courbi.ttf",
-    "couri.ttf",
-    "georgia.ttf",
-    "georgiab.ttf",
-    "georgiai.ttf",
-    "georgiaz.ttf",
-    "impact.ttf",
-    "times.ttf",
-    "timesbd.ttf",
-    "timesbi.ttf",
-    "timesi.ttf",
-    "trebuc.ttf",
-    "trebucbd.ttf",
-    "trebucbi.ttf",
-    "trebucit.ttf",
-    "verdana.ttf",
-    "verdanab.ttf",
-    "verdanai.ttf",
-    "verdanaz.ttf",
-    "webdings.ttf",
-    # Windows UI and Office-era families commonly exposed in desktop Chrome.
-    "calibri.ttf",
-    "calibrib.ttf",
-    "calibrii.ttf",
-    "calibriz.ttf",
-    "calibril.ttf",
-    "calibrili.ttf",
-    "cambria.ttc",
-    "cambriab.ttf",
-    "cambriai.ttf",
-    "cambriaz.ttf",
-    "candara.ttf",
-    "candarab.ttf",
-    "candarai.ttf",
-    "candaraz.ttf",
-    "candaral.ttf",
-    "candarali.ttf",
-    "consola.ttf",
-    "consolab.ttf",
-    "consolai.ttf",
-    "consolaz.ttf",
-    "lucon.ttf",
-    "l_10646.ttf",
-    "micross.ttf",
-    "pala.ttf",
-    "palab.ttf",
-    "palabi.ttf",
-    "palai.ttf",
-    "segoeui.ttf",
-    "segoeuib.ttf",
-    "segoeuii.ttf",
-    "segoeuiz.ttf",
-    "segoeuil.ttf",
-    "seguili.ttf",
-    "segoeuisl.ttf",
-    "seguisli.ttf",
-    "seguisb.ttf",
-    "seguisbi.ttf",
-    "seguiemj.ttf",
-    "seguisym.ttf",
-    "tahoma.ttf",
-    "tahomabd.ttf",
-    "wingding.ttf",
-)
 
 
 def _find_existing_fixed_appliance_dir() -> str | None:
@@ -324,20 +256,8 @@ def download_alpine_image(url: str, dest_path: str) -> None:
     print("Download complete.")
 
 
-def require_vdi_prime_tools(*, skip_prime: bool) -> str:
-    if skip_prime:
-        raise RuntimeError("VDI priming is required for client network and serial features.")
-    vc = shutil.which("virt-customize")
-    if not vc:
-        raise RuntimeError(
-            "virt-customize is required to prime the Alpine VDI.\n"
-            "Install it in WSL with:\n"
-            "  sudo apt install -y libguestfs-tools"
-        )
-    return vc
-
-
 def _libguestfs_env() -> dict[str, str]:
+    ensure_kvm_accessible()
     virt_env = os.environ.copy()
     if is_wsl_local():
         virt_env.setdefault("LIBGUESTFS_BACKEND", "direct")
@@ -873,400 +793,6 @@ def connect_serial_console(vboxmanage: str, endpoint: str, *, force_interactive:
     return True
 
 
-CLIENT_IDENTITY_COMMAND = (
-    "mkdir -p /usr/local/sbin /root && "
-    f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname"
-)
-
-INSTALL_DETECTION_LIBRARIES_COMMAND = "cd /root && python3 /root/install.py --non-interactive"
-
-REMOTE_BOOT_SERVICE_CLEANUP_COMMAND = (
-    "for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main "
-    "tiny-cloud-final cloud-init cloud-final; do "
-    "rm -f \"/etc/init.d/$svc\" \"/etc/conf.d/$svc\" 2>/dev/null || true; "
-    "for level in default boot sysinit shutdown nonetwork; do "
-    "rc-update del \"$svc\" \"$level\" >/dev/null 2>&1 || true; "
-    "rm -f \"/etc/runlevels/$level/$svc\" 2>/dev/null || true; "
-    "done; "
-    "done && "
-    "rm -f /etc/tiny-cloud.conf 2>/dev/null || true"
-)
-
-CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND = (
-    "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
-    "mv /etc/init.d/lab-net-up.init /etc/init.d/lab-net-up && "
-    "mv /etc/init.d/client-firewall.init /etc/init.d/client-firewall && "
-    "mv /etc/init.d/overdrive-ip-timezone.init /etc/init.d/overdrive-ip-timezone && "
-    "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
-    "chmod 0755 /usr/local/sbin/lab-net-up && "
-    "chmod 0755 /usr/local/sbin/client-firewall && "
-    "chmod 0755 /usr/local/sbin/overdrive-ip-timezone && "
-    "chmod 0755 /etc/init.d/lab-net-up && "
-    "chmod 0755 /etc/init.d/client-firewall && "
-    "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
-    "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
-    f"{REMOTE_BOOT_SERVICE_CLEANUP_COMMAND} && "
-    "rc-update add lab-net-up default && "
-    "rc-update add overdrive-ip-timezone default && "
-    "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
-    "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
-    # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox
-    # serial noise cancels TIMEOUT so the menu waits forever for Enter.
-    # Boot the MENU DEFAULT / first LABEL directly + TOTALTIMEOUT.
-    "for f in /boot/extlinux.conf /boot/syslinux/syslinux.cfg /boot/syslinux.cfg "
-    "/media/*/boot/syslinux/syslinux.cfg; do "
-    "[ -f \"$f\" ] || continue; "
-    "DEF=$(awk 'BEGIN{l=\"\"} "
-    "tolower($1)==\"label\"{l=$2; next} "
-    "tolower($1)==\"menu\" && tolower($2)==\"default\"{print l; exit}' \"$f\"); "
-    "[ -n \"$DEF\" ] || DEF=$(awk 'tolower($1)==\"label\"{print $2; exit}' \"$f\"); "
-    "tmp=$(mktemp); "
-    "awk 'BEGIN{ignore=0} "
-    "tolower($1)==\"serial\"{next} "
-    "tolower($1)==\"timeout\"{next} "
-    "tolower($1)==\"totaltimeout\"{next} "
-    "tolower($1)==\"prompt\"{next} "
-    "tolower($1)==\"default\"{next} "
-    "tolower($1)==\"noescape\"{next} "
-    "tolower($1)==\"ui\"{next} "
-    "tolower($1)==\"menu\" && (tolower($2)==\"title\"||tolower($2)==\"hidden\"||tolower($2)==\"autoboot\"||tolower($2)==\"separator\"){next} "
-    "{print}' \"$f\" > \"$tmp\"; "
-    "{ "
-    "echo 'SERIAL 0 115200'; "
-    "echo 'PROMPT 0'; "
-    "echo 'NOESCAPE 1'; "
-    "echo 'TIMEOUT 5'; "
-    "echo 'TOTALTIMEOUT 20'; "
-    "[ -n \"$DEF\" ] && echo \"DEFAULT $DEF\"; "
-    "echo; "
-    "cat \"$tmp\"; "
-    "} > \"$f.new\"; "
-    "mv \"$f.new\" \"$f\"; rm -f \"$tmp\"; "
-    "grep -q 'console=ttyS0' \"$f\" || "
-    "sed -i -E 's/^([[:space:]]*(APPEND|append)[[:space:]].*)$/\\1 console=ttyS0,115200/' \"$f\"; "
-    "echo \"[overdrive] unattended bootloader: $f default=${DEF:-none}\"; "
-    "done"
-)
-
-ASSERT_NO_REMOTE_BOOT_HOOKS_COMMAND = (
-    "! find /etc/init.d /etc/runlevels /etc/conf.d "
-    "\\( -name 'sshd' -o -name 'ssh' -o -name 'dropbear' "
-    "-o -name 'tiny-cloud-*' -o -name 'cloud-init' -o -name 'cloud-final' \\) "
-    "-print -quit | grep -q . && "
-    "[ ! -e /etc/ssh ] && "
-    "[ ! -e /etc/tiny-cloud.conf ]"
-)
-
-CLEAN_CLIENT_PRIME_HELPERS_COMMAND = (
-    "rm -f "
-    "/root/install-client-packages.sh /root/harden-client.sh "
-    "/tmp/install-client-packages.sh /tmp/harden-client.sh "
-    "/var/tmp/install-client-packages.sh /var/tmp/harden-client.sh"
-)
-
-
-def _host_windows_font_dirs() -> list[Path]:
-    candidates = [
-        Path("/mnt/c/Windows/Fonts"),
-        Path("/mnt/c/windows/Fonts"),
-    ]
-    windir = os.environ.get("WINDIR") or os.environ.get("windir")
-    if windir:
-        candidates.append(Path(windir) / "Fonts")
-    return candidates
-
-
-def prepare_windows_browser_fonts(work_root: Path) -> Path | None:
-    """Copy locally available Windows browser fonts into a staging directory."""
-    source_dir = next((path for path in _host_windows_font_dirs() if path.is_dir()), None)
-    if source_dir is None:
-        print("[overdrive] Windows font import skipped: no host Windows Fonts directory found.")
-        return None
-
-    available = {
-        path.name.lower(): path
-        for path in source_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in {".ttf", ".ttc", ".otf"}
-    }
-    selected = [available[name] for name in WINDOWS_BROWSER_FONT_FILENAMES if name in available]
-    if not selected:
-        print(f"[overdrive] Windows font import skipped: no allowlisted fonts found in {source_dir}.")
-        return None
-
-    font_dir = work_root / CLIENT_WINDOWS_FONT_DIR_NAME
-    if font_dir.exists():
-        shutil.rmtree(font_dir)
-    font_dir.mkdir(parents=True)
-    for source in selected:
-        shutil.copy2(source, font_dir / source.name)
-
-    missing = len(WINDOWS_BROWSER_FONT_FILENAMES) - len(selected)
-    print(
-        "[overdrive] Staged Windows browser fonts: "
-        f"{len(selected)} copied from {source_dir}"
-        + (f", {missing} allowlisted files missing." if missing else ".")
-    )
-    return font_dir
-
-
-@dataclass(frozen=True)
-class ClientPrimeAssets:
-    interfaces_host: Path
-    troubleshoot_host: Path
-    lab_net_up_host: Path
-    lab_net_up_init_host: Path
-    client_firewall_host: Path
-    client_firewall_init_host: Path
-    hardening_script_host: Path
-    package_script_host: Path
-    timezone_script_host: Path
-    timezone_init_host: Path
-    root_password_file: Path
-    local_host_payload_host: Path
-    detections_payload_host: Path
-    setup_venv_host: Path
-    windows_fonts_host: Path | None
-
-
-def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
-    """Write host-side files that later virt-customize stages copy into the guest."""
-    interfaces_host = work_root / "interfaces"
-    interfaces_host.write_text(LAB_INTERFACES_ALPINE, encoding="utf-8", newline="\n")
-
-    troubleshoot_host = work_root / "lab_net_troubleshoot.sh"
-    troubleshoot_host.write_text(LAB_NET_TROUBLESHOOT_SCRIPT, encoding="utf-8", newline="\n")
-
-    lab_net_up_host = work_root / "lab-net-up"
-    lab_net_up_host.write_text(LAB_NET_UP_SCRIPT, encoding="utf-8", newline="\n")
-
-    lab_net_up_init_host = work_root / "lab-net-up.init"
-    lab_net_up_init_host.write_text(LAB_NET_UP_INIT_ALPINE, encoding="utf-8", newline="\n")
-
-    client_firewall_host = work_root / "client-firewall"
-    client_firewall_host.write_text(CLIENT_FIREWALL_SCRIPT, encoding="utf-8", newline="\n")
-
-    client_firewall_init_host = work_root / "client-firewall.init"
-    client_firewall_init_host.write_text(CLIENT_FIREWALL_INIT_ALPINE, encoding="utf-8", newline="\n")
-
-    hardening_script_host = work_root / "harden-client.sh"
-    hardening_script_host.write_text(CLIENT_HARDENING_SCRIPT, encoding="utf-8", newline="\n")
-    hardening_script_host.chmod(0o700)
-
-    package_script_host = work_root / "install-client-packages.sh"
-    package_script_host.write_text(
-        client_package_install_script(),
-        encoding="utf-8",
-        newline="\n",
-    )
-    package_script_host.chmod(0o700)
-
-    timezone_script_host = work_root / "overdrive-ip-timezone"
-    timezone_script_host.write_text(CLIENT_IP_TIMEZONE_SCRIPT, encoding="utf-8", newline="\n")
-
-    timezone_init_host = work_root / "overdrive-ip-timezone.init"
-    timezone_init_host.write_text(CLIENT_IP_TIMEZONE_INIT_ALPINE, encoding="utf-8", newline="\n")
-
-    root_password_file = work_root / "alpine-root-password"
-    root_password_file.write_text(alpine_client_root_password(), encoding="utf-8", newline="\n")
-    root_password_file.chmod(0o600)
-
-    local_host_payload_host = work_root / "local_host"
-    if local_host_payload_host.exists():
-        shutil.rmtree(local_host_payload_host)
-    detections_payload_host = work_root / "detections"
-    if detections_payload_host.exists():
-        shutil.rmtree(detections_payload_host)
-    shutil.copytree(
-        Path(REPO_ROOT) / "local_host",
-        local_host_payload_host,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-    )
-    shutil.copytree(
-        Path(REPO_ROOT) / "detections",
-        detections_payload_host,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-    )
-    setup_venv_host = work_root / "install.py"
-    shutil.copy2(Path(REPO_ROOT) / "install.py", setup_venv_host)
-    windows_fonts_host = prepare_windows_browser_fonts(work_root)
-
-    return ClientPrimeAssets(
-        interfaces_host=interfaces_host,
-        troubleshoot_host=troubleshoot_host,
-        lab_net_up_host=lab_net_up_host,
-        lab_net_up_init_host=lab_net_up_init_host,
-        client_firewall_host=client_firewall_host,
-        client_firewall_init_host=client_firewall_init_host,
-        hardening_script_host=hardening_script_host,
-        package_script_host=package_script_host,
-        timezone_script_host=timezone_script_host,
-        timezone_init_host=timezone_init_host,
-        root_password_file=root_password_file,
-        local_host_payload_host=local_host_payload_host,
-        detections_payload_host=detections_payload_host,
-        setup_venv_host=setup_venv_host,
-        windows_fonts_host=windows_fonts_host,
-    )
-
-
-def run_client_virt_customize(
-    vdi_linux: str,
-    args: list[str],
-    *,
-    skip_prime: bool,
-    network: bool = False,
-) -> None:
-    vc = require_vdi_prime_tools(skip_prime=skip_prime)
-    virt_env = _libguestfs_env()
-    command = [vc, "-a", vdi_linux]
-    if network:
-        command.append("--network")
-    command.extend(args)
-    subprocess.run(command, check=True, env=virt_env)
-
-
-def prime_client_identity_and_base_packages(
-    vdi_linux: str,
-    assets: ClientPrimeAssets,
-    *,
-    skip_prime: bool,
-) -> None:
-    """Set guest identity/password and install only bootstrap OS packages."""
-    run_client_virt_customize(
-        vdi_linux,
-        [
-            "--hostname",
-            CLIENT_GUEST_HOSTNAME,
-            "--root-password",
-            f"file:{assets.root_password_file}",
-            "--run-command",
-            CLIENT_IDENTITY_COMMAND,
-            "--run",
-            str(assets.package_script_host),
-        ],
-        skip_prime=skip_prime,
-        network=True,
-    )
-
-
-def copy_client_payloads_and_service_assets(
-    vdi_linux: str,
-    assets: ClientPrimeAssets,
-    *,
-    skip_prime: bool,
-) -> None:
-    """Copy local payloads and service scripts into the guest image."""
-    customize_args = [
-        "--copy-in",
-        f"{assets.interfaces_host}:/etc/network",
-        "--copy-in",
-        f"{assets.troubleshoot_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{assets.lab_net_up_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{assets.lab_net_up_init_host}:/etc/init.d",
-        "--copy-in",
-        f"{assets.client_firewall_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{assets.client_firewall_init_host}:/etc/init.d",
-        "--copy-in",
-        f"{assets.timezone_script_host}:/usr/local/sbin",
-        "--copy-in",
-        f"{assets.timezone_init_host}:/etc/init.d",
-        "--copy-in",
-        f"{assets.local_host_payload_host}:/root",
-        "--copy-in",
-        f"{assets.detections_payload_host}:/root",
-        "--copy-in",
-        f"{assets.setup_venv_host}:/root",
-    ]
-    if assets.windows_fonts_host is not None:
-        customize_args.extend(
-            [
-                "--run-command",
-                "mkdir -p /usr/share/fonts",
-                "--copy-in",
-                f"{assets.windows_fonts_host}:/usr/share/fonts",
-            ]
-        )
-    run_client_virt_customize(
-        vdi_linux,
-        customize_args,
-        skip_prime=skip_prime,
-    )
-
-
-def install_client_detection_libraries(
-    vdi_linux: str,
-    *,
-    skip_prime: bool,
-) -> None:
-    """Run repo install.py inside the guest; installs network/detection libraries."""
-    run_client_virt_customize(
-        vdi_linux,
-        [
-            "--run-command",
-            INSTALL_DETECTION_LIBRARIES_COMMAND,
-        ],
-        skip_prime=skip_prime,
-        network=True,
-    )
-
-
-def configure_client_guest_services_and_boot(
-    vdi_linux: str,
-    *,
-    skip_prime: bool,
-) -> None:
-    """Wire copied scripts into OpenRC and make the bootloader serial/unattended."""
-    run_client_virt_customize(
-        vdi_linux,
-        [
-            "--run-command",
-            CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND,
-        ],
-        skip_prime=skip_prime,
-    )
-
-
-def harden_and_clean_client_guest_image(
-    vdi_linux: str,
-    assets: ClientPrimeAssets,
-    *,
-    skip_prime: bool,
-) -> None:
-    """Apply privacy hardening and prove unwanted remote-login hooks are absent."""
-    run_client_virt_customize(
-        vdi_linux,
-        [
-            "--run",
-            str(assets.hardening_script_host),
-            "--run-command",
-            ASSERT_NO_REMOTE_BOOT_HOOKS_COMMAND,
-            "--run-command",
-            CLEAN_CLIENT_PRIME_HELPERS_COMMAND,
-        ],
-        skip_prime=skip_prime,
-    )
-
-
-def prime_client_vdi_for_intnet_lab(
-    vdi_linux: str,
-    work_root: Path,
-    *,
-    skip_prime: bool,
-) -> bool:
-    """Compatibility wrapper for older callers; setup_client_vm uses discrete steps."""
-    print("Injecting custom configuration and packages into Alpine image...")
-    assets = prepare_client_prime_assets(work_root)
-    prime_client_identity_and_base_packages(vdi_linux, assets, skip_prime=skip_prime)
-    copy_client_payloads_and_service_assets(vdi_linux, assets, skip_prime=skip_prime)
-    install_client_detection_libraries(vdi_linux, skip_prime=skip_prime)
-    configure_client_guest_services_and_boot(vdi_linux, skip_prime=skip_prime)
-    harden_and_clean_client_guest_image(vdi_linux, assets, skip_prime=skip_prime)
-    return True
-
-
 def nudge_alpine_boot_menu(*, rounds: int = 8, interval_s: float = 1.0) -> None:
     """Send Enter a few times on COM1 in case the boot menu is still waiting.
 
@@ -1428,6 +954,7 @@ def setup_client_vm(
     def install_guest_detection_libraries() -> None:
         install_client_detection_libraries(
             vdi_wsl,
+            require_prime_assets(),
             skip_prime=options.skip_vdi_prime,
         )
 
