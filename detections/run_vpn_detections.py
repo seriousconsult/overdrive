@@ -124,8 +124,8 @@ def print_comparison(
     print("VPN DETECTION COMPARISON: WITHOUT TEST TUNNEL vs WITH TEST TUNNEL")
     print("=" * 80)
     print(
-        "Plain meaning: the insecure test tunnel should mostly affect local tunnel signs "
-        "(interface, MTU, WireGuard-ish ports). It does not change your public internet exit."
+        "Plain meaning: the insecure test artifact should mostly affect local tunnel signs "
+        "(wg-named interface, MTU, WireGuard-ish UDP port). It does not change your public internet exit."
     )
     print()
     print(f"{'Detection':<28} {'Without':<9} {'With':<7} {'Change':<8} Meaning")
@@ -146,7 +146,7 @@ def print_comparison(
     print("How to read this quickly:")
     print("  - Changes in tunnel_interface.py and MTU.py are the main expected wins.")
     print("  - ASN.py, DNS.py, and egress-like checks may stay the same by design.")
-    print("  - If nothing changes, the local WireGuard helper may not have started correctly.")
+    print("  - If nothing changes, the insecure local test helper may not have started correctly.")
     print("=" * 80)
 
 
@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         "vpn_detection_results_without_tunnel.html",
     )
 
-    print("\nStep 2: start insecure local WireGuard test tunnel.")
+    print("\nStep 2: start insecure local VPN-like test artifact.")
     rc, out = tunnel_command("up")
     if out:
         print(out)

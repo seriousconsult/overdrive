@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
-"""Create a local WireGuard test tunnel for detection calibration.
+"""Create an intentionally insecure local VPN-like test tunnel.
 
-This is a lab helper, not a product VPN and not a remote-exit security tool.
-It creates a real local WireGuard peer pair so VPN detections can be compared
-with the tunnel up versus down:
+Default mode is synthetic and kernel-safe:
 
-  - client namespace: wg-overdrive, 10.77.0.2/24, MTU 1420
-  - peer namespace:   wg-od-peer, 10.77.0.1/24, MTU 1420
-  - outer transport:  veth pair on 169.254.250.0/30, UDP 51820/51821
+  - creates a local interface named ``wg-overdrive`` with MTU 1420
+  - assigns 10.77.0.2/24 to it
+  - starts a tiny UDP echo responder on port 51820
 
-The default route is not changed. Internet traffic is not sent through this
-tunnel. The point is to expose typical WireGuard artifacts to local detections:
-wg interface name, WireGuard peer state, UDP listener, and reduced tunnel MTU.
+This is not a product VPN, does not encrypt traffic, and does not change the
+default route. Its purpose is detection calibration: run detections with this
+test artifact down, then up, and compare which local VPN signals change.
+
+There is an opt-in ``--real-wireguard`` mode for systems where the WireGuard
+kernel module is known to be safe. Do not use that mode on the Alpine client if
+it triggers kernel soft-lockups.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import socket
 import shutil
+import signal
+import socket
 import subprocess
 import sys
+import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,18 +34,12 @@ from pathlib import Path
 DEFAULT_CLIENT_IFACE = "wg-overdrive"
 DEFAULT_PEER_IFACE = "wg-od-peer"
 DEFAULT_NETNS = "overdrive-wg"
-DEFAULT_VETH_HOST = "odwg-host"
 DEFAULT_VETH_PEER = "odwg-peer"
-DEFAULT_HOST_OUTER = "169.254.250.1/30"
-DEFAULT_PEER_OUTER = "169.254.250.2/30"
-DEFAULT_PEER_ENDPOINT = "169.254.250.2"
 DEFAULT_CLIENT_ADDR = "10.77.0.2/24"
-DEFAULT_PEER_ADDR = "10.77.0.1/24"
-DEFAULT_PEER_TUNNEL_IP = "10.77.0.1"
-DEFAULT_CLIENT_PORT = 51821
-DEFAULT_PEER_PORT = 51820
 DEFAULT_MTU = 1420
+DEFAULT_UDP_PORT = 51820
 STATE_DIR = Path("/tmp/overdrive-insecure-vpn-tunnel")
+PID_FILE = STATE_DIR / "udp_responder.pid"
 
 
 @dataclass(frozen=True)
@@ -49,17 +47,11 @@ class LabConfig:
     client_iface: str
     peer_iface: str
     netns: str
-    veth_host: str
     veth_peer: str
-    host_outer: str
-    peer_outer: str
-    peer_endpoint: str
     client_addr: str
-    peer_addr: str
-    peer_tunnel_ip: str
-    client_port: int
-    peer_port: int
     mtu: int
+    udp_port: int
+    real_wireguard: bool
 
 
 def run(
@@ -68,6 +60,7 @@ def run(
     check: bool = True,
     capture: bool = False,
     input_text: str | None = None,
+    timeout: float = 15.0,
 ) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
         cmd,
@@ -75,6 +68,7 @@ def run(
         capture_output=capture,
         text=True,
         check=False,
+        timeout=timeout,
     )
     if check and proc.returncode != 0:
         rendered = " ".join(cmd)
@@ -95,19 +89,122 @@ def require_root() -> None:
         )
 
 
-def require_tools() -> None:
-    missing = [tool for tool in ("ip", "wg") if shutil.which(tool) is None]
+def require_tools(*, real_wireguard: bool) -> None:
+    tools = ["ip"]
+    if real_wireguard:
+        tools.append("wg")
+    missing = [tool for tool in tools if shutil.which(tool) is None]
     if missing:
+        extra = " and wireguard-tools" if real_wireguard else ""
         raise RuntimeError(
-            "missing required tool(s): "
-            + ", ".join(missing)
-            + ". Install iproute2 and wireguard-tools in the client VM."
+            f"missing required tool(s): {', '.join(missing)}. Install iproute2{extra}."
         )
 
 
-def maybe_load_wireguard_module() -> None:
-    if shutil.which("modprobe"):
-        run(["modprobe", "wireguard"], check=False)
+def link_exists(name: str, *, netns: str | None = None) -> bool:
+    cmd = ["ip"]
+    if netns:
+        cmd += ["netns", "exec", netns]
+    cmd += ["link", "show", "dev", name]
+    return run(cmd, check=False, capture=True).returncode == 0
+
+
+def netns_exists(name: str) -> bool:
+    names = output(["ip", "netns", "list"], check=False).splitlines()
+    return any(line.split()[0] == name for line in names if line.strip())
+
+
+def cleanup(cfg: LabConfig) -> None:
+    stop_udp_responder()
+    if link_exists(cfg.client_iface):
+        run(["ip", "link", "del", "dev", cfg.client_iface], check=False)
+    if link_exists(cfg.veth_peer):
+        run(["ip", "link", "del", "dev", cfg.veth_peer], check=False)
+    if netns_exists(cfg.netns):
+        run(["ip", "netns", "del", cfg.netns], check=False)
+
+
+def setup_synthetic(cfg: LabConfig) -> None:
+    require_root()
+    require_tools(real_wireguard=False)
+    cleanup(cfg)
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    # Prefer veth because it is commonly available without loading a special
+    # dummy module. The interface name is intentionally wg-* for detection tests.
+    run(
+        [
+            "ip",
+            "link",
+            "add",
+            cfg.client_iface,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            cfg.veth_peer,
+        ]
+    )
+    run(["ip", "addr", "add", cfg.client_addr, "dev", cfg.client_iface])
+    run(["ip", "link", "set", "dev", cfg.client_iface, "mtu", str(cfg.mtu), "up"])
+    run(["ip", "link", "set", "dev", cfg.veth_peer, "mtu", str(cfg.mtu), "up"])
+    start_udp_responder(cfg.udp_port)
+
+
+def start_udp_responder(port: int) -> None:
+    stop_udp_responder()
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    code = textwrap.dedent(
+        f"""
+        import os
+        import signal
+        import socket
+        import sys
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", {port}))
+
+        def stop(_signum, _frame):
+            sock.close()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        while True:
+            data, addr = sock.recvfrom(2048)
+            sock.sendto(data or b"overdrive", addr)
+        """
+    ).strip()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+    time.sleep(0.2)
+    if proc.poll() is not None:
+        raise RuntimeError(f"UDP responder on port {port} exited immediately")
+
+
+def stop_udp_responder() -> None:
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.2)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        pass
+    try:
+        PID_FILE.unlink()
+    except OSError:
+        pass
 
 
 def wg_keypair(label: str) -> tuple[Path, str]:
@@ -123,77 +220,16 @@ def wg_keypair(label: str) -> tuple[Path, str]:
     return private_path, public
 
 
-def netns_exists(name: str) -> bool:
-    names = output(["ip", "netns", "list"], check=False).splitlines()
-    return any(line.split()[0] == name for line in names if line.strip())
-
-
-def link_exists(name: str, *, netns: str | None = None) -> bool:
-    cmd = ["ip"]
-    if netns:
-        cmd += ["netns", "exec", netns]
-    cmd += ["link", "show", "dev", name]
-    return run(cmd, check=False, capture=True).returncode == 0
-
-
-def cleanup(cfg: LabConfig) -> None:
-    if link_exists(cfg.client_iface):
-        run(["ip", "link", "del", "dev", cfg.client_iface], check=False)
-    if link_exists(cfg.veth_host):
-        run(["ip", "link", "del", "dev", cfg.veth_host], check=False)
-    if netns_exists(cfg.netns):
-        run(["ip", "netns", "del", cfg.netns], check=False)
-
-
-def setup(cfg: LabConfig) -> None:
+def setup_real_wireguard(cfg: LabConfig) -> None:
     require_root()
-    require_tools()
-    maybe_load_wireguard_module()
-
+    require_tools(real_wireguard=True)
+    if shutil.which("modprobe"):
+        run(["modprobe", "wireguard"], check=False)
     cleanup(cfg)
     STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    client_key, client_pub = wg_keypair("client")
-    peer_key, peer_pub = wg_keypair("peer")
-
-    run(["ip", "netns", "add", cfg.netns])
-    run(["ip", "link", "add", cfg.veth_host, "type", "veth", "peer", "name", cfg.veth_peer])
-    run(["ip", "link", "set", cfg.veth_peer, "netns", cfg.netns])
-    run(["ip", "addr", "add", cfg.host_outer, "dev", cfg.veth_host])
-    run(["ip", "link", "set", "dev", cfg.veth_host, "up"])
-    run(["ip", "netns", "exec", cfg.netns, "ip", "link", "set", "dev", "lo", "up"])
-    run(
-        [
-            "ip",
-            "netns",
-            "exec",
-            cfg.netns,
-            "ip",
-            "addr",
-            "add",
-            cfg.peer_outer,
-            "dev",
-            cfg.veth_peer,
-        ]
-    )
-    run(["ip", "netns", "exec", cfg.netns, "ip", "link", "set", "dev", cfg.veth_peer, "up"])
-
+    client_key, _client_pub = wg_keypair("client")
     run(["ip", "link", "add", cfg.client_iface, "type", "wireguard"])
-    run(
-        [
-            "ip",
-            "netns",
-            "exec",
-            cfg.netns,
-            "ip",
-            "link",
-            "add",
-            cfg.peer_iface,
-            "type",
-            "wireguard",
-        ]
-    )
-
     run(
         [
             "wg",
@@ -202,116 +238,49 @@ def setup(cfg: LabConfig) -> None:
             "private-key",
             str(client_key),
             "listen-port",
-            str(cfg.client_port),
-            "peer",
-            peer_pub,
-            "endpoint",
-            f"{cfg.peer_endpoint}:{cfg.peer_port}",
-            "allowed-ips",
-            "10.77.0.1/32",
-            "persistent-keepalive",
-            "5",
+            str(cfg.udp_port),
         ]
     )
-    run(
-        [
-            "ip",
-            "netns",
-            "exec",
-            cfg.netns,
-            "wg",
-            "set",
-            cfg.peer_iface,
-            "private-key",
-            str(peer_key),
-            "listen-port",
-            str(cfg.peer_port),
-            "peer",
-            client_pub,
-            "endpoint",
-            f"169.254.250.1:{cfg.client_port}",
-            "allowed-ips",
-            "10.77.0.2/32",
-            "persistent-keepalive",
-            "5",
-        ]
-    )
-
     run(["ip", "addr", "add", cfg.client_addr, "dev", cfg.client_iface])
     run(["ip", "link", "set", "dev", cfg.client_iface, "mtu", str(cfg.mtu), "up"])
-    run(
-        [
-            "ip",
-            "netns",
-            "exec",
-            cfg.netns,
-            "ip",
-            "addr",
-            "add",
-            cfg.peer_addr,
-            "dev",
-            cfg.peer_iface,
-        ]
-    )
-    run(
-        [
-            "ip",
-            "netns",
-            "exec",
-            cfg.netns,
-            "ip",
-            "link",
-            "set",
-            "dev",
-            cfg.peer_iface,
-            "mtu",
-            str(cfg.mtu),
-            "up",
-        ]
-    )
-
-    # Trigger a handshake. UDP does not require ICMP to be allowed; ping is only
-    # a best-effort extra for humans who want a familiar reachability check.
-    trigger_udp(cfg.peer_tunnel_ip)
-    run(["ping", "-c", "1", "-W", "1", cfg.peer_tunnel_ip], check=False)
-    time.sleep(1.0)
 
 
-def trigger_udp(peer_ip: str) -> None:
-    sock: socket.socket | None = None
+def udp_responder_running() -> bool:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(1.0)
-        sock.sendto(b"overdrive-wireguard-test", (peer_ip, 9))
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
     except OSError:
-        pass
-    finally:
-        if sock is not None:
-            sock.close()
+        return False
 
 
 def status(cfg: LabConfig) -> int:
     print("=" * 60)
-    print("Overdrive local WireGuard test tunnel")
+    print("Overdrive insecure VPN-like test tunnel")
     print("=" * 60)
-    print("Purpose: detection calibration only; not a secure or remote-exit VPN.")
+    print("Purpose: detection calibration only; not secure, encrypted, or remote-exit.")
     print("Default route: unchanged.")
+    print(f"Mode: {'real WireGuard (opt-in)' if cfg.real_wireguard else 'synthetic safe default'}")
     print()
 
     client_up = link_exists(cfg.client_iface)
-    peer_ns_up = netns_exists(cfg.netns)
-    peer_up = peer_ns_up and link_exists(cfg.peer_iface, netns=cfg.netns)
+    udp_up = udp_responder_running()
     print(f"client interface {cfg.client_iface}: {'present' if client_up else 'absent'}")
-    print(f"peer namespace {cfg.netns}: {'present' if peer_ns_up else 'absent'}")
-    print(f"peer interface {cfg.peer_iface}: {'present' if peer_up else 'absent'}")
+    print(f"UDP responder 0.0.0.0:{cfg.udp_port}: {'running' if udp_up else 'absent'}")
 
     if client_up:
         print("\n[ip link]")
         print(output(["ip", "-o", "link", "show", "dev", cfg.client_iface], check=False))
         print("\n[ip addr]")
         print(output(["ip", "-o", "addr", "show", "dev", cfg.client_iface], check=False))
-        print("\n[wg show]")
-        print(output(["wg", "show", cfg.client_iface], check=False) or "(no wg output)")
+        if shutil.which("wg"):
+            wg_out = output(["wg", "show", cfg.client_iface], check=False)
+            if wg_out:
+                print("\n[wg show]")
+                print(wg_out)
         print("\n[route check]")
         print(output(["ip", "route", "show", "default"], check=False) or "(no default route)")
 
@@ -323,7 +292,7 @@ def status(cfg: LabConfig) -> int:
     print("  sudo ./insecure_vpn_tunnel_for_testing.py up")
     print("  sudo ./insecure_vpn_tunnel_for_testing.py down")
     print("=" * 60)
-    return 0 if client_up and peer_up else 1
+    return 0 if client_up and (udp_up or cfg.real_wireguard) else 1
 
 
 def config_from_args(args: argparse.Namespace) -> LabConfig:
@@ -331,38 +300,33 @@ def config_from_args(args: argparse.Namespace) -> LabConfig:
         client_iface=args.client_iface,
         peer_iface=args.peer_iface,
         netns=args.netns,
-        veth_host=args.veth_host,
         veth_peer=args.veth_peer,
-        host_outer=args.host_outer,
-        peer_outer=args.peer_outer,
-        peer_endpoint=args.peer_endpoint,
         client_addr=args.client_addr,
-        peer_addr=args.peer_addr,
-        peer_tunnel_ip=args.peer_tunnel_ip,
-        client_port=args.client_port,
-        peer_port=args.peer_port,
         mtu=args.mtu,
+        udp_port=args.udp_port,
+        real_wireguard=args.real_wireguard,
     )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create/remove a local WireGuard test tunnel for VPN detection calibration.",
+        description="Create/remove an insecure VPN-like artifact for detection calibration.",
     )
     parser.add_argument("command", choices=["up", "down", "restart", "status"])
+    parser.add_argument(
+        "--real-wireguard",
+        action="store_true",
+        help=(
+            "Opt-in to an actual WireGuard interface. Default synthetic mode is safer "
+            "for VMs that soft-lock with the WireGuard kernel module."
+        ),
+    )
     parser.add_argument("--client-iface", default=DEFAULT_CLIENT_IFACE)
     parser.add_argument("--peer-iface", default=DEFAULT_PEER_IFACE)
     parser.add_argument("--netns", default=DEFAULT_NETNS)
-    parser.add_argument("--veth-host", default=DEFAULT_VETH_HOST)
     parser.add_argument("--veth-peer", default=DEFAULT_VETH_PEER)
-    parser.add_argument("--host-outer", default=DEFAULT_HOST_OUTER)
-    parser.add_argument("--peer-outer", default=DEFAULT_PEER_OUTER)
-    parser.add_argument("--peer-endpoint", default=DEFAULT_PEER_ENDPOINT)
     parser.add_argument("--client-addr", default=DEFAULT_CLIENT_ADDR)
-    parser.add_argument("--peer-addr", default=DEFAULT_PEER_ADDR)
-    parser.add_argument("--peer-tunnel-ip", default=DEFAULT_PEER_TUNNEL_IP)
-    parser.add_argument("--client-port", type=int, default=DEFAULT_CLIENT_PORT)
-    parser.add_argument("--peer-port", type=int, default=DEFAULT_PEER_PORT)
+    parser.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT)
     parser.add_argument("--mtu", type=int, default=DEFAULT_MTU)
     return parser.parse_args(argv)
 
@@ -372,16 +336,16 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config_from_args(args)
 
     try:
-        if args.command == "up":
-            setup(cfg)
-            return status(cfg)
-        if args.command == "restart":
-            setup(cfg)
+        if args.command in {"up", "restart"}:
+            if cfg.real_wireguard:
+                setup_real_wireguard(cfg)
+            else:
+                setup_synthetic(cfg)
             return status(cfg)
         if args.command == "down":
             require_root()
             cleanup(cfg)
-            print("Removed local WireGuard test tunnel.")
+            print("Removed insecure VPN-like test tunnel.")
             return 0
         return status(cfg)
     except RuntimeError as exc:

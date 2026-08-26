@@ -1349,15 +1349,60 @@ def setup_client_vm(
     def download_base_image() -> None:
         download_alpine_image(ALPINE_URL, img_path)
 
-    def convert_base_image() -> None:
+    def remove_stale_client_vdi() -> None:
+        close_medium_best_effort(vboxmanage, vdi_wsl)
         if os.path.exists(vdi_wsl):
-            print("Alpine client VDI already exists after cleanup; reusing it.")
-            return
+            print(f"Removing stale Alpine client VDI before conversion: {vdi_wsl}")
+            try:
+                os.remove(vdi_wsl)
+            except OSError as exc:
+                print(f"[!] Could not remove VDI ({exc}); attempting VBox closemedium --delete...")
+                subprocess.run(
+                    [vboxmanage, "closemedium", "disk", vdi_for_vbox, "--delete"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if os.path.exists(vdi_wsl):
+                    try:
+                        os.remove(vdi_wsl)
+                    except OSError as retry_exc:
+                        raise RuntimeError(
+                            "Could not remove stale Alpine client VDI before conversion.\n"
+                            f"Path: {vdi_wsl}\n"
+                            f"Windows path: {vdi_for_vbox}\n"
+                            f"Error: {retry_exc}\n"
+                            "Close VirtualBox Manager/VM windows, power off the client VM, "
+                            "detach/delete this disk if it is still registered, then rerun."
+                        ) from retry_exc
+
+    def convert_base_image() -> None:
+        # Always rebuild the VDI from the current base image. Reusing a stale
+        # target can leave VBoxManage cloning into a locked or inaccessible file.
+        remove_stale_client_vdi()
         print("Converting base Alpine image into VDI format...")
-        run_vboxmanage(
-            vboxmanage,
-            ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"],
-        )
+        try:
+            run_vboxmanage(
+                vboxmanage,
+                ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"],
+            )
+        except RuntimeError as exc:
+            detail = str(exc)
+            if "VERR_ACCESS_DENIED" in detail or "access denied" in detail.lower():
+                raise RuntimeError(
+                    "VirtualBox could not create the Alpine client VDI (access denied).\n"
+                    f"Target: {vdi_wsl}\n"
+                    f"Windows target: {vdi_for_vbox}\n"
+                    "Likely causes: stale registered medium, VM still running, VirtualBox "
+                    "Manager holding the disk, Windows Controlled Folder Access/antivirus, "
+                    "or missing write permission on the VM folder.\n"
+                    "Fast fix: close VirtualBox Manager, power off the client VM, remove/detach "
+                    "the stale client_browser_alpine.vdi from VirtualBox Media Manager if present, "
+                    "then rerun."
+                ) from exc
+            raise
+        close_medium_best_effort(vboxmanage, vdi_wsl)
+        wait_after_disk_operation(vboxmanage, seconds=2.0)
 
     def expand_disk() -> None:
         expand_client_vdi_for_packages(vboxmanage, vdi_wsl, target_mib=CLIENT_VDI_SIZE_MIB)
