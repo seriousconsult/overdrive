@@ -16,13 +16,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from detections.common.common_browser import shared_chrome_session  # noqa: E402
 from detections.run_detections import (  # noqa: E402
     BROWSER_SCRIPT_TIMEOUT_SEC,
     BASE_DIR,
     collect_detection_results,
     generate_html_report,
     print_results_summary,
-    run_detection_suite,
     select_detection_folders,
 )
 
@@ -66,7 +66,66 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SEC",
         help=f"Per-probe subprocess timeout (default: {BROWSER_SCRIPT_TIMEOUT_SEC}).",
     )
+    parser.add_argument(
+        "--no-shared-browser",
+        action="store_true",
+        help=(
+            "Start a fresh Chromium for each probe instead of one shared session "
+            "(slower on VMs; useful for debugging a single failing probe)."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _run_browser_suite(
+    *,
+    scripts_map: dict[str, list[str]],
+    folder_order: list[str],
+    report_name: str,
+    suite_title: str | None,
+    script_timeout: int,
+    use_shared_browser: bool,
+) -> int:
+    start = time.time()
+
+    def _collect_and_report() -> int:
+        results = collect_detection_results(
+            scripts_map,
+            folder_order,
+            script_timeout=script_timeout,
+        )
+        print_results_summary(results, folder_order)
+        elapsed = time.time() - start
+        html_path = BASE_DIR / report_name
+        html_path.write_text(
+            generate_html_report(results, folder_order, elapsed_time=elapsed),
+            encoding="utf-8",
+        )
+        minutes, seconds = divmod(int(elapsed), 60)
+        print(f"\nHTML report: {html_path}")
+        print(f"Elapsed: {minutes}m {seconds}s")
+        return 0
+
+    if use_shared_browser:
+        print("[*] Starting shared Chromium session for browser probes...")
+        try:
+            with shared_chrome_session():
+                if suite_title:
+                    print("=" * 60)
+                    print(suite_title)
+                    print("=" * 60)
+                    print()
+                return _collect_and_report()
+        except Exception as exc:
+            print(f"[!] Shared Chromium failed to start: {exc}", file=sys.stderr)
+            return 2
+
+    if suite_title:
+        print("=" * 60)
+        print(suite_title)
+        print("=" * 60)
+        print()
+    return _collect_and_report()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,30 +160,26 @@ def main(argv: list[str] | None = None) -> int:
         print("=" * 60)
         print()
 
-        start = time.time()
-        results = collect_detection_results(
-            scripts_map,
-            folder_order,
+        return _run_browser_suite(
+            scripts_map=scripts_map,
+            folder_order=folder_order,
+            report_name=args.report_name,
+            suite_title=None,
             script_timeout=args.timeout,
+            use_shared_browser=not args.no_shared_browser,
         )
-        elapsed = time.time() - start
-        print_results_summary(results, folder_order)
 
-        html_path = BASE_DIR / args.report_name
-        html_path.write_text(
-            generate_html_report(results, folder_order, elapsed_time=elapsed),
-            encoding="utf-8",
-        )
-        minutes, seconds = divmod(int(elapsed), 60)
-        print(f"\nHTML report: {html_path}")
-        print(f"Elapsed: {minutes}m {seconds}s")
-        return 0
+    scripts_map, folder_order, rc = select_detection_folders(["browser"])
+    if rc != 0:
+        return rc
 
-    return run_detection_suite(
-        folders=["browser"],
+    return _run_browser_suite(
+        scripts_map=scripts_map,
+        folder_order=folder_order,
         report_name=args.report_name,
         suite_title="OVERDRIVE BROWSER DETECTION SUITE",
         script_timeout=args.timeout,
+        use_shared_browser=not args.no_shared_browser,
     )
 
 

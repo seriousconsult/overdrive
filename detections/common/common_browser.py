@@ -8,9 +8,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
-from typing import Any
+import urllib.request
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Iterator
 
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
@@ -44,14 +48,23 @@ __all__ = [
     "print_browser_detection_header",
     "print_browser_detection_score_footer",
     "print_browser_probe_error",
+    "shared_chrome_session",
+    "start_shared_chrome",
+    "stop_shared_chrome",
 ]
 
+_IS_LINUX = sys.platform.startswith("linux")
 DEFAULT_TIMEOUT = 8
 DEFAULT_PAGE_LOAD_TIMEOUT = 15
 DEFAULT_SCRIPT_TIMEOUT = 20
-DRIVER_COMMAND_TIMEOUT = 25
-DRIVER_START_TIMEOUT = 25
+DRIVER_COMMAND_TIMEOUT = 60 if _IS_LINUX else 25
+DRIVER_START_TIMEOUT = 60 if _IS_LINUX else 25
+SHARED_CHROME_STARTUP_TIMEOUT = 90 if _IS_LINUX else 45
 DEFAULT_REPORT_WIDTH = 60
+
+SHARED_DEBUGGER_ENV = "OVERDRIVE_CHROME_DEBUGGER"
+SHARED_SESSION_ENV = "OVERDRIVE_BROWSER_SHARED"
+DEFAULT_SHARED_DEBUG_PORT = 9222
 
 _WINDOW_WIDTH = 1920
 _WINDOW_HEIGHT = 1080
@@ -277,9 +290,67 @@ def _chromedriver_binary() -> str | None:
     return _first_existing_path("/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver")
 
 
+def _is_shared_browser_session() -> bool:
+    return os.environ.get(SHARED_SESSION_ENV) == "1"
+
+
+def _attach_debugger_address() -> str | None:
+    debugger = (os.environ.get(SHARED_DEBUGGER_ENV) or "").strip()
+    return debugger or None
+
+
+def _chrome_profile(chromium: str | None) -> tuple[str, str]:
+    version = _chrome_full_version(chromium)
+    user_agent = _desktop_chrome_user_agent(chromium)
+    return version, user_agent
+
+
+def _chrome_launch_arguments(chromium: str | None) -> list[str]:
+    """CLI flags shared by Selenium launches and the long-lived shared Chromium."""
+    _version, user_agent = _chrome_profile(chromium)
+    return [
+        "--headless=new",
+        "--enable-webgl",
+        "--ignore-gpu-blocklist",
+        "--use-gl=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--disable-gpu-sandbox",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--autoplay-policy=no-user-gesture-required",
+        "--disable-features=AudioServiceOutOfProcess",
+        "--lang=en-US",
+        "--host-resolver-rules=MAP localhost 127.0.0.1,MAP [::1] 127.0.0.1",
+        f"--window-size={_WINDOW_WIDTH},{_WINDOW_HEIGHT}",
+        f"--user-agent={user_agent}",
+        "--disable-blink-features=AutomationControlled",
+    ]
+
+
+def _apply_chrome_options(opts: Options, chromium: str | None) -> None:
+    _version, user_agent = _chrome_profile(chromium)
+    opts.page_load_strategy = "eager"
+    for arg in _chrome_launch_arguments(chromium):
+        opts.add_argument(arg)
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    if chromium:
+        opts.binary_location = chromium
+
+
 def close_driver(driver: webdriver.Remote | None) -> None:
     """Stop Chromium without waiting indefinitely on a stuck ChromeDriver quit."""
     if driver is None:
+        return
+    if _is_shared_browser_session():
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        try:
+            driver.service.stop()
+        except Exception:
+            pass
         return
     try:
         driver.service.process.kill()
@@ -334,37 +405,123 @@ def _start_chrome_driver(opts: Options) -> webdriver.Remote:
     return driver
 
 
+def _build_attached_driver(debugger: str) -> webdriver.Chrome:
+    """Attach to an already-running Chromium started with --remote-debugging-port."""
+    opts = Options()
+    opts.add_experimental_option("debuggerAddress", debugger)
+    chromium = _chromium_binary()
+    version, user_agent = _chrome_profile(chromium)
+    driver = _start_chrome_driver(opts)
+    _apply_headless_stealth(driver, user_agent, version)
+    return driver
+
+
 def build_driver() -> webdriver.Chrome:
     """Build a Chrome/Chromium WebDriver with common headless options for browser detection."""
+    debugger = _attach_debugger_address()
+    if debugger:
+        return _build_attached_driver(debugger)
+
     opts = Options()
     chromium = _chromium_binary()
-    version = _chrome_full_version(chromium)
-    user_agent = _desktop_chrome_user_agent(chromium)
-    opts.page_load_strategy = "eager"
-    opts.add_argument("--headless=new")
-    opts.add_argument("--enable-webgl")
-    opts.add_argument("--ignore-gpu-blocklist")
-    opts.add_argument("--use-gl=swiftshader")
-    opts.add_argument("--enable-unsafe-swiftshader")
-    opts.add_argument("--disable-gpu-sandbox")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--autoplay-policy=no-user-gesture-required")
-    opts.add_argument("--disable-features=AudioServiceOutOfProcess")
-    opts.add_argument("--lang=en-US")
-    opts.add_argument("--host-resolver-rules=MAP localhost 127.0.0.1,MAP [::1] 127.0.0.1")
-    opts.add_argument(f"--window-size={_WINDOW_WIDTH},{_WINDOW_HEIGHT}")
-    opts.add_argument(f"--user-agent={user_agent}")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-
-    if chromium:
-        opts.binary_location = chromium
+    version, user_agent = _chrome_profile(chromium)
+    _apply_chrome_options(opts, chromium)
 
     driver = _start_chrome_driver(opts)
     _apply_headless_stealth(driver, user_agent, version)
     return driver
+
+
+@dataclass
+class SharedChromeSession:
+    proc: subprocess.Popen
+    debugger_address: str
+
+
+def _wait_for_debugger_port(port: int, proc: subprocess.Popen, timeout: int) -> None:
+    url = f"http://127.0.0.1:{port}/json/version"
+    deadline = time.monotonic() + max(1, timeout)
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"Shared Chromium exited early (code {proc.returncode})"
+            )
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200:
+                    return
+        except OSError:
+            time.sleep(0.5)
+    raise TimeoutError(f"Shared Chromium did not start within {timeout}s")
+
+
+def start_shared_chrome(
+    debug_port: int = DEFAULT_SHARED_DEBUG_PORT,
+    *,
+    startup_timeout: int | None = None,
+) -> SharedChromeSession:
+    """Launch one headless Chromium for the whole browser detection suite."""
+    chromium = _chromium_binary()
+    if not chromium:
+        raise RuntimeError("Chromium binary not found")
+
+    timeout = startup_timeout or SHARED_CHROME_STARTUP_TIMEOUT
+    args = [chromium, f"--remote-debugging-port={debug_port}", *_chrome_launch_arguments(chromium)]
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    session = SharedChromeSession(
+        proc=proc,
+        debugger_address=f"127.0.0.1:{debug_port}",
+    )
+    try:
+        _wait_for_debugger_port(debug_port, proc, timeout)
+    except BaseException:
+        stop_shared_chrome(session)
+        raise
+    return session
+
+
+def stop_shared_chrome(session: SharedChromeSession | None) -> None:
+    if session is None:
+        return
+    proc = session.proc
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+@contextmanager
+def shared_chrome_session(
+    debug_port: int = DEFAULT_SHARED_DEBUG_PORT,
+    *,
+    startup_timeout: int | None = None,
+) -> Iterator[SharedChromeSession]:
+    """Context manager: one Chromium for many probe subprocesses via debugger attach."""
+    session: SharedChromeSession | None = None
+    previous_debugger = os.environ.get(SHARED_DEBUGGER_ENV)
+    previous_shared = os.environ.get(SHARED_SESSION_ENV)
+    try:
+        session = start_shared_chrome(debug_port, startup_timeout=startup_timeout)
+        os.environ[SHARED_DEBUGGER_ENV] = session.debugger_address
+        os.environ[SHARED_SESSION_ENV] = "1"
+        yield session
+    finally:
+        if previous_debugger is None:
+            os.environ.pop(SHARED_DEBUGGER_ENV, None)
+        else:
+            os.environ[SHARED_DEBUGGER_ENV] = previous_debugger
+        if previous_shared is None:
+            os.environ.pop(SHARED_SESSION_ENV, None)
+        else:
+            os.environ[SHARED_SESSION_ENV] = previous_shared
+        stop_shared_chrome(session)
 
 
 def build_driver_with_fallback() -> webdriver.Remote:
