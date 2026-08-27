@@ -35,13 +35,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from detections.common.common_browser import (
     DEFAULT_TIMEOUT,
-    build_driver_with_fallback,
-    close_driver,
-    DRIVER_COMMAND_TIMEOUT,
     print_browser_detection_header,
     print_browser_detection_score_footer,
     print_browser_probe_error,
 )
+from detections.common.direct_chromium import run_async_script
 
 COOKIE_PROBE_TIMEOUT = max(DEFAULT_TIMEOUT, 25)
 
@@ -504,55 +502,20 @@ def _score_cookie_result(result: dict[str, Any]) -> tuple[int, str]:
     )
 
 
-def _run_selenium_cookie_probe(timeout: int = COOKIE_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
+def _run_chromium_cookie_probe(timeout: int = COOKIE_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
     server = None
-    driver = None
-    try:
-        driver = build_driver_with_fallback()
-    except Exception as exc:
-        return None, f"Unable to start Selenium WebDriver: {type(exc).__name__}: {exc}"
-
     try:
         server, url = start_cookie_probe_server()
-        driver.set_page_load_timeout(timeout)
-        driver.set_script_timeout(min(timeout, DRIVER_COMMAND_TIMEOUT))
-        driver.get(url)
-
-        result_holder: dict[str, Any] = {}
-        error_holder: dict[str, BaseException] = {}
-
-        def _run_script() -> None:
-            try:
-                result_holder["result"] = driver.execute_async_script(COOKIE_PROBE_JS)
-            except BaseException as exc:
-                error_holder["error"] = exc
-
-        thread = threading.Thread(target=_run_script, daemon=True, name="cookie-probe-script")
-        thread.start()
-        thread.join(timeout + 5)
-        if thread.is_alive():
-            close_driver(driver)
-            driver = None
-            if server is not None:
-                server.shutdown()
-                server.server_close()
-                server = None
-            return None, f"Cookie probe script did not finish within {timeout}s"
-        if "error" in error_holder:
-            raise error_holder["error"]
-
-        result = result_holder.get("result")
+        result, error = run_async_script(COOKIE_PROBE_JS, timeout=timeout, url=url)
+        if error:
+            return None, f"Chromium DevTools run failed: {error}"
     except Exception as exc:
-        close_driver(driver)
-        driver = None
         if server is not None:
             server.shutdown()
             server.server_close()
             server = None
-        return None, f"Selenium run failed: {type(exc).__name__}: {exc}"
+        return None, f"Chromium DevTools run failed: {type(exc).__name__}: {exc}"
 
-    close_driver(driver)
-    driver = None
     if server is not None:
         server.shutdown()
         server.server_close()
@@ -564,7 +527,7 @@ def _run_selenium_cookie_probe(timeout: int = COOKIE_PROBE_TIMEOUT) -> tuple[dic
 
 
 def check_cookie_tracking(timeout: int = COOKIE_PROBE_TIMEOUT) -> tuple[int, str]:
-    result, error = _run_selenium_cookie_probe(timeout)
+    result, error = _run_chromium_cookie_probe(timeout)
     if result is None:
         return 3, error or "Cookie tracking detection failed."
 
@@ -573,7 +536,7 @@ def check_cookie_tracking(timeout: int = COOKIE_PROBE_TIMEOUT) -> tuple[int, str
 
 def main() -> int:
     print_browser_detection_header("Cookie Tracking Detection")
-    result, error = _run_selenium_cookie_probe(COOKIE_PROBE_TIMEOUT)
+    result, error = _run_chromium_cookie_probe(COOKIE_PROBE_TIMEOUT)
     if result is None:
         return print_browser_probe_error(error or "Cookie tracking detection failed.")
     score, description = _score_cookie_result(result)

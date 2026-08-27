@@ -797,9 +797,7 @@ def collect_browser_detection_results(
     *,
     script_timeout: int | None = None,
 ) -> dict[str, list[tuple[str, str, str]]]:
-    """Run browser probes with a fresh shared Chromium/ChromeDriver per script."""
-    from detections.common.common_browser import shared_chrome_session
-
+    """Run browser probes directly in isolated subprocesses."""
     results: dict[str, list[tuple[str, str, str]]] = {k: [] for k in folder_order}
 
     for folder in folder_order:
@@ -819,10 +817,9 @@ def collect_browser_detection_results(
         print(f"\n{'=' * 40}")
         print(f"FOLDER: {folder.upper()}")
         print(f"{'=' * 40}")
-        print("Each browser probe gets a fresh Chromium session so one crash cannot poison the rest.")
-        print("If Chromium cannot start, remaining browser probes are skipped with that reason.")
+        print("Each browser probe runs in its own isolated Chromium subprocess.")
 
-        for index, script_name in enumerate(script_names):
+        for script_name in script_names:
             script_path = script_path_for(folder, script_name)
             if not script_path.exists() or script_has_todo(script_path):
                 results[folder].append(
@@ -830,42 +827,13 @@ def collect_browser_detection_results(
                 )
                 continue
 
-            try:
-                with shared_chrome_session(debug_port=0):
-                    results[folder].append(
-                        _run_detection_script(
-                            folder,
-                            script_name,
-                            script_timeout=script_timeout,
-                        )
-                    )
-            except Exception as exc:
-                detail = (
-                    "Browser runtime failed before this probe could run: "
-                    f"{type(exc).__name__}: {exc}"
+            results[folder].append(
+                _run_detection_script(
+                    folder,
+                    script_name,
+                    script_timeout=script_timeout,
                 )
-                print(f"\n▶ {script_name}...")
-                print(f"  ❌ {detail[:200]}")
-                results[folder].append((script_name, "Error", detail[:500]))
-                for pending_script in script_names[index + 1 :]:
-                    pending_path = script_path_for(folder, pending_script)
-                    if not pending_path.exists() or script_has_todo(pending_path):
-                        results[folder].append(
-                            _run_detection_script(
-                                folder,
-                                pending_script,
-                                script_timeout=script_timeout,
-                            )
-                        )
-                        continue
-                    skipped_detail = (
-                        "Skipped because Chromium could not start for the previous "
-                        "browser probe. Fix the browser runtime first, then rerun."
-                    )
-                    print(f"\n▶ {pending_script}...")
-                    print(f"  ❌ {skipped_detail}")
-                    results[folder].append((pending_script, "Error", skipped_detail))
-                break
+            )
 
     return results
 
@@ -906,33 +874,20 @@ def run_detection_suite(
         return rc
 
     if folder_order == ["browser"]:
-        try:
-            from detections.common.common_browser import browser_runtime_diagnostics
-        except ModuleNotFoundError as exc:
-            if exc.name == "selenium":
-                print(
-                    "[!] Browser runtime is incomplete: Python package `selenium` is missing. "
-                    "Rerun `python3 install.py --non-interactive` on the host, or "
-                    "`python3 /root/install.py --non-interactive` inside the Alpine client."
-                )
-                return 2
-            raise
+        from detections.common.common_browser import browser_runtime_diagnostics
 
         runtime = browser_runtime_diagnostics()
         print("[*] Browser runtime:")
         print(f"    Chromium:     {runtime['chromium']}")
-        print(f"    ChromeDriver: {runtime['chromedriver']}")
         print(f"    Chromium version:     {runtime['chromium_version']}")
-        print(f"    ChromeDriver version: {runtime['chromedriver_version']}")
         print()
-        if runtime["chromium"] == "(missing)" or runtime["chromedriver"] == "(missing)":
+        if runtime["chromium"] == "(missing)":
             print(
-                "[!] Browser runtime is incomplete. Rerun `python3 install.py --non-interactive` "
-                "on the host, or `python3 /root/install.py --non-interactive` inside the "
-                "Alpine client. Alpine can also install `chromium chromium-chromedriver`."
+                "[!] Browser runtime is incomplete. Rebuild/provision the Alpine client image "
+                "so build-time install.py can stage Chromium before the VM boots."
             )
             return 2
-        print("[*] Browser probes will use isolated Chromium sessions.")
+        print("[*] Browser probes will run in isolated Chromium subprocesses.")
         results = collect_browser_detection_results(
             scripts_map,
             folder_order,

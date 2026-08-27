@@ -2,8 +2,8 @@
 
 ``iptables`` is installed here so ``client-firewall`` can harden the network
 without ``install.py``. Other network tools (curl, iproute2, iputils,
-wireguard-tools), diagnostics (nmap, dig), Chromium, and Python checker libs
-are installed by ``install.py`` — not here. This script also ensures
+wireguard-tools), diagnostics (nmap, dig), Chromium/Xvfb, and Python checker
+libs are installed by ``install.py`` — not here. This script also ensures
 ``python3`` (to run that bootstrap) plus a tiny shell/tz base.
 """
 
@@ -15,8 +15,8 @@ __all__ = ["client_package_install_script"]
 BASE_CLIENT_PACKAGE_INSTALL_SCRIPT = r"""#!/bin/sh
 # Bootstrap packages — shell/tz, python3 for /root/install.py, and iptables
 # so client-firewall hardening works without install.py.
-# curl / iproute2 / iputils / wireguard-tools / nmap / dig / Chromium / venv libs
-# are installed by install.py, not here.
+# curl / iproute2 / iputils / wireguard-tools / nmap / dig / Chromium / Xvfb /
+# venv libs are installed by install.py, not here.
 #
 # Package mirror/DNS failures should stop VM creation. Details are left in
 # the guest image for inspection if virt-customize fails:

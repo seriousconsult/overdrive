@@ -1,7 +1,8 @@
-"""Keep headless Chromium on a software GL path without a guest GUI.
+"""Keep Chromium on a software GL path without VirtualBox 3D acceleration.
 
 VirtualBox 3D / SVGA would leak hypervisor renderer strings. Chromium still
-draws WebGL via SwiftShader; detections spoof Intel ANGLE names in-page.
+draws WebGL via SwiftShader on the Xvfb display; detections spoof Intel ANGLE
+names in-page.
 ``LIBGL_ALWAYS_SOFTWARE=1`` stops Mesa from talking to VBox SVGA if a probe
 ever drops ``--use-gl=swiftshader``.
 """

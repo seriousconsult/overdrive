@@ -40,18 +40,15 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from detections.common.common_browser import (
         DEFAULT_TIMEOUT,
-        build_driver_with_fallback,
-        close_driver,
         print_browser_detection_header,
         print_browser_detection_score_footer,
     )
+    from detections.common.direct_chromium import run_async_script
     COMMON_BROWSER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
     DEFAULT_TIMEOUT = 8
     COMMON_BROWSER_IMPORT_ERROR = exc
-
-    def build_driver_with_fallback() -> Any:
-        raise RuntimeError(f"browser helpers unavailable: {COMMON_BROWSER_IMPORT_ERROR}")
+    run_async_script = None  # type: ignore[assignment]
 
     def print_browser_detection_header(title: str, *, width: int = 60) -> None:
         bar = "=" * width
@@ -510,7 +507,7 @@ def _print_gpu_details(result: dict[str, Any]) -> None:
         print()
 
 
-def _try_selenium_gpu_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, dict[str, Any] | None]:
+def _try_chromium_gpu_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, dict[str, Any] | None]:
     if COMMON_BROWSER_IMPORT_ERROR is not None:
         return (
             3,
@@ -518,39 +515,20 @@ def _try_selenium_gpu_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, d
             f"{COMMON_BROWSER_IMPORT_ERROR}",
             None,
         )
+    if run_async_script is None:
+        return 3, "Inconclusive: direct Chromium helpers are unavailable.", None
 
-    try:
-        import selenium  # noqa: F401
-    except Exception:
-        return 3, "Inconclusive: Selenium is unavailable, so WebGL GPU data could not be probed.", None
-
-    driver = None
-    try:
-        driver = build_driver_with_fallback()
-    except Exception as exc:
-        return 3, f"Unable to start Selenium WebDriver: {type(exc).__name__}: {exc}", None
-
-    try:
-        driver.set_page_load_timeout(timeout)
-        driver.set_script_timeout(timeout)
-        driver.get("about:blank")
-        result = driver.execute_async_script(GPU_WEBGL_PROBE_JS)
-        if not isinstance(result, dict):
-            return 3, f"GPU/WebGL probe returned unexpected data: {result!r}", None
-        score, description = _score_gpu_result(result)
-        return score, description, result
-    except Exception as exc:
-        return 3, f"Browser GPU/WebGL probe failed: {type(exc).__name__}: {exc}", None
-    finally:
-        try:
-            if driver:
-                close_driver(driver)
-        except Exception:
-            pass
+    result, error = run_async_script(GPU_WEBGL_PROBE_JS, timeout=timeout)
+    if error:
+        return 3, f"Browser GPU/WebGL probe failed: {error}", None
+    if not isinstance(result, dict):
+        return 3, f"GPU/WebGL probe returned unexpected data: {result!r}", None
+    score, description = _score_gpu_result(result)
+    return score, description, result
 
 
 def check_gpu_webgl_fingerprint() -> tuple[int, str, dict[str, Any] | None]:
-    return _try_selenium_gpu_check()
+    return _try_chromium_gpu_check()
 
 
 def main() -> None:

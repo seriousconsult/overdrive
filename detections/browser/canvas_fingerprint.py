@@ -40,12 +40,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_browser import (
-    close_driver,
     DEFAULT_TIMEOUT,
-    build_driver_with_fallback,
     print_browser_detection_header,
     print_browser_detection_score_footer,
 )
+from detections.common.direct_chromium import run_async_script
 
 
 CANVAS_PROBE_JS = r"""
@@ -277,40 +276,19 @@ def _score_canvas_result(result: dict[str, Any]) -> tuple[int, str]:
     )
 
 
-def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
+def _try_chromium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str]:
     """Run an in-browser canvas probe and return ``(score, description)``."""
-    try:
-        import selenium  # noqa: F401
-    except Exception:
-        return 4, "Inconclusive: Selenium is unavailable, so the home-browser canvas profile could not be probed."
-
-    driver = None
-    try:
-        driver = build_driver_with_fallback()
-    except Exception as e:
-        return 3, str(e)
-
-    try:
-        driver.set_page_load_timeout(timeout)
-        driver.set_script_timeout(timeout)
-        driver.get("about:blank")
-        result = driver.execute_async_script(CANVAS_PROBE_JS)
-        if not isinstance(result, dict):
-            return 3, f"Canvas probe returned an unexpected result: {result!r}"
-        return _score_canvas_result(result)
-    except Exception as e:
-        return 3, f"Browser canvas probe failed: {e}"
-    finally:
-        try:
-            if driver:
-                close_driver(driver)
-        except Exception:
-            pass
+    result, error = run_async_script(CANVAS_PROBE_JS, timeout=timeout)
+    if error:
+        return 3, f"Browser canvas probe failed: {error}"
+    if not isinstance(result, dict):
+        return 3, f"Canvas probe returned an unexpected result: {result!r}"
+    return _score_canvas_result(result)
 
 
 def check_canvas_fingerprint() -> tuple[int, str]:
     """Check whether the canvas/browser profile looks home-like."""
-    return _try_selenium_canvas_check()
+    return _try_chromium_canvas_check()
 
 
 def main() -> int:

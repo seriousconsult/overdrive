@@ -3,11 +3,11 @@
 Bootstrap a project-local Python virtual environment for Overdrive automation.
 
 - Creates ./virtual_env next to this script
-- Installs Python deps into the venv (requests, selenium, httpx, scapy, zeroconf)
+- Installs Python deps into the venv (requests, httpx, scapy, zeroconf)
 - Installs OS deps via apt (Ubuntu/Debian), dnf (Fedora/RHEL), or apk (Alpine) —
   including curl/iproute/iptables/ping/WireGuard tools (distro package names vary;
   Debian uses ``iputils-ping``), network diagnostics (nmap, dig, tcpdump), and a
-  browser/driver for Selenium
+  Chromium for browser probes
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
 - Drops into an interactive bash with venv activated (skipped with ``--non-interactive``)
 
@@ -17,7 +17,6 @@ with ``--non-interactive`` (do not apk-add those checker packages in
 """
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -27,7 +26,6 @@ import tempfile
 import time
 import urllib.request
 import venv
-import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -38,7 +36,6 @@ VENV_PYTHON = VENV_DIR / ("Scripts" if sys.platform == "win32" else "bin") / (
 
 PY_DEPS = [
     "requests",
-    "selenium",
     "httpx[http2]",
     "scapy",
     "zeroconf",
@@ -60,9 +57,13 @@ NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
     "apk": ("curl", "iproute2", "iptables", "iputils", "wireguard-tools"),
 }
 
-# Real, non-GUI runtime assets that make headless Chromium less skeletal on the
-# Test client. These improve measured fonts/rendering/media capability;
-# they do not mask headless automation or spoof browser identity.
+ALPINE_REQUIRED_BROWSER_PACKAGES: tuple[str, ...] = (
+    "xvfb",
+    "dbus",
+)
+
+# Runtime assets used by the Test client's normal Chromium DevTools probes.
+# Optional font/media packages improve fidelity, but a miss should not stop VM creation.
 ALPINE_BROWSER_SUPPORT_PACKAGES: tuple[str, ...] = (
     "fontconfig",
     "ttf-dejavu",
@@ -121,12 +122,6 @@ class AptLockError(subprocess.CalledProcessError):
 
 APT_UPDATED = False
 
-CHROME_FOR_TESTING_BUILDS_URL = (
-    "https://googlechromelabs.github.io/chrome-for-testing/"
-    "latest-patch-versions-per-build-with-downloads.json"
-)
-CHROME_FOR_TESTING_PLATFORM = "linux64"
-
 def get_linux_info():
     if shutil.which("apk"):
         return {
@@ -137,7 +132,7 @@ def get_linux_info():
             "guestfs_sets": [],
             "cap_provider_sets": [["libcap-utils"], ["libcap"]],
             "chrome_cmd": "chromium",
-            "chrome_packages": ["chromium", "chromium-chromedriver"],
+            "chrome_packages": ["chromium"],
             "socat": "socat",
             "minicom": "minicom",
             "nmap": "nmap",
@@ -223,13 +218,6 @@ def first_executable_path(*candidates: str) -> str | None:
     return None
 
 
-def first_file_path(*candidates: str) -> str | None:
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-    return None
-
-
 def browser_binary_for_info(info: dict) -> str | None:
     chrome_cmd = str(info.get("chrome_cmd") or "")
     return (
@@ -245,125 +233,6 @@ def browser_binary_for_info(info: dict) -> str | None:
             "/usr/bin/google-chrome-stable",
         )
     )
-
-
-def chromedriver_binary() -> str | None:
-    return shutil.which("chromedriver") or first_executable_path(
-        "/usr/local/bin/chromedriver",
-        "/usr/bin/chromedriver",
-        "/usr/lib/chromium/chromedriver",
-    )
-
-
-def command_output(cmd: list[str], *, timeout: int = 10) -> str:
-    return subprocess.check_output(
-        cmd,
-        text=True,
-        timeout=timeout,
-        stderr=subprocess.STDOUT,
-    ).strip()
-
-
-def binary_version(binary: str | None) -> str | None:
-    if not binary:
-        return None
-    try:
-        output = command_output([binary, "--version"], timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    match = re.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", output)
-    return match.group(1) if match else None
-
-
-def chrome_version_build(version: str | None) -> str | None:
-    if not version:
-        return None
-    parts = version.split(".")
-    if len(parts) < 3:
-        return None
-    return ".".join(parts[:3])
-
-
-def chromedriver_matches_browser(browser_version: str | None) -> bool:
-    driver_version = binary_version(chromedriver_binary())
-    if not browser_version or not driver_version:
-        return False
-    browser_parts = browser_version.split(".")
-    driver_parts = driver_version.split(".")
-    return (
-        len(browser_parts) >= 3
-        and len(driver_parts) >= 3
-        and browser_parts[:3] == driver_parts[:3]
-    )
-
-
-def chrome_for_testing_chromedriver_url(browser_version: str) -> tuple[str, str]:
-    build = chrome_version_build(browser_version)
-    if not build:
-        raise RuntimeError(f"Could not parse Chrome version build from {browser_version!r}.")
-
-    with urllib.request.urlopen(CHROME_FOR_TESTING_BUILDS_URL, timeout=30) as response:
-        payload = json.load(response)
-
-    matched = payload.get("builds", {}).get(build)
-    if not isinstance(matched, dict):
-        raise RuntimeError(
-            "Chrome for Testing does not list a ChromeDriver build for installed "
-            f"Chrome {browser_version} ({build}). Update Chrome, or install a matching "
-            "ChromeDriver manually and set CHROMEDRIVER_PATH."
-        )
-
-    for entry in matched.get("downloads", {}).get("chromedriver", []):
-        if entry.get("platform") == CHROME_FOR_TESTING_PLATFORM and entry.get("url"):
-            return str(entry["url"]), str(matched.get("version") or browser_version)
-
-    raise RuntimeError(
-        "Chrome for Testing did not provide a linux64 ChromeDriver download for "
-        f"Chrome {browser_version}."
-    )
-
-
-def install_chromedriver_from_chrome_for_testing(
-    info: dict,
-    *,
-    non_interactive: bool = False,
-) -> None:
-    browser = browser_binary_for_info(info)
-    browser_version = binary_version(browser)
-    if not browser_version:
-        raise RuntimeError(
-            "Could not determine installed Chrome/Chromium version for ChromeDriver."
-        )
-
-    if chromedriver_matches_browser(browser_version):
-        print("[*] ChromeDriver already matches installed browser.")
-        return
-
-    url, driver_version = chrome_for_testing_chromedriver_url(browser_version)
-    with tempfile.TemporaryDirectory(prefix="overdrive-chromedriver-") as tmpdir:
-        zip_path = os.path.join(tmpdir, "chromedriver.zip")
-        extract_dir = os.path.join(tmpdir, "extract")
-        print(
-            f"[*] Downloading ChromeDriver {driver_version} "
-            f"for Chrome {browser_version}..."
-        )
-        urllib.request.urlretrieve(url, zip_path)
-        with zipfile.ZipFile(zip_path) as archive:
-            archive.extractall(extract_dir)
-        extracted = first_file_path(
-            os.path.join(extract_dir, "chromedriver-linux64", "chromedriver"),
-            os.path.join(extract_dir, "chromedriver"),
-        )
-        if not extracted:
-            raise RuntimeError(
-                "Downloaded ChromeDriver archive did not contain a chromedriver binary."
-            )
-        run_cmd(
-            ["install", "-m", "0755", extracted, "/usr/local/bin/chromedriver"],
-            use_sudo=True,
-            non_interactive=non_interactive,
-        )
-    print("[+] Installed ChromeDriver to /usr/local/bin/chromedriver.")
 
 
 def is_root() -> bool:
@@ -751,7 +620,7 @@ def install_system_deps(*, non_interactive: bool = False):
         else:
             print("[*] 7-Zip already installed.")
 
-    # 3) Browser for Selenium
+    # 3) Chromium for browser probes.
     chrome_packages = info.get("chrome_packages") or []
     if chrome_packages:
         need_browser = not (
@@ -759,12 +628,11 @@ def install_system_deps(*, non_interactive: bool = False):
             or have_cmd("chromium-browser")
             or have_cmd(info["chrome_cmd"])
         )
-        need_driver = not chromedriver_binary()
-        if need_browser or need_driver:
+        if need_browser:
             print(f"[*] Installing browser packages: {' '.join(chrome_packages)}...")
             install_packages(info, chrome_packages, non_interactive=non_interactive)
         else:
-            print("[*] Chromium + chromedriver already installed.")
+            print("[*] Chromium already installed.")
     elif not browser_binary_for_info(info):
         print("[*] Installing Google Chrome...")
         if mgr == "dnf":
@@ -792,31 +660,40 @@ def install_system_deps(*, non_interactive: bool = False):
     else:
         print("[*] Chrome already installed.")
 
-    if mgr in {"apt", "dnf"} and browser_binary_for_info(info):
-        browser_version = binary_version(browser_binary_for_info(info))
-        if chromedriver_matches_browser(browser_version):
-            print("[*] ChromeDriver already installed and version-matched.")
-        else:
-            install_chromedriver_from_chrome_for_testing(
-                info,
-                non_interactive=non_interactive,
-            )
-
     if mgr == "apk":
         missing_browser_bits = []
         if not (have_cmd("chromium") or have_cmd("chromium-browser")):
             missing_browser_bits.append("chromium")
-        if not chromedriver_binary():
-            missing_browser_bits.append("chromedriver")
         if missing_browser_bits:
             raise RuntimeError(
                 "Alpine browser runtime is incomplete after package install: missing "
                 + ", ".join(missing_browser_bits)
-                + ". Browser detections need both chromium and chromium-chromedriver."
+                + ". Browser detections need Chromium."
             )
 
-    # 4) Alpine no-GUI browser runtime support: fonts, media, and software GL.
+    # 4) Alpine browser runtime support: display, fonts, media, and software GL.
     if mgr == "apk":
+        required_missing = [
+            pkg for pkg in ALPINE_REQUIRED_BROWSER_PACKAGES if not package_installed(info, pkg)
+        ]
+        if required_missing:
+            print(
+                "[*] Installing required browser runtime packages: "
+                + " ".join(required_missing)
+            )
+            install_packages(info, required_missing, non_interactive=non_interactive)
+        missing_browser_commands = []
+        if not have_cmd("Xvfb"):
+            missing_browser_commands.append("Xvfb")
+        if not have_cmd("dbus-run-session"):
+            missing_browser_commands.append("dbus-run-session")
+        if missing_browser_commands:
+            raise RuntimeError(
+                "Alpine browser runtime is incomplete after package install: missing "
+                + ", ".join(missing_browser_commands)
+                + ". Browser detections need Xvfb and a transient D-Bus session so "
+                "Chromium can run without headless mode."
+            )
         install_optional_packages(
             info,
             list(ALPINE_BROWSER_SUPPORT_PACKAGES),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run browser detection probes (Selenium / Chromium).
+"""Run browser detection probes through Chromium.
 
 Self-contained under ``detections/`` so it works on the Alpine guest
 (``/root/detections``) as well as on the host repo.
@@ -20,7 +20,6 @@ from detections.run_detections import (  # noqa: E402
     BROWSER_SCRIPT_TIMEOUT_SEC,
     BASE_DIR,
     collect_browser_detection_results,
-    collect_detection_results,
     generate_html_report,
     print_results_summary,
     select_detection_folders,
@@ -66,14 +65,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SEC",
         help=f"Per-probe subprocess timeout (default: {BROWSER_SCRIPT_TIMEOUT_SEC}).",
     )
-    parser.add_argument(
-        "--no-shared-browser",
-        action="store_true",
-        help=(
-            "Start a fresh Chromium for each probe instead of one shared session "
-            "(slower on VMs; useful for debugging a single failing probe)."
-        ),
-    )
     return parser.parse_args(argv)
 
 
@@ -84,40 +75,29 @@ def _run_browser_suite(
     report_name: str,
     suite_title: str | None,
     script_timeout: int,
-    use_shared_browser: bool,
 ) -> int:
     start = time.time()
-    try:
-        from detections.common.common_browser import browser_runtime_diagnostics
-    except ModuleNotFoundError as exc:
-        if exc.name == "selenium":
-            print(
-                "[!] Browser runtime is incomplete: Python package `selenium` is missing. "
-                "Rerun `python3 install.py --non-interactive` on the host, or "
-                "`python3 /root/install.py --non-interactive` inside the Alpine client."
-            )
-            return 2
-        raise
+    from detections.common.common_browser import browser_runtime_diagnostics
 
     runtime = browser_runtime_diagnostics()
 
     print("[*] Browser runtime:")
     print(f"    Chromium:     {runtime['chromium']}")
-    print(f"    ChromeDriver: {runtime['chromedriver']}")
     print(f"    Chromium version:     {runtime['chromium_version']}")
-    print(f"    ChromeDriver version: {runtime['chromedriver_version']}")
     print()
-    if runtime["chromium"] == "(missing)" or runtime["chromedriver"] == "(missing)":
+    if runtime["chromium"] == "(missing)":
         print(
-            "[!] Browser runtime is incomplete. Rerun `python3 install.py --non-interactive` "
-            "on the host, or `python3 /root/install.py --non-interactive` inside the "
-            "Alpine client. Alpine can also install `chromium chromium-chromedriver`."
+            "[!] Browser runtime is incomplete. Rebuild/provision the Alpine client image "
+            "so build-time install.py can stage Chromium before the VM boots."
         )
         return 2
 
     def _collect_and_report() -> int:
-        collector = collect_browser_detection_results if use_shared_browser else collect_detection_results
-        results = collector(scripts_map, folder_order, script_timeout=script_timeout)
+        results = collect_browser_detection_results(
+            scripts_map,
+            folder_order,
+            script_timeout=script_timeout,
+        )
         print_results_summary(results, folder_order)
         elapsed = time.time() - start
         html_path = BASE_DIR / report_name
@@ -128,10 +108,14 @@ def _run_browser_suite(
         minutes, seconds = divmod(int(elapsed), 60)
         print(f"\nHTML report: {html_path}")
         print(f"Elapsed: {minutes}m {seconds}s")
-        return 0
+        has_errors = any(
+            str(score).lower() == "error"
+            for rows in results.values()
+            for _script_name, score, _comment in rows
+        )
+        return 2 if has_errors else 0
 
-    if use_shared_browser:
-        print("[*] Browser probes will use isolated Chromium sessions.")
+    print("[*] Browser probes will run in isolated Chromium subprocesses.")
 
     if suite_title:
         print("=" * 60)
@@ -179,7 +163,6 @@ def main(argv: list[str] | None = None) -> int:
             report_name=args.report_name,
             suite_title=None,
             script_timeout=args.timeout,
-            use_shared_browser=not args.no_shared_browser,
         )
 
     scripts_map, folder_order, rc = select_detection_folders(["browser"])
@@ -192,7 +175,6 @@ def main(argv: list[str] | None = None) -> int:
         report_name=args.report_name,
         suite_title="OVERDRIVE BROWSER DETECTION SUITE",
         script_timeout=args.timeout,
-        use_shared_browser=not args.no_shared_browser,
     )
 
 

@@ -1,10 +1,10 @@
-"""Stage a dummy ALSA default device into the test client image (no GUI).
+"""Stage a dummy ALSA default device into the test client image.
 
-Headless Chromium's live ``AudioContext`` still talks to a default PCM. Without
-a card, construction/resume can fail and the audio_fingerprint probe falls
-through to zeros. A userspace ``type null`` device needs ``alsa-plugins``, not
-``snd-dummy``, PulseAudio, or X11. OfflineAudioContext rendering is CPU-side
-and does not need a speaker.
+Chromium's live ``AudioContext`` still talks to a default PCM. Without a card,
+construction/resume can fail and the audio_fingerprint probe falls through to
+zeros. A userspace ``type null`` device needs ``alsa-plugins``, not
+``snd-dummy`` or PulseAudio. OfflineAudioContext rendering is CPU-side and does
+not need a speaker.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ GUEST_ASOUND_CONF = "/etc/asound.conf"
 GUEST_ALSA_PROFILE = "/etc/profile.d/99-overdrive-alsa.sh"
 
 _ASOUND_CONF = """\
-# Overdrive: null default PCM so headless Chromium can open AudioContext
-# without a sound card, Pulse, or a display server.
+# Overdrive: null default PCM so Chromium can open AudioContext
+# without a sound card or desktop sound server.
 pcm.!default {
     type null
 }
@@ -35,7 +35,7 @@ ctl.!default {
 """
 
 _ALSA_PROFILE = """\
-# Overdrive headless client: route Chromium through our null ALSA default.
+# Overdrive client: route Chromium through our null ALSA default.
 # Do not use PulseAudio or a desktop sound server.
 unset PULSE_SERVER
 unset PULSE_COOKIE
@@ -65,7 +65,7 @@ def stage_client_browser_audio(work_root: Path) -> ClientBrowserAudioAssets:
 
 
 def virt_customize_browser_audio_args(assets: ClientBrowserAudioAssets) -> list[str]:
-    """virt-customize flags to install ALSA config for headless Chromium audio."""
+    """virt-customize flags to install ALSA config for Chromium audio."""
     return [
         "--mkdir",
         "/etc/profile.d",

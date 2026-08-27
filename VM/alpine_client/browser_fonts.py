@@ -1,10 +1,11 @@
-"""Stage Windows core fonts into the test client image (no GUI).
+"""Stage Windows core fonts into the test client image.
 
-Headless Chromium still uses fontconfig. Canvas ``measureText`` only counts a
-family as present when its width differs from generic CSS fallbacks. Distro
-fonts (DejaVu/Liberation) often *are* those fallbacks, so they score 0 hits.
-Copying real Arial/Calibri/Georgia/… from the Windows host makes the existing
-font_enumeration probe see a Linux-plausible surface without X11/Wayland.
+Chromium still uses fontconfig under the client Xvfb display. Canvas
+``measureText`` only counts a family as present when its width differs from
+generic CSS fallbacks. Distro fonts (DejaVu/Liberation) often *are* those
+fallbacks, so they score 0 hits. Copying real Arial/Calibri/Georgia/… from the
+Windows host makes the existing font_enumeration probe see a Linux-plausible
+surface.
 """
 
 from __future__ import annotations

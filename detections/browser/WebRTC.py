@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
  
 '''
-This script is a WebRTC Leak Tester. It uses Selenium (a browser automation tool) 
-to see if your real local or public IP address is "leaking" through your browser's 
+This script is a WebRTC Leak Tester. It uses Chromium DevTools
+to see if your real local or public IP address is "leaking" through your browser's
 WebRTC protocol, even if you are using a VPN or Proxy.
 
-WebRTC Leak Tester using Selenium + browserleaks.com/webrtc.
+WebRTC Leak Tester using Chromium DevTools + browserleaks.com/webrtc.
 
-- Forces headless Chrome + WSL-safe flags
+- Launches Chromium directly through DevTools; no Selenium/WebDriver.
 - Better error output (exception type + message)
-- Keeps screenshot + page source snippet in memory only (no files written)
+- Keeps page text in memory only (no files written)
 
-WebRTC leak tester using Selenium (BrowserLeaks page)
+WebRTC leak tester using Chromium DevTools (BrowserLeaks page)
 
 What it does:
-- Opens https://browserleaks.com/webrtc in headless Chrome
+- Opens https://browserleaks.com/webrtc in Chromium
 - Waits for JS to populate WebRTC results
 - Tries multiple ways to extract the WebRTC-revealed IP:
     1) Look for element id="rtc-ipv4"
@@ -23,17 +23,12 @@ What it does:
 - Prints diagnostics so you can distinguish:
     - "No leak data present" vs "JS didn’t populate / selectors wrong"
 
-This script is a WebRTC Leak Tester. It uses Selenium (a browser automation tool)
+This script is a WebRTC Leak Tester. It uses Chromium DevTools
 to see if your real local or public IP address is "leaking" through your browser's
 WebRTC protocol, even if you are using a VPN or Proxy.
 '''
 
 import re
-import traceback
-
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 import sys
 from pathlib import Path
@@ -41,11 +36,51 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import build_driver, close_driver, ipv4_like_strings, is_private_ipv4, collect_diagnostics_memory, print_browser_probe_error
+from detections.common.common_browser import ipv4_like_strings, is_private_ipv4, print_browser_probe_error
+from detections.common.direct_chromium import run_async_script
 from detections.common.common_config import BROWSERLEAKS_WEBRTC_URL
 
 
 URL = BROWSERLEAKS_WEBRTC_URL
+
+WEBRTC_PROBE_JS = r"""
+const callback = arguments[arguments.length - 1];
+function finish(value) {
+  if (typeof callback === "function") {
+    callback(value);
+  }
+}
+
+function collect() {
+  const byId = (id) => {
+    const el = document.getElementById(id);
+    return el ? (el.innerText || el.textContent || "").trim() : "";
+  };
+  const rtcIds = Array.from(document.querySelectorAll('[id^="rtc-"]')).map((el) => el.id);
+  const bodyText = document.body ? (document.body.innerText || document.body.textContent || "") : "";
+  return {
+    ok: true,
+    rtcIds,
+    rtcIpv4: byId("rtc-ipv4"),
+    rtcLocal: byId("rtc-local"),
+    rtcPublic: byId("rtc-public"),
+    bodyText,
+  };
+}
+
+(async () => {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const data = collect();
+    if (data.rtcIpv4 || data.rtcLocal || data.rtcPublic || data.rtcIds.length > 0) {
+      finish(data);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  finish(collect());
+})().catch((err) => finish({ok: false, error: String(err && err.message ? err.message : err)}));
+"""
 
 
 def compute_webrtc_leak_score(
@@ -98,31 +133,7 @@ def compute_webrtc_leak_score(
     return 3, "Extraction source unclear; treat as uncertain."
 
 
-def dom_rtc_ids(driver):
-    # Ask the page which rtc-* ids exist right now
-    try:
-        ids = driver.execute_script(
-            'return Array.from(document.querySelectorAll(\'[id^="rtc-"]\'))'
-            '.map(e => e.id);'
-        )
-        if not isinstance(ids, list):
-            return []
-        return ids
-    except Exception:
-        return []
-
-
-def dom_text(driver):
-    try:
-        # innerText includes rendered JS content
-        return driver.execute_script(
-            "return document.body ? document.body.innerText : ''"
-        ) or ""
-    except Exception:
-        return driver.page_source or ""
-
-
-def try_extract_webrtc_evidence(driver, wait_seconds=30):
+def try_extract_webrtc_evidence(timeout=30):
     """
     Returns evidence dict and a "primary" IP candidate for display:
       - evidence["ticket_fail"] is True iff any PRIVATE/RFC1918 IP is detected.
@@ -149,7 +160,13 @@ def try_extract_webrtc_evidence(driver, wait_seconds=30):
         "ip_source_text": None,
     }
 
-    wait = WebDriverWait(driver, wait_seconds)
+    result, error = run_async_script(WEBRTC_PROBE_JS, timeout=max(25, timeout), url=URL)
+    if error:
+        raise RuntimeError(error)
+    if not isinstance(result, dict):
+        raise RuntimeError(f"WebRTC probe returned unexpected data: {result!r}")
+    if result.get("ok") is False:
+        raise RuntimeError(str(result.get("error") or "WebRTC page probe failed"))
 
     def record_candidate(ip, source):
         evidence["detected_ip_candidates"].append({"ip": ip, "source": source})
@@ -157,10 +174,9 @@ def try_extract_webrtc_evidence(driver, wait_seconds=30):
             evidence["private_ips"].append({"ip": ip, "source": source})
 
     # 1) Try rtc-ipv4 specifically (original selector)
-    try:
-        evidence["selector_attempts"].append('wait for #rtc-ipv4')
-        el = wait.until(EC.presence_of_element_located((By.ID, "rtc-ipv4")))
-        txt = (el.text or "").strip()
+    evidence["selector_attempts"].append('query #rtc-ipv4')
+    txt = str(result.get("rtcIpv4") or "").strip()
+    if txt:
         evidence["rtc_ipv4_found"] = True
 
         evidence["ip_source_id"] = "rtc-ipv4"
@@ -176,30 +192,21 @@ def try_extract_webrtc_evidence(driver, wait_seconds=30):
             return ips[0], evidence
 
         # if rtc-ipv4 exists but no IPv4 strings matched, continue
-    except Exception:
-        pass
 
     # 2) Collect rtc-* ids for diagnostics
-    evidence["rtc_ids_found"] = dom_rtc_ids(driver)
+    evidence["rtc_ids_found"] = list(result.get("rtcIds") or [])
     evidence["selector_attempts"].append('querySelectorAll([id^="rtc-"])')
 
     # Explicit rtc-local / rtc-public extraction (important for ticket meaning)
-    for target_id in ["rtc-local", "rtc-public"]:
-        try:
-            el = driver.find_element(By.ID, target_id)
-            t = (el.text or "").strip()
-            if target_id == "rtc-local":
-                evidence["rtc_local_raw"] = t
-                evidence["rtc_local_ipv4"] = ipv4_like_strings(t)
-                for ip in evidence["rtc_local_ipv4"]:
-                    record_candidate(ip, "rtc-local")
-            else:
-                evidence["rtc_public_raw"] = t
-                evidence["rtc_public_ipv4"] = ipv4_like_strings(t)
-                for ip in evidence["rtc_public_ipv4"]:
-                    record_candidate(ip, "rtc-public")
-        except Exception:
-            pass
+    evidence["rtc_local_raw"] = str(result.get("rtcLocal") or "").strip()
+    evidence["rtc_local_ipv4"] = ipv4_like_strings(evidence["rtc_local_raw"])
+    for ip in evidence["rtc_local_ipv4"]:
+        record_candidate(ip, "rtc-local")
+
+    evidence["rtc_public_raw"] = str(result.get("rtcPublic") or "").strip()
+    evidence["rtc_public_ipv4"] = ipv4_like_strings(evidence["rtc_public_raw"])
+    for ip in evidence["rtc_public_ipv4"]:
+        record_candidate(ip, "rtc-public")
 
     # If we saw any IP candidates so far, choose a primary to display.
     # Prefer showing rtc-local first (since that's what your ticket rejects).
@@ -214,7 +221,7 @@ def try_extract_webrtc_evidence(driver, wait_seconds=30):
         return evidence["rtc_public_ipv4"][0], evidence
 
     # 3) Fallback: scan body text for IPv4-like strings
-    text = dom_text(driver)
+    text = str(result.get("bodyText") or "")
     ips = ipv4_like_strings(text)
     evidence["ipv4_strings_in_body_text"] = ips[:20]
 
@@ -231,22 +238,14 @@ def try_extract_webrtc_evidence(driver, wait_seconds=30):
 
 
 def main():
-    driver = None
-    mem_diag = None
     score, note = 3, "No run completed."
     ip = None
     evidence: dict = {}
 
     try:
-        driver = build_driver()
-        driver.set_page_load_timeout(25)
-        driver.set_script_timeout(25)
-
         print("Loading BrowserLeaks WebRTC test...")
-        driver.get(URL)
-
         print("Waiting for WebRTC results to render (JS)...")
-        ip, evidence = try_extract_webrtc_evidence(driver, wait_seconds=20)
+        ip, evidence = try_extract_webrtc_evidence(timeout=25)
 
         # ---- ticket rule ----
         # Expected outcome: "No private/local IP exposed"
@@ -306,20 +305,10 @@ def main():
         print(f"IP source text:    {evidence.get('ip_source_text')}")
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
-        print("\nAn error occurred in Selenium:")
+        print("\nAn error occurred in the Chromium DevTools probe:")
         print(f"Exception type: {type(e).__name__}")
         print(f"Exception message: {e}")
-        traceback.print_exc()
-        close_driver(driver)
-        driver = None
         return print_browser_probe_error(err)
-    finally:
-        if driver is not None:
-            try:
-                mem_diag = collect_diagnostics_memory(driver)
-            except Exception:
-                mem_diag = None
-            close_driver(driver)
 
     return 0
 

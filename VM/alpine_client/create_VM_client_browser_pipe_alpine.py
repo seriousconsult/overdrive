@@ -48,8 +48,8 @@ egress User-Agent) are scrubbed at VDI prime / VM configure time. Rebuild the
 client after changing those settings. LAN silence is intentional and still looks
 lab-like to discovery probes.
 
-Detection Python libs (Scapy, Selenium, …), WireGuard tools, and network
-diagnostics (nmap, dig, tcpdump, Chromium) are NOT installed by the base
+Detection Python libs (Scapy, httpx, zeroconf, …), WireGuard tools, and network
+diagnostics (nmap, dig, tcpdump, Chromium, Xvfb) are NOT installed by the base
 package script (bootstrap does install ``iptables`` so ``client-firewall`` can
 harden without them). Priming copies ``install.py`` temporarily, runs it inside the guest
 so deps land in ``/root/virtual_env`` (plus remaining OS packages via that
@@ -145,6 +145,34 @@ from VM.vm_config import (
     random_client_mac_vbox,
 )
 
+
+CLIENT_PIPELINE_ORDER = (
+    "cleanup.existing-vm",
+    "workspace.prepare",
+    "image.download-base",
+    "disk.convert-vdi",
+    "disk.expand",
+    "guest-assets.prepare",
+    "guest.base-packages",
+    "guest.payloads",
+    "guest.detection-libs",
+    "guest.services-boot",
+    "guest.hardening",
+    "vbox.register",
+    "vbox.hardware",
+    "vbox.storage",
+    "vbox.start",
+)
+
+
+def validate_client_pipeline_order(steps: list[BuildStep]) -> None:
+    actual = tuple(step.id for step in steps)
+    if actual != CLIENT_PIPELINE_ORDER:
+        raise RuntimeError(
+            "Alpine client pipeline order changed unexpectedly.\n"
+            f"Expected: {', '.join(CLIENT_PIPELINE_ORDER)}\n"
+            f"Actual:   {', '.join(actual)}"
+        )
 
 
 def _find_existing_fixed_appliance_dir() -> str | None:
@@ -1086,26 +1114,38 @@ def setup_client_vm(
             "guest.base-packages",
             "set guest identity and install base packages",
             install_guest_identity_and_base_packages,
-            description="Installs only bootstrap packages needed for later customization.",
+            description="Image customization: hostname, root password, and bootstrap apk packages only.",
         ),
         BuildStep(
             "guest.payloads",
-            "copy payloads and service assets",
+            "copy repo payloads and service assets",
             copy_guest_payloads_and_service_assets,
+            description="Image customization: stages /root/detections, /root/local_host, service scripts, browser assets, and temporary /root/install.py.",
         ),
         BuildStep(
             "guest.detection-libs",
-            "install detection/network libraries",
+            "run build-time install.py for detection/browser libraries",
             install_guest_detection_libraries,
-            description="Future optional boundary for Chromium, network tools, and Python detection dependencies.",
+            description="Image customization: runs /root/install.py, installs Chromium/tools/Python deps, then removes install.py before first boot.",
         ),
         BuildStep(
             "guest.services-boot",
             "configure guest services and unattended boot",
             configure_guest_services_and_boot,
+            description="Image customization: enables network/timezone services and serial unattended boot.",
         ),
-        BuildStep("guest.hardening", "apply hardening and cleanup", harden_guest_image),
-        BuildStep("vbox.register", "create VirtualBox VM registration", create_vm_registration),
+        BuildStep(
+            "guest.hardening",
+            "apply final guest hardening and cleanup",
+            harden_guest_image,
+            description="Image customization: removes SSH/cloud-init artifacts and build-only files after dependencies are installed.",
+        ),
+        BuildStep(
+            "vbox.register",
+            "create VirtualBox VM registration",
+            create_vm_registration,
+            description="VirtualBox phase begins only after the guest image is fully customized and hardened.",
+        ),
         BuildStep("vbox.hardware", "configure VM hardware and serial", configure_vm_hardware),
         BuildStep("vbox.storage", "attach VDI storage", attach_storage),
         BuildStep(
@@ -1116,6 +1156,7 @@ def setup_client_vm(
         ),
     ]
 
+    validate_client_pipeline_order(steps)
     run_alpine_client_pipeline(steps)
 
 

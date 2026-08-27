@@ -460,10 +460,8 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     return 0
 
 
-def _resolve_start_type(*, headless: bool, connect_serial: bool) -> str:
-    """Use GUI starts by default; headless is opt-in because VBoxHeadless is less reliable."""
-    if headless:
-        return "headless"
+def _resolve_start_type() -> str:
+    """Use GUI starts for full create/rebuild runs."""
     return "gui"
 
 
@@ -635,11 +633,6 @@ def main() -> int:
         help="Run inside the managed tmux layout when stdout is interactive. Default: on.",
     )
     parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Use headless VM starts during full create/rebuild (faster than GUI).",
-    )
-    parser.add_argument(
         "--include-todo",
         action="store_true",
         help="Also run create_VM_*.py scripts whose source contains TODO.",
@@ -693,13 +686,8 @@ def main() -> int:
             log.write("[!] No runnable create_VM_*.py scripts found.\n")
             return 1
 
-        connect_serial = not (
-            os.environ.get(TMUX_ENV_FLAG) or not sys.stdout.isatty() or args.headless
-        )
-        start_type = _resolve_start_type(
-            headless=args.headless,
-            connect_serial=connect_serial,
-        )
+        connect_serial = not (os.environ.get(TMUX_ENV_FLAG) or not sys.stdout.isatty())
+        start_type = _resolve_start_type()
 
         steps: list[tuple[str, list[str], Path]] = []
         for script in scripts:

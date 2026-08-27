@@ -2,7 +2,7 @@
 """
 User-Agent and User-Agent Client Hints identification.
 
-Runs a browser through Selenium, serves a local localhost page, and captures:
+Runs Chromium through DevTools, serves a local localhost page, and captures:
 
 - Request User-Agent and Sec-CH-UA* headers seen by a server.
 - JavaScript-visible navigator.userAgent and navigator.userAgentData.
@@ -38,15 +38,14 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from detections.common.common_browser import (
         DEFAULT_TIMEOUT,
-        build_driver_with_fallback,
-        close_driver,
         print_browser_detection_header,
     )
+    from detections.common.direct_chromium import navigate
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
     DEFAULT_TIMEOUT = 8
-    build_driver_with_fallback = None  # type: ignore[assignment]
+    navigate = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
 
     def print_browser_detection_header(title: str, *, width: int = 64) -> None:
@@ -352,7 +351,7 @@ def collect_browser_probe(timeout: int) -> tuple[dict[str, Any] | None, str | No
             "browser helpers unavailable: "
             f"{type(BROWSER_HELPER_IMPORT_ERROR).__name__}: {BROWSER_HELPER_IMPORT_ERROR}"
         )
-    if build_driver_with_fallback is None:
+    if navigate is None:
         return None, "browser helpers unavailable"
 
     try:
@@ -360,10 +359,10 @@ def collect_browser_probe(timeout: int) -> tuple[dict[str, Any] | None, str | No
     except OSError as exc:
         return None, f"local probe server could not start: {type(exc).__name__}: {exc}"
 
-    driver = None
     try:
-        driver = build_driver_with_fallback()
-        driver.get(url)
+        nav_error = navigate(url, timeout=max(2, timeout))
+        if nav_error:
+            return None, f"browser probe failed: {nav_error}"
         state.done.wait(timeout=max(2, timeout))
         with state.lock:
             result = {
@@ -378,11 +377,6 @@ def collect_browser_probe(timeout: int) -> tuple[dict[str, Any] | None, str | No
     except Exception as exc:
         return None, f"browser probe failed: {type(exc).__name__}: {exc}"
     finally:
-        if driver is not None:
-            try:
-                close_driver(driver)
-            except Exception:
-                pass
         server.shutdown()
         server.server_close()
 

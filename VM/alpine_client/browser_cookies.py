@@ -1,7 +1,7 @@
-"""Allow first-party cookies and local storage for headless Chromium.
+"""Allow first-party cookies and local storage for Chromium probes.
 
-Selenium uses a temporary profile, so a Chromium *managed policy* is applied
-instead of a shared user-data-dir (which would leak cookies across probes).
+Each DevTools probe uses a temporary profile, so a Chromium *managed policy* is
+applied instead of a shared user-data-dir (which would leak cookies across probes).
 """
 
 from __future__ import annotations

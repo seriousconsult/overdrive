@@ -2,7 +2,7 @@
 """
 Full HTTP request header + Client Hints consistency (browser)
 
-Uses Selenium (Chromium) to perform a top-level navigation to a public echo endpoint
+Uses Chromium DevTools to perform a top-level navigation to a local echo endpoint
 and inspects the **same** headers the real browser would send. Validates
 User-Agent, **Sec-Fetch-*** (Mode / Site / User / Dest and combo vs request host),
 **Sec-CH-UA*** (incl. Full-Version-List, Arch, Bitness, Form-Factors when present),
@@ -37,11 +37,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import (
-    build_driver,
-    close_driver,
-    DRIVER_COMMAND_TIMEOUT,
-)
+from detections.common.direct_chromium import navigate
 from detections.common.common_config import BROWSER_ECHO_TIMEOUT
 
 CLIENT_HINT_HEADERS = (
@@ -448,7 +444,7 @@ def _issues_chromium(ua: str, h: dict[str, str], request_url: str = "") -> list[
     ulow = (ua or "").lower()
 
     if "python" in ulow or "curl/" in ulow or "httpie" in ulow:
-        issues.append("User-Agent names a non-browser client (unexpected for Selenium)")
+        issues.append("User-Agent names a non-browser client (unexpected for browser navigation)")
 
     if not ua.strip():
         issues.append("empty User-Agent")
@@ -635,12 +631,10 @@ def analyze_headers(
 def fetch_headers_via_browser() -> tuple[dict[str, str] | None, str | None, str | None]:
     timeout = max(BROWSER_ECHO_TIMEOUT, 25)
     server, state, url = _start_header_probe_server()
-    driver = None
     try:
-        driver = build_driver()
-        driver.set_page_load_timeout(timeout)
-        driver.set_script_timeout(min(timeout, DRIVER_COMMAND_TIMEOUT))
-        driver.get(url)
+        nav_error = navigate(url, timeout=timeout)
+        if nav_error:
+            return None, nav_error, url
         if not state.done.wait(timeout):
             return None, f"header probe timed out after {timeout}s", url
         with state.lock:
@@ -651,7 +645,6 @@ def fetch_headers_via_browser() -> tuple[dict[str, str] | None, str | None, str 
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}", url
     finally:
-        close_driver(driver)
         server.shutdown()
         server.server_close()
 
@@ -672,7 +665,7 @@ def check_full_header_consistency() -> tuple[int, str]:
 
 def main() -> None:
     print("=" * 64)
-    print("Full header + Client Hints consistency (Selenium / echo endpoint)")
+    print("Full header + Client Hints consistency (Chromium DevTools / echo endpoint)")
     print("=" * 64)
     print()
 

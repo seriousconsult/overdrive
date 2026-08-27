@@ -25,83 +25,70 @@ Score: 1-5
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import json
 import os
 import re
-import shutil
-import socket
-import struct
-import subprocess
-import sys
-import tempfile
-import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from detections.common.direct_chromium import run_async_script
 
-try:
-    from detections.common.common_browser import (
-        close_driver,
-        DEFAULT_TIMEOUT,
-        build_driver_with_fallback,
-        print_browser_detection_header,
-        print_browser_detection_score_footer,
-        print_browser_probe_error,
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+DEFAULT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_TIMEOUT", 8)
+DEFAULT_REPORT_WIDTH = 60
+
+
+def print_browser_detection_header(title: str, *, width: int = DEFAULT_REPORT_WIDTH) -> None:
+    bar = "=" * width
+    print(bar)
+    print(title)
+    print(bar)
+    print()
+
+
+def print_browser_detection_score_footer(
+    score: int,
+    description: str,
+    *,
+    width: int = DEFAULT_REPORT_WIDTH,
+) -> None:
+    print(f"Score: {score}")
+    print(f"  {description}")
+    print()
+    print("=" * width)
+
+
+def _is_browser_timeout_error(reason: str) -> bool:
+    lowered = reason.lower()
+    return any(
+        needle in lowered
+        for needle in (
+            "timeout",
+            "timed out",
+            "read timed out",
+            "did not start within",
+            "did not finish within",
+        )
     )
 
-    _COMMON_BROWSER_AVAILABLE = True
-except ModuleNotFoundError as exc:
-    if exc.name != "selenium":
-        raise
 
-    _COMMON_BROWSER_AVAILABLE = False
-    close_driver = None
-    build_driver_with_fallback = None
-
-    def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-        raw = (os.environ.get(name) or "").strip()
-        if not raw:
-            return default
-        try:
-            return max(minimum, int(raw))
-        except ValueError:
-            return default
-
-    DEFAULT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_TIMEOUT", 8)
-    DEFAULT_REPORT_WIDTH = 60
-
-    def print_browser_detection_header(title: str, *, width: int = DEFAULT_REPORT_WIDTH) -> None:
-        bar = "=" * width
-        print(bar)
-        print(title)
-        print(bar)
-        print()
-
-    def print_browser_detection_score_footer(
-        score: int,
-        description: str,
-        *,
-        width: int = DEFAULT_REPORT_WIDTH,
-    ) -> None:
-        print(f"Score: {score}")
-        print(f"  {description}")
-        print()
-        print("=" * width)
-
-    def print_browser_probe_error(reason: str, *, width: int = DEFAULT_REPORT_WIDTH) -> int:
-        label = "TIMEOUT" if "timeout" in reason.lower() or "timed out" in reason.lower() else "ERROR"
-        print("SCORE: Error")
-        print(f"STATUS: {label}: {reason}")
-        print()
-        print("=" * width)
-        return 2
+def print_browser_probe_error(reason: str, *, width: int = DEFAULT_REPORT_WIDTH) -> int:
+    label = "TIMEOUT" if _is_browser_timeout_error(reason) else "ERROR"
+    print("SCORE: Error")
+    print(f"STATUS: {label}: {reason}")
+    print()
+    print("=" * width)
+    return 2
 
 
 FONT_PROBE_TIMEOUT = max(DEFAULT_TIMEOUT, 25)
@@ -452,381 +439,14 @@ async function detectFonts() {
 """
 
 
-DIRECT_CHROME_HEADLESS_ARGS = ("--headless=new", "--headless=chrome", "--headless")
-DIRECT_CHROME_PORT_ENV = "OVERDRIVE_FONT_PROBE_DEBUG_PORT"
-
-
-def _first_executable_path(*candidates: str) -> str | None:
-    for path in candidates:
-        if path and os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-    return None
-
-
-def _chromium_binary() -> str | None:
-    env = (os.environ.get("CHROME_BIN") or os.environ.get("CHROMIUM_BIN") or "").strip()
-    if env and os.path.isfile(env):
-        return env
-    return (
-        shutil.which("chromium-browser")
-        or shutil.which("chromium")
-        or shutil.which("google-chrome")
-        or shutil.which("google-chrome-stable")
-        or _first_executable_path(
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-        )
-    )
-
-
-def _chrome_full_version(binary: str | None) -> str:
-    version = "120.0.0.0"
-    if binary:
-        try:
-            out = subprocess.check_output(
-                [binary, "--version"],
-                text=True,
-                timeout=8,
-                stderr=subprocess.DEVNULL,
-            )
-            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", out) or re.search(
-                r"(\d+\.\d+\.\d+)",
-                out,
-            )
-            if match:
-                version = match.group(1)
-                if version.count(".") == 2:
-                    version += ".0"
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return version
-
-
-def _desktop_chrome_user_agent(binary: str | None) -> str:
-    version = _chrome_full_version(binary)
-    return (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
-    )
-
-
-def _direct_chrome_prelude() -> str:
-    return r"""
-function overrideValue(target, name, value) {
-  try {
-    Object.defineProperty(target, name, {
-      configurable: true,
-      get: () => value,
-    });
-  } catch (e) {}
-}
-overrideValue(Navigator.prototype, "webdriver", undefined);
-overrideValue(Navigator.prototype, "platform", "Win32");
-overrideValue(Navigator.prototype, "vendor", "Google Inc.");
-overrideValue(Navigator.prototype, "language", "en-US");
-overrideValue(Navigator.prototype, "languages", ["en-US", "en"]);
-overrideValue(Navigator.prototype, "plugins", { length: 5 });
-overrideValue(Navigator.prototype, "mimeTypes", { length: 2 });
-overrideValue(window, "outerWidth", 1920);
-overrideValue(window, "outerHeight", 1080);
-"""
-
-
-def _pick_local_port(start: int = 22000, end: int = 60999) -> int:
-    env_port = (os.environ.get(DIRECT_CHROME_PORT_ENV) or "").strip()
-    if env_port.isdigit():
-        return int(env_port)
-
-    span = max(1, end - start)
-    first = start + ((os.getpid() * 41) % span)
-    for offset in range(min(span, 2000)):
-        port = start + ((first - start + offset) % span)
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("127.0.0.1", port))
-            return port
-        except OSError:
-            continue
-        finally:
-            if sock is not None:
-                sock.close()
-    return 9222 + (os.getpid() % 1000)
-
-
-def _read_small(path: Path | None, limit: int = 2500) -> str:
-    if path is None:
-        return ""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:].strip()
-    except OSError:
-        return ""
-
-
-def _wait_for_chrome_json(url: str, proc: subprocess.Popen, timeout: int) -> Any:
-    deadline = time.monotonic() + max(1, timeout)
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"Chromium exited early with code {proc.returncode}")
-        try:
-            with urllib.request.urlopen(url, timeout=1) as response:
-                return json.load(response)
-        except (OSError, json.JSONDecodeError):
-            time.sleep(0.2)
-    raise TimeoutError(f"Chromium DevTools endpoint did not become ready within {timeout}s")
-
-
-def _chrome_target_websocket(port: int, proc: subprocess.Popen, timeout: int) -> str:
-    base = f"http://127.0.0.1:{port}"
-    _wait_for_chrome_json(f"{base}/json/version", proc, timeout)
-    targets = _wait_for_chrome_json(f"{base}/json/list", proc, timeout)
-    if isinstance(targets, list):
-        for target in targets:
-            if isinstance(target, dict) and target.get("webSocketDebuggerUrl"):
-                return str(target["webSocketDebuggerUrl"])
-
-    request = urllib.request.Request(f"{base}/json/new?about:blank", method="PUT")
-    with urllib.request.urlopen(request, timeout=2) as response:
-        target = json.load(response)
-    ws_url = target.get("webSocketDebuggerUrl") if isinstance(target, dict) else None
-    if not ws_url:
-        raise RuntimeError("Chromium DevTools did not expose a page websocket")
-    return str(ws_url)
-
-
-def _websocket_connect(ws_url: str, timeout: int) -> socket.socket:
-    parsed = urllib.parse.urlparse(ws_url)
-    if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
-        raise RuntimeError(f"Unsupported DevTools websocket URL: {ws_url}")
-
-    sock = socket.create_connection((parsed.hostname, parsed.port), timeout=timeout)
-    sock.settimeout(timeout)
-    key = base64.b64encode(os.urandom(16)).decode("ascii")
-    path = parsed.path or "/"
-    if parsed.query:
-        path += "?" + parsed.query
-    request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {parsed.hostname}:{parsed.port}\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n"
-    )
-    sock.sendall(request.encode("ascii"))
-    response = b""
-    while b"\r\n\r\n" not in response:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        response += chunk
-    if b" 101 " not in response.split(b"\r\n", 1)[0]:
-        raise RuntimeError("DevTools websocket upgrade failed")
-
-    accept_source = (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
-    expected = base64.b64encode(hashlib.sha1(accept_source).digest()).decode("ascii")
-    if f"Sec-WebSocket-Accept: {expected}".lower() not in response.decode(
-        "latin1",
-        "ignore",
-    ).lower():
-        raise RuntimeError("DevTools websocket accept key mismatch")
-    return sock
-
-
-def _websocket_send_json(sock: socket.socket, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    header = bytearray([0x81])
-    if len(data) < 126:
-        header.append(0x80 | len(data))
-    elif len(data) <= 0xFFFF:
-        header.append(0x80 | 126)
-        header.extend(struct.pack("!H", len(data)))
-    else:
-        header.append(0x80 | 127)
-        header.extend(struct.pack("!Q", len(data)))
-    mask = os.urandom(4)
-    header.extend(mask)
-    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
-    sock.sendall(bytes(header) + masked)
-
-
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = size
-    while remaining > 0:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            raise RuntimeError("DevTools websocket closed unexpectedly")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-def _websocket_recv_text(sock: socket.socket) -> str:
-    fragments: list[bytes] = []
-    while True:
-        first, second = _recv_exact(sock, 2)
-        fin = bool(first & 0x80)
-        opcode = first & 0x0F
-        masked = bool(second & 0x80)
-        length = second & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", _recv_exact(sock, 2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
-        mask = _recv_exact(sock, 4) if masked else b""
-        data = _recv_exact(sock, length) if length else b""
-        if masked:
-            data = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
-
-        if opcode == 0x8:
-            raise RuntimeError("DevTools websocket closed")
-        if opcode == 0x9:
-            continue
-        if opcode in (0x1, 0x0):
-            fragments.append(data)
-            if fin:
-                return b"".join(fragments).decode("utf-8", "replace")
-
-
-def _cdp_call(
-    sock: socket.socket,
-    message_id: int,
-    method: str,
-    params: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    _websocket_send_json(
-        sock,
-        {"id": message_id, "method": method, "params": params or {}},
-    )
-    while True:
-        message = json.loads(_websocket_recv_text(sock))
-        if message.get("id") == message_id:
-            if "error" in message:
-                raise RuntimeError(f"DevTools {method} failed: {message['error']}")
-            return message
-
-
-def _direct_probe_expression(timeout_ms: int) -> str:
-    return (
-        "new Promise((resolve) => {\n"
-        + _direct_chrome_prelude()
-        + "\nlet done = false;\n"
-        + "const finishOnce = (value) => { if (!done) { done = true; resolve(value); } };\n"
-        + (
-            "setTimeout(() => finishOnce({ok: false, "
-            "error: 'direct Chromium probe timed out'}), "
-            f"{timeout_ms});\n"
-        )
-        + "const __overdriveProbe = function() {\n"
-        + FONT_PROBE_JS
-        + "\n};\n"
-        + "__overdriveProbe(finishOnce);\n"
-        + "})"
-    )
-
-
 def _run_direct_chromium_font_probe(
     timeout: int = FONT_PROBE_TIMEOUT,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    chromium = _chromium_binary()
-    if not chromium:
-        return None, (
-            "Chromium/Chrome is unavailable, so the browser font profile could not be probed."
-        )
-
-    deadline = max(10, timeout)
-    script_timeout_ms = max(6500, min(12000, deadline * 1000 - 2000))
-    failures: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="overdrive-font-probe-") as tmpdir:
-        tmp_path = Path(tmpdir)
-        profile_dir = tmp_path / "chrome-profile"
-        log_path = tmp_path / "chromium.log"
-
-        for headless_arg in DIRECT_CHROME_HEADLESS_ARGS:
-            port = _pick_local_port()
-            cmd = [
-                chromium,
-                headless_arg,
-                "--remote-debugging-address=127.0.0.1",
-                f"--remote-debugging-port={port}",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-background-networking",
-                "--disable-component-update",
-                "--disable-default-apps",
-                "--disable-breakpad",
-                "--disable-crash-reporter",
-                "--disable-crashpad",
-                "--disable-crashpad-for-testing",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--lang=en-US",
-                "--window-size=1920,1080",
-                f"--user-agent={_desktop_chrome_user_agent(chromium)}",
-                f"--user-data-dir={profile_dir}",
-                "about:blank",
-            ]
-            log_handle = log_path.open("a", encoding="utf-8", errors="replace")
-            proc: subprocess.Popen | None = None
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    close_fds=True,
-                )
-                ws_url = _chrome_target_websocket(port, proc, timeout=5)
-                with _websocket_connect(ws_url, timeout=deadline) as sock:
-                    response = _cdp_call(
-                        sock,
-                        1,
-                        "Runtime.evaluate",
-                        {
-                            "expression": _direct_probe_expression(script_timeout_ms),
-                            "awaitPromise": True,
-                            "returnByValue": True,
-                            "timeout": script_timeout_ms + 2000,
-                        },
-                    )
-                value = (
-                    response.get("result", {})
-                    .get("result", {})
-                    .get("value")
-                )
-                if isinstance(value, dict):
-                    value.setdefault("transport", "chromium-devtools")
-                    return value, None
-                failures.append(f"{headless_arg}: DevTools returned non-object result")
-            except OSError as exc:
-                failures.append(
-                    f"{headless_arg}: unable to launch/connect to Chromium: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-            except Exception as exc:
-                failures.append(f"{headless_arg}: {type(exc).__name__}: {exc}")
-            finally:
-                try:
-                    log_handle.close()
-                except OSError:
-                    pass
-                if proc is not None and proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                log_tail = _read_small(log_path)
-                if failures and log_tail and "chromium log:" not in failures[-1]:
-                    failures[-1] = f"{failures[-1]} | chromium log: {log_tail}"
-
-    return None, "Direct Chromium font probe failed: " + " | ".join(failures)
+    value, error = run_async_script(FONT_PROBE_JS, timeout=timeout)
+    if not isinstance(value, dict):
+        return None, error or "Direct Chromium font probe returned no object result."
+    value.setdefault("transport", "chromium-devtools")
+    return value, None
 
 
 POPULAR_WINDOWS_BASELINE_NAME = "popular Windows residential desktop"
@@ -1048,67 +668,21 @@ def _score_font_result(result: dict[str, Any]) -> tuple[int, str]:
     return 1, f"Strongly home-like: stable, platform-plausible font surface; {font_summary}."
 
 
-def _run_selenium_font_probe(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
-    """Run the in-browser font probe and return raw result data."""
-    if not _COMMON_BROWSER_AVAILABLE or build_driver_with_fallback is None:
-        return None, "Selenium is unavailable, so the browser font profile could not be probed."
-
-    try:
-        import selenium  # noqa: F401
-    except Exception:
-        return None, "Selenium is unavailable, so the browser font profile could not be probed."
-
-    driver = None
-    try:
-        driver = build_driver_with_fallback()
-    except Exception as exc:
-        return None, f"Unable to start Selenium WebDriver: {type(exc).__name__}: {exc}"
-
-    try:
-        driver.set_page_load_timeout(timeout)
-        driver.set_script_timeout(timeout)
-        driver.get("about:blank")
-        result = driver.execute_async_script(FONT_PROBE_JS)
-        if not isinstance(result, dict):
-            return None, "Font enumeration returned unexpected data."
-        return result, None
-    except Exception as exc:
-        return None, f"Browser font probe failed: {type(exc).__name__}: {exc}"
-    finally:
-        try:
-            if driver and close_driver is not None:
-                close_driver(driver)
-        except Exception:
-            pass
-
-
 def _run_font_probe(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
-    selenium_result, selenium_error = _run_selenium_font_probe(timeout)
-    if selenium_result is not None:
-        return selenium_result, None
-
-    direct_result, direct_error = _run_direct_chromium_font_probe(timeout)
-    if direct_result is not None:
-        return direct_result, None
-
-    if selenium_error and direct_error:
-        return None, f"{selenium_error} Direct Chromium fallback also failed: {direct_error}"
-    return None, selenium_error or direct_error
+    return _run_direct_chromium_font_probe(timeout)
 
 
-def _try_selenium_font_check(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[int, str]:
+def _run_font_check(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[int, str]:
     """Run an in-browser font probe and return ``(score, description)``."""
     result, error = _run_font_probe(timeout)
     if result is None:
-        if error and error.startswith("Selenium is unavailable"):
-            return 4, f"Inconclusive: {error}"
         return 3, error or "Browser font probe failed for an unknown reason."
     return _score_font_result(result)
 
 
 def check_font_enumeration(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[int, str]:
     """Check whether browser font enumeration looks home-like."""
-    return _try_selenium_font_check(timeout)
+    return _run_font_check(timeout)
 
 
 def _baseline_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -1667,7 +1241,12 @@ def print_baseline_comparison(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check and compare browser font enumeration behavior.")
-    parser.add_argument("--timeout", type=int, default=FONT_PROBE_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=FONT_PROBE_TIMEOUT,
+        help="Seconds to wait for Chromium/browser work.",
+    )
     parser.add_argument(
         "--write-baseline",
         type=Path,

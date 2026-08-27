@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import queue
 import sys
 import threading
 import time
@@ -37,15 +36,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from detections.common.common_browser import (
-    close_driver,
     DEFAULT_TIMEOUT,
-    build_driver_with_fallback,
     print_browser_detection_header,
     print_browser_detection_score_footer,
 )
+from detections.common.direct_chromium import run_async_script
 
-DRIVER_START_TIMEOUT = 45
-PROGRESS_INTERVAL = 5
 AUDIO_PROBE_TIMEOUT = max(DEFAULT_TIMEOUT, 25)
 
 
@@ -1067,73 +1063,24 @@ def _score_audio_result(result: dict[str, Any]) -> tuple[int, str]:
     return 2, f"Audio APIs are available and probe completed, but the result is not fully definitive. {reason}."
 
 
-def _start_driver_with_progress(timeout: int) -> tuple[Any | None, str | None]:
-    deadline = time.monotonic() + max(1, timeout)
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-    def worker() -> None:
-        try:
-            result_queue.put(("driver", build_driver_with_fallback()))
-        except Exception as exc:
-            result_queue.put(("error", exc))
-
-    thread = threading.Thread(target=worker, name="audio-webdriver-start", daemon=True)
-    thread.start()
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None, f"Timed out after {timeout}s while starting Selenium WebDriver."
-        try:
-            kind, value = result_queue.get(timeout=min(PROGRESS_INTERVAL, max(0.1, remaining)))
-        except queue.Empty:
-            remaining = deadline - time.monotonic()
-            print(
-                f"[audio] Still starting Selenium WebDriver... {max(0, int(remaining))}s before timeout",
-                flush=True,
-            )
-            continue
-        if kind == "driver":
-            print("[audio] Selenium WebDriver started.", flush=True)
-            return value, None
-        return None, f"Unable to start Selenium WebDriver: {type(value).__name__}: {value}"
-
-
-def _run_selenium_audio_probe(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
+def _run_chromium_audio_probe(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[dict[str, Any] | None, str | None]:
     """Run the in-browser audio probe and return raw result data."""
     server = None
-    driver = None
-    startup_timeout = max(DRIVER_START_TIMEOUT, timeout)
-    print(f"[audio] Starting Selenium WebDriver (timeout {startup_timeout}s)...", flush=True)
-    driver, error = _start_driver_with_progress(startup_timeout)
-    if driver is None:
-        return None, error or "Unable to start Selenium WebDriver."
-
     try:
         print("[audio] Starting local audio probe server...", flush=True)
         server, url = start_audio_probe_server()
         print(f"[audio] Loading probe page: {url}", flush=True)
-        driver.set_page_load_timeout(timeout)
-        driver.set_script_timeout(timeout)
-        driver.get(url)
         print("[audio] Running browser audio probe JavaScript...", flush=True)
-        result = driver.execute_async_script(AUDIO_PROBE_JS)
+        result, error = run_async_script(AUDIO_PROBE_JS, timeout=timeout, url=url)
+        if error:
+            return None, f"Chromium DevTools run failed: {error}"
         print("[audio] Browser audio probe returned data.", flush=True)
     except Exception as exc:
-        try:
-            close_driver(driver)
-        except Exception:
-            pass
         if server is not None:
             server.shutdown()
             server.server_close()
-        return None, f"Selenium run failed: {type(exc).__name__}: {exc}"
+        return None, f"Chromium DevTools run failed: {type(exc).__name__}: {exc}"
 
-    try:
-        print("[audio] Closing WebDriver...", flush=True)
-        close_driver(driver)
-    except Exception:
-        pass
     if server is not None:
         print("[audio] Stopping local audio probe server...", flush=True)
         server.shutdown()
@@ -1150,7 +1097,7 @@ def check_audio_fingerprint(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[int, st
     Check for audio context fingerprinting.
     Returns (score, description)
     """
-    result, error = _run_selenium_audio_probe(timeout)
+    result, error = _run_chromium_audio_probe(timeout)
     if result is None:
         return 3, error or "Audio fingerprint detection failed."
 
@@ -1159,7 +1106,7 @@ def check_audio_fingerprint(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[int, st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Detect and compare browser audio fingerprint behavior.")
-    parser.add_argument("--timeout", type=int, default=AUDIO_PROBE_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
+    parser.add_argument("--timeout", type=int, default=AUDIO_PROBE_TIMEOUT, help="Seconds to wait for Chromium/browser work.")
     parser.add_argument(
         "--write-baseline",
         type=Path,
@@ -1186,7 +1133,7 @@ def main() -> None:
 
     print_browser_detection_header("Audio Context Fingerprint Detection")
 
-    result, error = _run_selenium_audio_probe(args.timeout)
+    result, error = _run_chromium_audio_probe(args.timeout)
     if result is None:
         from detections.common.common_browser import print_browser_probe_error
 

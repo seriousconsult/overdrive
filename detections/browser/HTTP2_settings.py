@@ -2,9 +2,9 @@
 """
 HTTP/2 SETTINGS fingerprint consistency check for the detected browser.
 
-This probe opens a real browser through Selenium and navigates to
+This probe opens a real browser through Chromium DevTools and navigates to
 ``tls.peet.ws/api/all`` so the observed HTTP/2/TLS fingerprints are the browser's
-transport stack, not Python's ``httpx`` stack. If no browser/webdriver is
+transport stack, not Python's ``httpx`` stack. If no browser runtime is
 available, it fails with ``SCORE: Error`` (not a 1-5 authenticity score).
 
 Score:
@@ -38,7 +38,7 @@ try:
     )
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # Selenium may be absent on minimal clients.
+except Exception as exc:
     DEFAULT_TIMEOUT = 25
     fetch_browser_json = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
@@ -335,7 +335,7 @@ def main() -> int:
 
     print_browser_detection_header("HTTP/2 SETTINGS Browser Fingerprint Check")
     print(f"Endpoint: {args.endpoint}")
-    print("Method: Selenium browser navigation; no Python HTTP client fallback is scored.")
+    print("Method: Chromium DevTools browser navigation; no Python HTTP client fallback is scored.")
     print()
 
     data, error = fetch_browser_observation(args.endpoint, args.timeout)

@@ -13,7 +13,7 @@ lab client is not mistaken for a residential desktop browser.
 Host-authenticity score:
 1 = normal residential browser screen-capture surface
 2 = mostly normal with minor atypical details
-3 = inconclusive Selenium/browser result
+3 = inconclusive browser result
 4 = unusual or hardened browser behavior for a home setup
 5 = strongly non-home-like automation/hardened profile
 """
@@ -29,12 +29,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_browser import (
-    close_driver,
     DEFAULT_TIMEOUT,
-    build_driver_with_fallback,
     print_browser_detection_header,
     print_browser_detection_score_footer,
 )
+from detections.common.direct_chromium import run_async_script
 
 # Keep invoke short: real pickers need a user gesture; headless usually denies fast.
 _INVOKE_TIMEOUT_MS = 2500
@@ -371,32 +370,11 @@ def _score_screen_capture(result: dict[str, Any]) -> tuple[int, str]:
 
 def check_screen_capture() -> tuple[int, str]:
     """Check screen-capture API surface and behavior. Returns (score, description)."""
-    try:
-        import selenium  # noqa: F401
-    except Exception:
-        return 3, "Inconclusive: Selenium is unavailable, so screen capture could not be probed."
-
-    driver = None
-    try:
-        driver = build_driver_with_fallback()
-    except Exception as exc:
-        return 3, f"Unable to start Selenium WebDriver: {type(exc).__name__}: {exc}"
-
     # Invoke race + permission queries need headroom beyond INVOKE_TIMEOUT_MS.
     script_timeout = max(DEFAULT_TIMEOUT, (_INVOKE_TIMEOUT_MS // 1000) + 6)
-    try:
-        driver.set_page_load_timeout(DEFAULT_TIMEOUT)
-        driver.set_script_timeout(script_timeout)
-        driver.get("about:blank")
-        detection = driver.execute_async_script(_DETECTION_SCRIPT)
-    except Exception as exc:
-        return 3, f"Selenium run failed: {type(exc).__name__}: {exc}"
-    finally:
-        try:
-            if driver is not None:
-                close_driver(driver)
-        except Exception:
-            pass
+    detection, error = run_async_script(_DETECTION_SCRIPT, timeout=script_timeout)
+    if error:
+        return 3, f"Chromium DevTools run failed: {error}"
 
     if not isinstance(detection, dict):
         return 3, f"Screen capture detection returned unexpected data: {detection!r}"

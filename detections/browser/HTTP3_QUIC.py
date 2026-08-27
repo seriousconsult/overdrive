@@ -174,7 +174,7 @@ def main() -> None:
     print("=" * 64)
     print()
     print("Probe endpoint:", API_URL)
-    print("Method: Selenium browser probe + recursive QUIC signal extraction")
+    print("Method: Chromium DevTools browser probe + recursive QUIC signal extraction")
     print()
 
     data, err = fetch_browser_observation(args.timeout)
