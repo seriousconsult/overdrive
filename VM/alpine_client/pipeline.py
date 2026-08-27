@@ -1,4 +1,4 @@
-"""Small build-pipeline helpers for the Alpine client VM builder."""
+"""Small build-pipeline helpers for the test client VM builder."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ class AlpineClientBuildOptions:
     start_vm: bool = True
     connect_serial: bool = True
     skip_vdi_prime: bool = False
+    start_type: str = "gui"
 
 
 StepEnabled = bool | Callable[[], bool]
@@ -43,7 +44,7 @@ class BuildStepError(RuntimeError):
 
     def __init__(self, step: BuildStep, elapsed_s: float, original: BaseException):
         super().__init__(
-            f"Alpine client step {step.id!r} ({step.name}) failed "
+            f"test client step {step.id!r} ({step.name}) failed "
             f"after {elapsed_s:.1f}s: {original}"
         )
         self.step = step
@@ -55,10 +56,10 @@ def run_alpine_client_pipeline(steps: list[BuildStep]) -> None:
     total_steps = len(steps)
     for index, step in enumerate(steps, start=1):
         if not step.is_enabled():
-            print(f"[overdrive] Alpine client stage {index}/{total_steps} skip [{step.id}]: {step.name}")
+            print(f"[overdrive] test client stage {index}/{total_steps} skip [{step.id}]: {step.name}")
             continue
 
-        print(f"[overdrive] Alpine client stage {index}/{total_steps} [{step.id}]: {step.name}")
+        print(f"[overdrive] test client stage {index}/{total_steps} [{step.id}]: {step.name}")
         if step.description:
             print(f"[overdrive]   {step.description}")
         started = time.monotonic()
@@ -66,7 +67,7 @@ def run_alpine_client_pipeline(steps: list[BuildStep]) -> None:
             step.run()
         except Exception as exc:
             elapsed = time.monotonic() - started
-            print(f"[overdrive] Alpine client stage FAILED [{step.id}] after {elapsed:.1f}s")
+            print(f"[overdrive] test client stage FAILED [{step.id}] after {elapsed:.1f}s")
             raise BuildStepError(step, elapsed, exc) from exc
         elapsed = time.monotonic() - started
-        print(f"[overdrive] Alpine client stage done [{step.id}] ({elapsed:.1f}s)")
+        print(f"[overdrive] test client stage done [{step.id}] ({elapsed:.1f}s)")

@@ -16,7 +16,7 @@ VM_ENV_PATH = Path(__file__).resolve().with_name(".env")
 # https://wikidevi.wi-cat.ru/Verizon_G3100
 G3100_MAC_OUI = "3cbdc5"
 
-# Dell Inc. PC NIC OUI for the Alpine LAN client - not VirtualBox 080027,
+# Dell Inc. PC NIC OUI for the test client - not VirtualBox 080027,
 # and not the router G3100 OUI, so router vs client stay distinct on the wire.
 CLIENT_NIC_OUI = "001422"
 

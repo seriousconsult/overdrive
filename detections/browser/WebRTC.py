@@ -41,7 +41,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import build_driver, ipv4_like_strings, is_private_ipv4, collect_diagnostics_memory
+from detections.common.common_browser import build_driver, close_driver, ipv4_like_strings, is_private_ipv4, collect_diagnostics_memory, print_browser_probe_error
 from detections.common.common_config import BROWSERLEAKS_WEBRTC_URL
 
 
@@ -239,12 +239,14 @@ def main():
 
     try:
         driver = build_driver()
+        driver.set_page_load_timeout(25)
+        driver.set_script_timeout(25)
 
         print("Loading BrowserLeaks WebRTC test...")
         driver.get(URL)
 
         print("Waiting for WebRTC results to render (JS)...")
-        ip, evidence = try_extract_webrtc_evidence(driver, wait_seconds=30)
+        ip, evidence = try_extract_webrtc_evidence(driver, wait_seconds=20)
 
         # ---- ticket rule ----
         # Expected outcome: "No private/local IP exposed"
@@ -270,7 +272,7 @@ def main():
         else:
             print("PASS: No private/local IP detected (RFC1918).")
 
-        print(f"\nScore:{score}")
+        print(f"\nSCORE: {score}")
         # First substantive line after Score is what detections/run_detections.py prefers for HTML comments.
         print(f"STATUS: {note}")
         print("  Scale: 1 = residential/browser-like signal  ·  5 = definitely artificial host")
@@ -303,26 +305,24 @@ def main():
         print(f"IP came from:       {evidence.get('ip_source_id')}")
         print(f"IP source text:    {evidence.get('ip_source_text')}")
     except Exception as e:
-        score, note = compute_webrtc_leak_score(None, {}, had_exception=True)
+        err = f"{type(e).__name__}: {e}"
         print("\nAn error occurred in Selenium:")
         print(f"Exception type: {type(e).__name__}")
         print(f"Exception message: {e}")
         traceback.print_exc()
-        print(f"\nSCORE: {score}")
-        print(f"STATUS: {note}")
+        close_driver(driver)
+        driver = None
+        return print_browser_probe_error(err)
     finally:
         if driver is not None:
             try:
                 mem_diag = collect_diagnostics_memory(driver)
             except Exception:
                 mem_diag = None
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            close_driver(driver)
 
-    return score
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

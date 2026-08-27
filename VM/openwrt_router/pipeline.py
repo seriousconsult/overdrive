@@ -1,4 +1,4 @@
-"""Small build-pipeline helpers for the OpenWrt router VM builder."""
+"""Small build-pipeline helpers for the test router VM builder."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class BuildStepError(RuntimeError):
 
     def __init__(self, step: BuildStep, elapsed_s: float, original: BaseException):
         super().__init__(
-            f"OpenWrt router step {step.id!r} ({step.name}) failed "
+            f"test router step {step.id!r} ({step.name}) failed "
             f"after {elapsed_s:.1f}s: {original}"
         )
         self.step = step
@@ -54,10 +54,10 @@ def run_openwrt_router_pipeline(steps: list[BuildStep]) -> None:
     total_steps = len(steps)
     for index, step in enumerate(steps, start=1):
         if not step.is_enabled():
-            print(f"[overdrive] OpenWrt router stage {index}/{total_steps} skip [{step.id}]: {step.name}")
+            print(f"[overdrive] test router stage {index}/{total_steps} skip [{step.id}]: {step.name}")
             continue
 
-        print(f"[overdrive] OpenWrt router stage {index}/{total_steps} [{step.id}]: {step.name}")
+        print(f"[overdrive] test router stage {index}/{total_steps} [{step.id}]: {step.name}")
         if step.description:
             print(f"[overdrive]   {step.description}")
         started = time.monotonic()
@@ -65,7 +65,7 @@ def run_openwrt_router_pipeline(steps: list[BuildStep]) -> None:
             step.run()
         except Exception as exc:
             elapsed = time.monotonic() - started
-            print(f"[overdrive] OpenWrt router stage FAILED [{step.id}] after {elapsed:.1f}s")
+            print(f"[overdrive] test router stage FAILED [{step.id}] after {elapsed:.1f}s")
             raise BuildStepError(step, elapsed, exc) from exc
         elapsed = time.monotonic() - started
-        print(f"[overdrive] OpenWrt router stage done [{step.id}] ({elapsed:.1f}s)")
+        print(f"[overdrive] test router stage done [{step.id}] ({elapsed:.1f}s)")

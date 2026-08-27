@@ -45,6 +45,9 @@ from detections.common.common_runner import file_matches_pattern
 
 # Longer capture + scapy startup
 SUDO_SCRIPT_TIMEOUT_SEC = 180
+# Browser probes each launch Chromium; keep below suite patience but above probe caps.
+BROWSER_SCRIPT_TIMEOUT_SEC = 75
+DEFAULT_SCRIPT_TIMEOUT_SEC = 120
 
 # Repository root. This file lives under ``detections/``.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -285,7 +288,12 @@ def script_has_todo(script_path: Path) -> bool:
     return file_matches_pattern(script_path, TODO_PATTERN)
 
 
-def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int]:
+def run_script(
+    script_path: Path,
+    use_sudo: bool = False,
+    *,
+    timeout_sec: int | None = None,
+) -> tuple[str, str, int]:
     """Run a script and return (output, error, returncode)."""
     capture_py = _capture_python_path() if use_sudo else None
     if use_sudo and capture_py is not None and (
@@ -294,7 +302,10 @@ def run_script(script_path: Path, use_sudo: bool = False) -> tuple[str, str, int
         # Already root (Alpine guest) or interpreter has raw-socket caps.
         use_sudo = False
 
-    timeout = SUDO_SCRIPT_TIMEOUT_SEC if use_sudo else 120
+    if timeout_sec is not None:
+        timeout = timeout_sec
+    else:
+        timeout = SUDO_SCRIPT_TIMEOUT_SEC if use_sudo else DEFAULT_SCRIPT_TIMEOUT_SEC
     try:
         wsl_prefix = _wsl_invocation_prefix()
         env = os.environ.copy()
@@ -372,16 +383,17 @@ def extract_score(output: str) -> tuple[str, str]:
 
     matches: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
-        m = re.search(r"\bSCORE:\s*(\d+)", line, re.I)
+        m = re.search(r"\bSCORE:\s*(Error|N/A|\d+)\b", line, re.I)
         if m:
             matches.append((i, m.group(1)))
             continue
-        m = re.search(r"^Score:\s*(\d+)\s*", line.strip(), re.I)
+        m = re.search(r"^Score:\s*(Error|N/A|\d+)\b", line.strip(), re.I)
         if m:
             matches.append((i, m.group(1)))
 
     if matches:
-        last_idx, score = matches[-1]
+        last_idx, raw_score = matches[-1]
+        score = "Error" if raw_score.lower() == "error" else raw_score
         candidate_lines = [
             lines[j].strip()
             for j in range(last_idx + 1, min(last_idx + 6, len(lines)))
@@ -413,6 +425,29 @@ def extract_score(output: str) -> tuple[str, str]:
                 comment = line.strip()
                 break
 
+    return score, comment
+
+
+def _looks_like_timeout(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(
+        needle in lowered
+        for needle in ("timeout", "timed out", "read timed out", "did not finish within")
+    )
+
+
+def _invalidate_timeout_score(score: str, comment: str, output: str, error: str) -> tuple[str, str]:
+    """Timeouts are not authenticity scores — force Error."""
+    if score == "Error":
+        detail = comment or error or "probe reported Error"
+        if _looks_like_timeout(detail) or _looks_like_timeout(error) or error == "Timeout":
+            return "Error", f"TIMEOUT: {detail} (not a valid 1-5 score)"
+        return "Error", detail
+    if error == "Timeout" or _looks_like_timeout(error) or _looks_like_timeout(comment) or (
+        score.isdigit() and _looks_like_timeout(output) and ("could not" in (comment or output).lower())
+    ):
+        detail = comment or error or "probe timed out"
+        return "Error", f"TIMEOUT: {detail} (not a valid 1-5 score)"
     return score, comment
 
 
@@ -629,6 +664,8 @@ def select_detection_folders(
 def collect_detection_results(
     scripts_map: dict[str, list[str]],
     folder_order: list[str],
+    *,
+    script_timeout: int | None = None,
 ) -> dict[str, list[tuple[str, str, str]]]:
     results: dict[str, list[tuple[str, str, str]]] = {k: [] for k in folder_order}
 
@@ -660,9 +697,34 @@ def collect_detection_results(
             if use_sudo:
                 print("  (running with sudo -n — needs NOPASSWD for capture scripts; see README)")
 
-            output, error, returncode = run_script(script_path, use_sudo=use_sudo)
+            output, error, returncode = run_script(
+                script_path,
+                use_sudo=use_sudo,
+                timeout_sec=script_timeout,
+            )
+
+            if error == "Timeout" or returncode == -1 and not output and error:
+                detail = error or "Non-zero exit"
+                if error == "Timeout":
+                    detail = (
+                        f"TIMEOUT after {script_timeout or DEFAULT_SCRIPT_TIMEOUT_SEC}s "
+                        "(not a valid 1-5 score)"
+                    )
+                print(f"  ❌ {detail}")
+                results[folder].append((script_name, "Error", detail[:500]))
+                continue
 
             if error or returncode != 0:
+                # Prefer an explicit SCORE: Error from the probe when present.
+                scored, comment = extract_score(output or "")
+                scored, comment = _invalidate_timeout_score(
+                    scored, comment, output or "", error or ""
+                )
+                if scored == "Error":
+                    detail = comment or error or "Non-zero exit"
+                    print(f"  ❌ {detail[:200]}")
+                    results[folder].append((script_name, "Error", detail[:500]))
+                    continue
                 detail = error or "Non-zero exit"
                 tail = (output or "").strip().splitlines()
                 hint = ""
@@ -674,10 +736,15 @@ def collect_detection_results(
                 )
             else:
                 score, comment = extract_score(output)
-                print(f"  ✓ Score: {score}")
-                if comment:
-                    print(f"    → {comment[:100]}")
-                results[folder].append((script_name, score, comment))
+                score, comment = _invalidate_timeout_score(score, comment, output, "")
+                if score == "Error":
+                    print(f"  ❌ {comment[:200] if comment else 'Error'}")
+                    results[folder].append((script_name, "Error", (comment or "Error")[:500]))
+                else:
+                    print(f"  ✓ Score: {score}")
+                    if comment:
+                        print(f"    → {comment[:100]}")
+                    results[folder].append((script_name, score, comment))
 
     return results
 
@@ -705,6 +772,7 @@ def run_detection_suite(
     folders: list[str] | None = None,
     report_name: str = "detection_results.html",
     suite_title: str = "OVERDRIVE DETECTION SUITE",
+    script_timeout: int | None = None,
 ) -> int:
     start_time = time.time()
     print("=" * 60)
@@ -716,7 +784,11 @@ def run_detection_suite(
     if rc != 0:
         return rc
 
-    results = collect_detection_results(scripts_map, folder_order)
+    results = collect_detection_results(
+        scripts_map,
+        folder_order,
+        script_timeout=script_timeout,
+    )
     print_results_summary(results, folder_order)
 
     elapsed_time = time.time() - start_time

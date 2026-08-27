@@ -40,6 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_browser import (
+    close_driver,
     DEFAULT_TIMEOUT,
     build_driver_with_fallback,
     print_browser_detection_header,
@@ -302,7 +303,7 @@ def _try_selenium_canvas_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str
     finally:
         try:
             if driver:
-                driver.quit()
+                close_driver(driver)
         except Exception:
             pass
 
@@ -312,12 +313,22 @@ def check_canvas_fingerprint() -> tuple[int, str]:
     return _try_selenium_canvas_check()
 
 
-def main() -> None:
+def main() -> int:
     score, description = check_canvas_fingerprint()
+    if score == 3 and (
+        "failed" in description.lower()
+        or "unable" in description.lower()
+        or "timeout" in description.lower()
+    ):
+        from detections.common.common_browser import print_browser_probe_error
+
+        print_browser_detection_header("Canvas Home-Browser Plausibility Check")
+        return print_browser_probe_error(description)
     print_browser_detection_header("Canvas Home-Browser Plausibility Check")
     print_browser_detection_score_footer(score, description)
     print(f"STATUS: {description}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -41,6 +41,7 @@ try:
     from detections.common.common_browser import (
         DEFAULT_TIMEOUT,
         build_driver_with_fallback,
+        close_driver,
         print_browser_detection_header,
         print_browser_detection_score_footer,
     )
@@ -543,7 +544,7 @@ def _try_selenium_gpu_check(timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, d
     finally:
         try:
             if driver:
-                driver.quit()
+                close_driver(driver)
         except Exception:
             pass
 

@@ -5,14 +5,15 @@ HTTP/2 SETTINGS fingerprint consistency check for the detected browser.
 This probe opens a real browser through Selenium and navigates to
 ``tls.peet.ws/api/all`` so the observed HTTP/2/TLS fingerprints are the browser's
 transport stack, not Python's ``httpx`` stack. If no browser/webdriver is
-available, it fails gracefully with ``SCORE: 3``.
+available, it fails with ``SCORE: Error`` (not a 1-5 authenticity score).
 
 Score:
   1 = coherent browser-like HTTP/2 fingerprint
   2 = mostly browser-like with mild caveats
-  3 = inconclusive, no browser, or insufficient endpoint data
+  3 = inconclusive fingerprint with observation data present
   4 = suspicious mismatch/headless downgrade
   5 = strong library/bot fingerprint
+  Error = probe timed out / browser unavailable (not scored)
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ import argparse
 import json
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -32,16 +32,15 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from detections.common.common_browser import (
         DEFAULT_TIMEOUT,
-        build_driver_with_fallback,
-        extract_json_text_from_page,
+        fetch_browser_json,
         print_browser_detection_header,
+        print_browser_probe_error,
     )
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # Selenium may be absent on minimal clients.
     DEFAULT_TIMEOUT = 25
-    build_driver_with_fallback = None  # type: ignore[assignment]
-    extract_json_text_from_page = None  # type: ignore[assignment]
+    fetch_browser_json = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
 
     def print_browser_detection_header(title: str, *, width: int = 64) -> None:
@@ -50,6 +49,13 @@ except Exception as exc:  # Selenium may be absent on minimal clients.
         print(title)
         print(bar)
         print()
+
+    def print_browser_probe_error(reason: str, *, width: int = 64) -> int:
+        print(f"SCORE: Error")
+        print(f"STATUS: ERROR: {reason}")
+        print()
+        print("=" * width)
+        return 2
 
 
 DEFAULT_ENDPOINT = "https://tls.peet.ws/api/all"
@@ -219,33 +225,21 @@ def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, An
             "browser helpers unavailable: "
             f"{type(BROWSER_HELPER_IMPORT_ERROR).__name__}: {BROWSER_HELPER_IMPORT_ERROR}"
         )
-    if build_driver_with_fallback is None or extract_json_text_from_page is None:
+    if fetch_browser_json is None:
         return None, "browser helpers unavailable"
 
-    driver = None
-    try:
-        driver = build_driver_with_fallback()
-        sep = "&" if "?" in endpoint else "?"
-        driver.get(f"{endpoint}{sep}src=browser-h2&t={int(time.time())}")
-        raw = extract_json_text_from_page(driver, timeout=timeout)
-        if not raw:
-            return None, "Could not parse JSON from the browser observation page."
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            return None, "Browser observation returned JSON, but not an object."
-        return data, None
-    except Exception as exc:
-        return None, f"browser probe failed: {type(exc).__name__}: {exc}"
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+    # Keep peet.ws waits short — hung Chromium + VPN path was burning the suite.
+    bounded = max(8, min(timeout, 20))
+    return fetch_browser_json(
+        endpoint,
+        timeout=bounded,
+        cache_bust=True,
+    )
 
 
 def score_http2_browser_observation(data: dict[str, Any] | None, error: str | None) -> tuple[int, str, dict[str, Any]]:
     if not data:
+        # Caller must treat timeouts as Error, not score 3.
         return 3, f"Could not obtain browser HTTP/2 observation. {error or 'No data returned.'}", {}
 
     user_agent = str(data.get("user_agent") or "")
@@ -336,7 +330,7 @@ def print_observation(details: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check HTTP/2 SETTINGS for the detected browser.")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="JSON observation endpoint.")
-    parser.add_argument("--timeout", type=int, default=max(25, DEFAULT_TIMEOUT), help="Browser wait timeout.")
+    parser.add_argument("--timeout", type=int, default=max(20, DEFAULT_TIMEOUT), help="Browser wait timeout.")
     args = parser.parse_args()
 
     print_browser_detection_header("HTTP/2 SETTINGS Browser Fingerprint Check")
@@ -345,19 +339,18 @@ def main() -> int:
     print()
 
     data, error = fetch_browser_observation(args.endpoint, args.timeout)
+    if error and not data:
+        return print_browser_probe_error(error)
+
     score, status, details = score_http2_browser_observation(data, error)
     print_observation(details)
-
-    if error and not data:
-        print(f"Browser probe error: {error}")
-        print()
 
     print(f"SCORE: {score}")
     print(f"STATUS: {status}")
     print()
     print("=" * 64)
-    return score
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

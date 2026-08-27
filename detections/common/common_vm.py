@@ -24,6 +24,10 @@ __all__ = [
     "OPENWRT_IMAGE_NAME",
     "OPENWRT_LAN_INTNET_NAME",
     "OPENWRT_ROUTER_VM_NAME",
+    "TEST_CLIENT_VM_NAME",
+    "TEST_LAN_INTNET_NAME",
+    "TEST_ROUTER_VM_NAME",
+    "LEGACY_CLIENT_VM_NAME",
     "OPENWRT_URL",
     "OPENWRT_VDI_NAME",
 
@@ -70,20 +74,27 @@ __all__ = [
     "windows_temp_dir_linux",
 ]
 
-OPENWRT_ROUTER_VM_NAME = "OpenWrt_2026_Router"
-OPENWRT_CLIENT_VM_NAME = "OpenWrt_LAN_Client"
-OPENWRT_LAN_INTNET_NAME = "openwrt-lan"
+TEST_ROUTER_VM_NAME = "Test_Router"
+TEST_CLIENT_VM_NAME = "Test_Client"
+TEST_LAN_INTNET_NAME = "test-lan"
+# Pre-Alpine Ubuntu client (verify_lab still recognizes a registered leftover).
+LEGACY_CLIENT_VM_NAME = "Test_Client_Legacy"
+
+# Back-compat aliases used by older imports.
+OPENWRT_ROUTER_VM_NAME = TEST_ROUTER_VM_NAME
+OPENWRT_CLIENT_VM_NAME = LEGACY_CLIENT_VM_NAME
+OPENWRT_LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
 
 SERIAL_TCP_HOST = "127.0.0.1"
-SERIAL_TCP_PORT = 2323  # OpenWrt_LAN_Client COM1
-SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_LAN_Client_serial.sock"
-SERIAL_PTY_LINK_PATH = "/tmp/OpenWrt_LAN_Client_serial.pty"
+SERIAL_TCP_PORT = 2323  # legacy client COM1
+SERIAL_UNIX_SOCKET_PATH = "/tmp/Test_Client_serial.sock"
+SERIAL_PTY_LINK_PATH = "/tmp/Test_Client_serial.pty"
 SERIAL_BAUD = "115200"
 
-# OpenWrt router uses a different host TCP port so both VMs can expose COM1 at once.
+# Test router uses a different host TCP port so both VMs can expose COM1 at once.
 ROUTER_SERIAL_TCP_PORT = 2324
-ROUTER_SERIAL_UNIX_SOCKET_PATH = "/tmp/OpenWrt_2026_Router_serial.sock"
-ROUTER_SERIAL_PTY_LINK_PATH = "/tmp/OpenWrt_2026_Router_serial.pty"
+ROUTER_SERIAL_UNIX_SOCKET_PATH = "/tmp/Test_Router_serial.sock"
+ROUTER_SERIAL_PTY_LINK_PATH = "/tmp/Test_Router_serial.pty"
 
 OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
 OPENWRT_IMAGE_NAME = "openwrt_2026.img"
@@ -116,28 +127,50 @@ def ensure_kvm_accessible() -> bool:
         return False
 
     print("[overdrive] Opening /dev/kvm for fast libguestfs (sudo chmod 0666 /dev/kvm)...")
-    for cmd in (
-        ["sudo", "-n", "chmod", "0666", str(kvm)],
-        ["sudo", "chmod", "0666", str(kvm)],
-    ):
+    proc: subprocess.CompletedProcess[str] | None = None
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "chmod", "0666", str(kvm)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[overdrive] sudo -n chmod /dev/kvm failed: {exc}")
+    else:
+        if proc.returncode == 0 and os.access(kvm, os.R_OK | os.W_OK):
+            print("[overdrive] /dev/kvm is now accessible (KVM acceleration enabled).")
+            return True
+        if proc.stderr:
+            err = proc.stderr.strip()
+            if err:
+                print(f"[overdrive] sudo -n chmod /dev/kvm: {err}")
+
+    if sys.stdin.isatty():
         try:
             proc = subprocess.run(
-                cmd,
+                ["sudo", "chmod", "0666", str(kvm)],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=30,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"[overdrive] sudo chmod /dev/kvm failed: {exc}")
-            continue
-        if proc.returncode == 0 and os.access(kvm, os.R_OK | os.W_OK):
-            print("[overdrive] /dev/kvm is now accessible (KVM acceleration enabled).")
-            return True
-        if proc.returncode != 0 and proc.stderr:
-            err = proc.stderr.strip()
-            if err and cmd[1] != "-n":
-                print(f"[overdrive] sudo chmod /dev/kvm: {err}")
+        else:
+            if proc.returncode == 0 and os.access(kvm, os.R_OK | os.W_OK):
+                print("[overdrive] /dev/kvm is now accessible (KVM acceleration enabled).")
+                return True
+            if proc.stderr:
+                err = proc.stderr.strip()
+                if err:
+                    print(f"[overdrive] sudo chmod /dev/kvm: {err}")
+    else:
+        print(
+            "[overdrive] Skipping interactive sudo for /dev/kvm (no TTY). "
+            "Run once: sudo chmod 0666 /dev/kvm"
+        )
 
     if os.access(kvm, os.R_OK | os.W_OK):
         return True

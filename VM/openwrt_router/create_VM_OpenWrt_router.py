@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-"""Create an OpenWrt router VM in VirtualBox (WSL or Linux).
+"""Create a test router VM in VirtualBox (WSL or Linux).
 
 **NIC order vs stock OpenWrt:** The x86 image defaults to **LAN** on ``eth0`` (``br-lan``) and **WAN**
 on ``eth1``. VirtualBox presents adapters in order as ``eth0``, ``eth1``. So **NIC1** is the **LAN**
-leg (internal network ``openwrt-lan``) and **NIC2** is **WAN** (bridged). Client VMs use
+leg (internal network ``test-lan``) and **NIC2** is **WAN** (bridged). Client VMs use
 ``--nic1 intnet`` on the same intnet name.
 
 **DNS:** Before convert, the script downloads stubby ``.apk`` deps (OpenWrt 25.12 uses
@@ -53,8 +53,8 @@ from detections.common.common_vm import (
     get_vboxmanage_install_hint,
     get_vm_state,
     OPENWRT_IMAGE_NAME,
-    OPENWRT_LAN_INTNET_NAME,
-    OPENWRT_ROUTER_VM_NAME,
+    TEST_LAN_INTNET_NAME,
+    TEST_ROUTER_VM_NAME,
     OPENWRT_URL,
     OPENWRT_VDI_NAME,
     remove_existing_vm,
@@ -92,9 +92,9 @@ try:
 except ImportError:
     setup_alpine_client_vm = None
 
-VM_NAME = OPENWRT_ROUTER_VM_NAME
-# Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 openwrt-lan``
-LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
+VM_NAME = TEST_ROUTER_VM_NAME
+# Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 test-lan``
+LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
 IMAGE_NAME = OPENWRT_IMAGE_NAME
 VDI_NAME = OPENWRT_VDI_NAME
 
@@ -1221,7 +1221,7 @@ def router_serial_instructions(vboxmanage: str, endpoint: str) -> str:
             f"From WSL, connect to one of: {hosts}\n"
             f"  ./{Path(__file__).name} --serial-only\n"
             "Stock OpenWrt already uses console=ttyS0; press Enter for the ash login.\n"
-            "Alpine client serial uses TCP 2325; router uses 2324 so both can run together.\n"
+            "test client serial uses TCP 2325; router uses 2324 so both can run together.\n"
         )
     return (
         "\n--- Serial console (OpenWrt ttyS0) ---\n"
@@ -1271,7 +1271,7 @@ def serial_only_attach(*, here: bool = False, force_interactive: bool = True) ->
     if not here:
         spawned = spawn_serial_console_window(
             Path(__file__).resolve(),
-            title="OpenWrt Router serial (2324)",
+            title="Test router serial (2324)",
             extra_args=["--force-interactive-serial"] if force_interactive else [],
             cwd=Path(SCRIPT_DIR),
         )
@@ -1448,6 +1448,17 @@ def setup_openwrt_vm(
             vm_base,
             medium_path_for_vbox=dst_path,
         )
+        # Drop pre-rename lab VM if it is still registered.
+        legacy_name = "OpenWrt_2026_Router"
+        if legacy_name != VM_NAME and vm_is_registered(vboxmanage, legacy_name):
+            legacy_base = os.path.join(vms_root, legacy_name)
+            print(f"Also removing legacy router VM {legacy_name!r}...")
+            remove_existing_vm(
+                vboxmanage,
+                legacy_name,
+                legacy_base,
+                medium_path_for_vbox=os.path.join(legacy_base, VDI_NAME),
+            )
 
     def ensure_workspace() -> None:
         os.makedirs(vms_root, exist_ok=True)
@@ -1650,7 +1661,7 @@ def setup_openwrt_vm(
             # New window by default - keep the create/start shell free.
             spawned = spawn_serial_console_window(
                 Path(__file__).resolve(),
-                title="OpenWrt Router serial (2324)",
+                title="Test router serial (2324)",
                 extra_args=["--force-interactive-serial"],
                 cwd=Path(SCRIPT_DIR),
             )
@@ -1722,7 +1733,7 @@ def enable_serial_on_existing_router() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Create / refresh an OpenWrt router VM in VirtualBox.",
+        description="Create / refresh a test router VM in VirtualBox.",
     )
     parser.add_argument(
         "--start-type",
@@ -1766,7 +1777,7 @@ def main() -> None:
     parser.add_argument(
         "--start-alpine-client",
         action="store_true",
-        help="Start the Alpine client VM after the router is ready.",
+        help="Start the test client VM after the router is ready.",
     )
     args = parser.parse_args()
     if args.serial_here:
@@ -1803,18 +1814,19 @@ def main() -> None:
 
     if args.start_alpine_client:
         if setup_alpine_client_vm:
-            print("\n--- Starting Alpine Client VM ---")
+            print("\n--- Starting Test client VM ---")
             try:
                 setup_alpine_client_vm(
                     start_vm=True,
                     connect_serial=not args.no_connect_serial,
+                    start_type=args.start_type,
                 )
-                print("[+] Alpine client VM started successfully.")
+                print("[+] Test client VM started successfully.")
             except Exception as e:
-                print(f"[!] Failed to start Alpine client VM: {e}")
+                print(f"[!] Failed to start test client VM: {e}")
                 raise
         else:
-            raise RuntimeError("Alpine client setup script not found, cannot start Alpine VM.")
+            raise RuntimeError("Test client setup script not found, cannot start test client VM.")
 
 
 if __name__ == "__main__":

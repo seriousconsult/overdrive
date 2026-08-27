@@ -29,7 +29,7 @@ iface eth0 inet dhcp
 """
 
 LAB_NET_UP_INIT_ALPINE = """#!/sbin/openrc-run
-description="OpenWrt lab LAN: link up + DHCP"
+description="Lab LAN: link up + DHCP"
 
 depend() {
     need localmount client-firewall
@@ -69,7 +69,7 @@ LAB_NET_TROUBLESHOOT_SCRIPT = f"""#!/bin/sh
 # Installed by create_VM_client_browser_pipe_alpine.py
 set -u
 echo "================================================================"
-echo " Lab network troubleshoot (OpenWrt intnet client - Alpine)"
+echo " Lab network troubleshoot (test client on test-lan)"
 echo "================================================================"
 echo ""
 echo "=== IPv4 addresses ==="
@@ -130,7 +130,7 @@ fi
 """
 
 CLIENT_IP_TIMEZONE_SCRIPT = r"""#!/bin/sh
-# Set the Alpine client's timezone to the timezone reported for its current egress IP.
+# Set the test client's timezone to the timezone reported for its current egress IP.
 #
 # This intentionally changes only the local timezone presentation
 # (/etc/localtime + /etc/timezone). The system clock remains UTC internally.

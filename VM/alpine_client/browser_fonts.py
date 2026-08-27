@@ -1,4 +1,4 @@
-"""Stage Windows core fonts into the Alpine client image (no GUI).
+"""Stage Windows core fonts into the test client image (no GUI).
 
 Headless Chromium still uses fontconfig. Canvas ``measureText`` only counts a
 family as present when its width differs from generic CSS fallbacks. Distro
@@ -142,7 +142,7 @@ def stage_client_browser_fonts(work_root: Path) -> ClientBrowserFontAssets:
     if source_dir is None:
         searched = ", ".join(str(path) for path in _host_windows_font_dirs())
         raise RuntimeError(
-            "Alpine client needs Windows core fonts for the browser fonts probe, "
+            "Test client needs Windows core fonts for the browser fonts probe, "
             f"but no Fonts directory was found ({searched})."
         )
 
@@ -154,7 +154,7 @@ def stage_client_browser_fonts(work_root: Path) -> ClientBrowserFontAssets:
     selected = [available[name] for name in WINDOWS_BROWSER_FONT_FILENAMES if name in available]
     if len(selected) < _MIN_COPIED_FONTS:
         raise RuntimeError(
-            f"Alpine client needs at least {_MIN_COPIED_FONTS} allowlisted Windows fonts "
+            f"Test client needs at least {_MIN_COPIED_FONTS} allowlisted Windows fonts "
             f"from {source_dir}; found {len(selected)}."
         )
 

@@ -20,14 +20,14 @@ Score (1–5, higher = more suspicious / inconsistent)
 This does not replace TLS / JA3 checks (see detections/vpn/TLS_handshake.py for transport-layer
 signals). Optional: re-run in headed mode to compare with your UI profile.
 
-Echo URLs (tried in order):
-  - https://httpbin.org/get
-  - https://postman-echo.com/get
+Echo: local loopback HTTP server (no external network dependency).
 """
 
 from __future__ import annotations
 
 import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
@@ -37,8 +37,85 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import fetch_browser_json
-from detections.common.common_config import BROWSER_ECHO_TIMEOUT, HTTP_ECHO_URLS
+from detections.common.common_browser import (
+    build_driver,
+    close_driver,
+    DRIVER_COMMAND_TIMEOUT,
+)
+from detections.common.common_config import BROWSER_ECHO_TIMEOUT
+
+CLIENT_HINT_HEADERS = (
+    "Sec-CH-UA",
+    "Sec-CH-UA-Mobile",
+    "Sec-CH-UA-Platform",
+    "Sec-CH-UA-Platform-Version",
+    "Sec-CH-UA-Arch",
+    "Sec-CH-UA-Bitness",
+    "Sec-CH-UA-Full-Version",
+    "Sec-CH-UA-Full-Version-List",
+    "Sec-CH-UA-Model",
+    "Sec-CH-UA-WoW64",
+    "Sec-CH-UA-Form-Factors",
+)
+
+_PROBE_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>header probe</title></head>"
+    "<body><h1>header probe</h1></body></html>"
+)
+
+
+class _HeaderProbeState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.headers: dict[str, str] = {}
+
+
+def _headers_to_dict(headers) -> dict[str, str]:
+    return {str(k): str(v) for k, v in headers.items()}
+
+
+def _make_header_handler(state: _HeaderProbeState):
+    class HeaderProbeHandler(BaseHTTPRequestHandler):
+        server_version = "OverdriveHeaderProbe/1.0"
+
+        def log_message(self, _fmt: str, *_args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            path = urlparse(self.path).path
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
+            with state.lock:
+                state.headers = _headers_to_dict(self.headers)
+            state.done.set()
+            body = _PROBE_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Accept-CH", ", ".join(CLIENT_HINT_HEADERS))
+            self.send_header("Critical-CH", ", ".join(CLIENT_HINT_HEADERS[:8]))
+            self.send_header("Vary", ", ".join(CLIENT_HINT_HEADERS))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    return HeaderProbeHandler
+
+
+def _start_header_probe_server() -> tuple[ThreadingHTTPServer, _HeaderProbeState, str]:
+    state = _HeaderProbeState()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_header_handler(state))
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+        name="full-header-probe",
+    )
+    thread.start()
+    host, port = server.server_address
+    return server, state, f"http://{host}:{port}/"
 
 
 def _issue_weight(msg: str) -> int:
@@ -556,18 +633,27 @@ def analyze_headers(
 
 
 def fetch_headers_via_browser() -> tuple[dict[str, str] | None, str | None, str | None]:
-    last_err: str | None = None
-    for url in HTTP_ECHO_URLS:
-        data, err = fetch_browser_json(url, timeout=BROWSER_ECHO_TIMEOUT)
-        if not data:
-            last_err = f"{url}: {err or 'no JSON data'}"
-            continue
-        if "headers" not in data:
-            last_err = f"{url}: no 'headers' in JSON"
-            continue
-        hdrs = {str(k): str(v) for k, v in data["headers"].items()}
-        return hdrs, None, url
-    return None, last_err, None
+    timeout = max(BROWSER_ECHO_TIMEOUT, 25)
+    server, state, url = _start_header_probe_server()
+    driver = None
+    try:
+        driver = build_driver()
+        driver.set_page_load_timeout(timeout)
+        driver.set_script_timeout(min(timeout, DRIVER_COMMAND_TIMEOUT))
+        driver.get(url)
+        if not state.done.wait(timeout):
+            return None, f"header probe timed out after {timeout}s", url
+        with state.lock:
+            headers = dict(state.headers)
+        if not headers:
+            return None, "no navigation request captured", url
+        return {str(k): str(v) for k, v in headers.items()}, None, url
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}", url
+    finally:
+        close_driver(driver)
+        server.shutdown()
+        server.server_close()
 
 
 def check_full_header_consistency() -> tuple[int, str]:

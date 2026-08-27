@@ -35,10 +35,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_browser import (
+    close_driver,
     DEFAULT_TIMEOUT,
     build_driver_with_fallback,
     print_browser_detection_header,
     print_browser_detection_score_footer,
+    print_browser_probe_error,
 )
 
 
@@ -634,7 +636,7 @@ def _run_selenium_font_probe(timeout: int = FONT_PROBE_TIMEOUT) -> tuple[dict[st
     finally:
         try:
             if driver:
-                driver.quit()
+                close_driver(driver)
         except Exception:
             pass
 
@@ -1208,7 +1210,7 @@ def print_baseline_comparison(
     )
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Check and compare browser font enumeration behavior.")
     parser.add_argument("--timeout", type=int, default=FONT_PROBE_TIMEOUT, help="Seconds to wait for Selenium/browser work.")
     parser.add_argument(
@@ -1238,13 +1240,12 @@ def main() -> None:
     result, error = _run_selenium_font_probe(args.timeout)
     popular_report: dict[str, list[str]] | None = None
     if result is None:
-        score = 4 if error and error.startswith("Selenium is unavailable") else 3
-        description = f"Inconclusive: {error}" if score == 4 else (error or "Browser font probe failed.")
-    else:
-        score, description = _score_font_result(result)
-        popular_report = popular_windows_deviation_report(result)
-        deviation_count = _popular_windows_deviation_count(popular_report)
-        description = f"{description} Popular Windows baseline deviations: {deviation_count}."
+        return print_browser_probe_error(error or "Browser font probe failed.")
+
+    score, description = _score_font_result(result)
+    popular_report = popular_windows_deviation_report(result)
+    deviation_count = _popular_windows_deviation_count(popular_report)
+    description = f"{description} Popular Windows baseline deviations: {deviation_count}."
 
     print_browser_detection_header("Font Enumeration Home-Browser Plausibility Check")
     print_browser_detection_score_footer(score, description)
@@ -1268,7 +1269,8 @@ def main() -> None:
             threshold=max(0.0, args.diff_threshold),
             max_diffs=args.max_diffs,
         )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

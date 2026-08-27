@@ -3,7 +3,7 @@
 LAN neighbor density (ARP / NDP).
 
 Estimates how “lived-in” the local L2 segment looks from neighbor tables.
-A typical home LAN has many peers; a hardened Alpine lab often sees only the
+A typical home LAN has many peers; a hardened lab often sees only the
 gateway (and maybe the hypervisor host).
 
 Host-authenticity score:

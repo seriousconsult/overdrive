@@ -5,7 +5,7 @@ mDNS consumer-service diversity.
 Unlike raw service counts (see mDNS_mesh.py), this probe classifies discovered
 DNS-SD types into consumer categories (AirPlay, Chromecast, IPP printers,
 HomeKit, smart speakers, etc.). A lived-in home LAN usually exposes several
-categories; a hardened Alpine lab often exposes none.
+categories; a hardened lab often exposes none.
 
 Host-authenticity score:
   1 = 3+ distinct consumer categories

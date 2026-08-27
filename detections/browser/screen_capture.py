@@ -29,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_browser import (
+    close_driver,
     DEFAULT_TIMEOUT,
     build_driver_with_fallback,
     print_browser_detection_header,
@@ -393,7 +394,7 @@ def check_screen_capture() -> tuple[int, str]:
     finally:
         try:
             if driver is not None:
-                driver.quit()
+                close_driver(driver)
         except Exception:
             pass
 

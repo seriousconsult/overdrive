@@ -8,25 +8,34 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any
 
-import requests
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+
+try:
+    import requests
+except ImportError:  # Minimal guests may only need Selenium for browser probes.
+    requests = None  # type: ignore[assignment]
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "DEFAULT_PAGE_LOAD_TIMEOUT",
+    "DEFAULT_SCRIPT_TIMEOUT",
+    "DRIVER_COMMAND_TIMEOUT",
     "DEFAULT_REPORT_WIDTH",
     "build_driver",
     "build_driver_with_fallback",
+    "close_driver",
     "fetch_json",
     "fetch_browser_json",
+    "is_browser_timeout_error",
     "normalize_ip_fields",
     "ipv4_like_strings",
     "is_private_ipv4",
@@ -34,9 +43,14 @@ __all__ = [
     "extract_json_text_from_page",
     "print_browser_detection_header",
     "print_browser_detection_score_footer",
+    "print_browser_probe_error",
 ]
 
 DEFAULT_TIMEOUT = 8
+DEFAULT_PAGE_LOAD_TIMEOUT = 15
+DEFAULT_SCRIPT_TIMEOUT = 20
+DRIVER_COMMAND_TIMEOUT = 25
+DRIVER_START_TIMEOUT = 25
 DEFAULT_REPORT_WIDTH = 60
 
 _WINDOW_WIDTH = 1920
@@ -263,12 +277,70 @@ def _chromedriver_binary() -> str | None:
     return _first_existing_path("/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver")
 
 
+def close_driver(driver: webdriver.Remote | None) -> None:
+    """Stop Chromium without waiting indefinitely on a stuck ChromeDriver quit."""
+    if driver is None:
+        return
+    try:
+        driver.service.process.kill()
+    except Exception:
+        pass
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+
+def _start_chrome_driver(opts: Options) -> webdriver.Remote:
+    """Start Chrome with bounded startup wait and default page/script timeouts."""
+    driver_path = _chromedriver_binary()
+    service = (
+        ChromeService(executable_path=driver_path)
+        if driver_path
+        else ChromeService()
+    )
+    holder: dict[str, webdriver.Remote] = {}
+    error_holder: dict[str, BaseException] = {}
+
+    def _start() -> None:
+        try:
+            holder["driver"] = webdriver.Chrome(service=service, options=opts)
+        except BaseException as exc:
+            error_holder["error"] = exc
+            try:
+                service.stop()
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_start, daemon=True, name="overdrive-chrome-start")
+    thread.start()
+    thread.join(timeout=DRIVER_START_TIMEOUT)
+    if thread.is_alive():
+        try:
+            service.stop()
+        except Exception:
+            pass
+        raise TimeoutError(
+            f"Chrome did not start within {DRIVER_START_TIMEOUT}s "
+            f"(ChromeDriver command timeout={DRIVER_COMMAND_TIMEOUT}s)"
+        )
+    if "error" in error_holder:
+        raise error_holder["error"]
+    if "driver" not in holder:
+        raise RuntimeError("Chrome start thread finished without a driver")
+    driver = holder["driver"]
+    driver.set_page_load_timeout(DEFAULT_PAGE_LOAD_TIMEOUT)
+    driver.set_script_timeout(DEFAULT_SCRIPT_TIMEOUT)
+    return driver
+
+
 def build_driver() -> webdriver.Chrome:
     """Build a Chrome/Chromium WebDriver with common headless options for browser detection."""
     opts = Options()
     chromium = _chromium_binary()
     version = _chrome_full_version(chromium)
     user_agent = _desktop_chrome_user_agent(chromium)
+    opts.page_load_strategy = "eager"
     opts.add_argument("--headless=new")
     opts.add_argument("--enable-webgl")
     opts.add_argument("--ignore-gpu-blocklist")
@@ -280,6 +352,7 @@ def build_driver() -> webdriver.Chrome:
     opts.add_argument("--autoplay-policy=no-user-gesture-required")
     opts.add_argument("--disable-features=AudioServiceOutOfProcess")
     opts.add_argument("--lang=en-US")
+    opts.add_argument("--host-resolver-rules=MAP localhost 127.0.0.1,MAP [::1] 127.0.0.1")
     opts.add_argument(f"--window-size={_WINDOW_WIDTH},{_WINDOW_HEIGHT}")
     opts.add_argument(f"--user-agent={user_agent}")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -289,11 +362,7 @@ def build_driver() -> webdriver.Chrome:
     if chromium:
         opts.binary_location = chromium
 
-    driver_path = _chromedriver_binary()
-    if driver_path:
-        driver = webdriver.Chrome(service=ChromeService(executable_path=driver_path), options=opts)
-    else:
-        driver = webdriver.Chrome(options=opts)
+    driver = _start_chrome_driver(opts)
     _apply_headless_stealth(driver, user_agent, version)
     return driver
 
@@ -328,6 +397,8 @@ def fetch_json(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """GET JSON from a URL with a stable User-Agent (GeoIP / API probes)."""
+    if requests is None:
+        raise RuntimeError("The requests package is required for fetch_json()")
     r = requests.get(
         url,
         params=params,
@@ -353,12 +424,19 @@ def fetch_browser_json(
     driver = None
     try:
         driver = build_driver()
+        driver.set_page_load_timeout(timeout)
+        driver.set_script_timeout(min(timeout, DRIVER_COMMAND_TIMEOUT))
         target = url
         if cache_bust:
             sep = "&" if "?" in url else "?"
             target = f"{url}{sep}t={int(time.time())}"
-        driver.get(target)
-        raw = extract_json_text_from_page(driver, timeout=timeout)
+        try:
+            driver.get(target)
+        except TimeoutException:
+            return None, f"Page load timed out after {timeout}s for {url}"
+        # Cap JSON polling so a stuck page cannot burn the full suite budget.
+        poll_timeout = min(timeout, 12)
+        raw = extract_json_text_from_page(driver, timeout=poll_timeout)
         if not raw:
             return None, "Could not parse JSON from browser probe page."
         try:
@@ -371,11 +449,7 @@ def fetch_browser_json(
     except Exception as e:
         return None, f"Browser probe failed: {type(e).__name__}: {e}"
     finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        close_driver(driver)
 
 
 def normalize_ip_fields(provider: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -477,22 +551,24 @@ def extract_json_text_from_page(driver: webdriver.Chrome, timeout: int = 25) -> 
     """
     Read JSON rendered in ``<pre>`` or raw body text (e.g. tls.peet.ws/api/all).
     """
-    try:
-        pre = WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.TAG_NAME, "pre"))
-        )
-        text = (pre.text or "").strip()
-        if text.startswith("{") and text.endswith("}"):
-            return text
-    except Exception:
-        pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            pre = driver.find_element(By.TAG_NAME, "pre")
+            text = (pre.text or "").strip()
+            if text.startswith("{") and text.endswith("}"):
+                return text
+        except Exception:
+            pass
 
-    try:
-        text = driver.find_element(By.TAG_NAME, "body").text.strip()
-        if text.startswith("{") and text.endswith("}"):
-            return text
-    except Exception:
-        pass
+        try:
+            text = driver.find_element(By.TAG_NAME, "body").text.strip()
+            if text.startswith("{") and text.endswith("}"):
+                return text
+        except Exception:
+            pass
+
+        time.sleep(0.25)
 
     return None
 
@@ -517,3 +593,35 @@ def print_browser_detection_score_footer(
     print(f"  {description}")
     print()
     print("=" * width)
+
+
+def is_browser_timeout_error(message: str | None) -> bool:
+    """True when a probe failure string looks like a timeout / hung driver."""
+    if not message:
+        return False
+    text = message.lower()
+    return any(
+        needle in text
+        for needle in (
+            "timeout",
+            "timed out",
+            "read timed out",
+            "did not start within",
+            "did not finish within",
+        )
+    )
+
+
+def print_browser_probe_error(reason: str, *, width: int = DEFAULT_REPORT_WIDTH) -> int:
+    """
+    Report a non-scorable probe failure.
+
+    Timeouts and driver crashes are not authenticity scores (1-5). Prints
+    ``SCORE: Error`` and returns exit code 2 for the suite runner.
+    """
+    label = "TIMEOUT" if is_browser_timeout_error(reason) else "ERROR"
+    print(f"SCORE: Error")
+    print(f"STATUS: {label}: {reason}")
+    print()
+    print("=" * width)
+    return 2

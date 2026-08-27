@@ -1,4 +1,4 @@
-"""VirtualBox serial console attach for the Alpine lab client."""
+"""VirtualBox serial console attach for the test client."""
 
 from __future__ import annotations
 

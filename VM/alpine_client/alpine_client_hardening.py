@@ -1,4 +1,4 @@
-"""Alpine client hardening scripts and OpenRC assets."""
+"""Test client hardening scripts and OpenRC assets."""
 
 from VM.vm_config import OPENWRT_LAN_DNS
 
@@ -10,7 +10,7 @@ __all__ = [
 
 
 CLIENT_FIREWALL_INIT_ALPINE = """#!/sbin/openrc-run
-description="OpenWrt lab client firewall"
+description="Test client firewall"
 
 depend() {
     need localmount
@@ -83,7 +83,7 @@ start_firewall() {
   iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT
   iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT
 
-  # Keep resolver traffic pinned to the OpenWrt router. Targeted UDP discovery
+  # Keep resolver traffic pinned to the test router. Targeted UDP discovery
   # and TCP to the router stay open so router probes/admin checks still work.
   iptables -A OUTPUT -d "$OPENWRT_DNS" -p udp --dport 53 -j ACCEPT
   iptables -A OUTPUT -d "$OPENWRT_DNS" -p tcp --dport 53 -j ACCEPT
@@ -132,7 +132,7 @@ esac
 """.replace("__OPENWRT_LAN_DNS__", OPENWRT_LAN_DNS)
 
 CLIENT_HARDENING_SCRIPT = r"""#!/bin/sh
-# Security hardening for the disposable Alpine client VM.
+# Security hardening for the disposable test client VM.
 set -eu
 
 SYSCTL_FILE="/etc/sysctl.d/99-overdrive-client-hardening.conf"
@@ -263,7 +263,7 @@ SYSCTL
 
   cat > /etc/init.d/overdrive-sysctl-hardening <<'INIT'
 #!/sbin/openrc-run
-description="Apply Overdrive Alpine client sysctl hardening"
+description="Apply Overdrive test client sysctl hardening"
 
 depend() {
     need localmount

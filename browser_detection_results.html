@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overdrive Detection Results</title>
+<style>
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --border: #2d3a4d;
+  --text: #e7ecf3;
+  --muted: #8b9cb3;
+  --accent: #3d9eff;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  margin: 0;
+  padding: 1.25rem 1.5rem 2rem;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+  font-size: 14px;
+}
+header {
+  max-width: 960px;
+  margin: 0 auto 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+}
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+.timestamp { color: var(--muted); font-size: 0.8rem; }
+main { max-width: 960px; margin: 0 auto; }
+section { margin-bottom: 1.5rem; }
+h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  background: var(--surface);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.65rem;
+  vertical-align: top;
+}
+th:nth-child(1), td:nth-child(1) { width: 32%; }
+th:nth-child(2), td:nth-child(2) { width: 5.5rem; }
+th:nth-child(3), td:nth-child(3) { width: auto; }
+th {
+  background: rgba(0,0,0,0.25);
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+.script { font-family: ui-monospace, monospace; font-size: 0.85rem; color: #b8d4ff; }
+.comment {
+  color: var(--muted);
+  font-size: 0.8rem;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.badge {
+  display: inline-block;
+  min-width: 2rem;
+  text-align: center;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.badge.na { background: #3d4555; color: #c5cdd8; }
+.badge.err { background: #5c2a2a; color: #ffb4b4; }
+.badge.todo { background: #4a3d6b; color: #d4c4ff; }
+.badge.n1 { background: #1e4d2b; color: #9fe3b4; }
+.badge.n2 { background: #2d4a3a; color: #a8e0c0; }
+.badge.n3 { background: #3d4a5c; color: #c5d4e8; }
+.badge.n4 { background: #5c4a2a; color: #ffd89a; }
+.badge.n5 { background: #5c3a2a; color: #ffb89a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Overdrive detection results</h1>
+  <div style="display: flex; gap: 1rem; align-items: baseline;">
+    <span class="timestamp">2026-08-26 21:28:06</span>    <span class="timestamp">(0m 47s)</span>
+  </div>
+</header>
+<main>
+<section>
+<h2>Browser: 2</h2>
+<table><colgroup><col><col><col></colgroup><thead><tr><th>Script</th><th>Score</th><th>Comment</th></tr></thead><tbody>
+<tr><td class="script">HTML5_Geolocation_API.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: All providers agree on one country name — not multiple countries.</td></tr>
+<tr><td class="script">HTTP2_settings.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: HTTP/2 SETTINGS fingerprint is coherent for the detected browser family.</td></tr>
+<tr><td class="script">HTTP3_QUIC.py</td><td><span class="badge badge n4">4</span></td><td class="comment">STATUS: Chrome-like UA negotiated HTTP/2 and exposed no QUIC transport-parameter evidence (suspicious for an H3-capable client path).</td></tr>
+<tr><td class="script">WebRTC.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Structured WebRTC fields expose an IPv4 candidate; mildly atypical but still browser-like.</td></tr>
+<tr><td class="script">audio_fingerprint.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Home-like audio profile detected: Audio probe completed. Popular Windows audio baseline deviations: 0.</td></tr>
+<tr><td class="script">canvas_fingerprint.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Strongly home-like: stable fingerprintable canvas and coherent ordinary browser signals. hash=digest unavailable, dataURL bytes=9766.</td></tr>
+<tr><td class="script">cookie_tracking.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: cookie/storage probe completed. Popular Windows cookie/storage baseline deviations: 0.</td></tr>
+<tr><td class="script">font_enumeration.py</td><td><span class="badge badge n2">2</span></td><td class="comment">STATUS: Mostly home-like: modest but plausible font surface; detected 12/82 tested fonts (sample: Arial, Courier New, Times New Roman, Helvetica, Ubuntu, Ubuntu Mono, DejaVu Sans, DejaVu Serif). Popular Windows baseline deviations: 70.</td></tr>
+<tr><td class="script">full_header.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Request headers and Client Hints look internally consistent for the detected family. | echo=http://127.0.0.1:46333/</td></tr>
+<tr><td class="script">gpu_webgl_fingerprint.py</td><td><span class="badge badge n5">5</span></td><td class="comment">STATUS: Strong VM/software graphics evidence exposed via WebGL: WebGL renderer/vendor exposes software rendering. renderer=&#x27;ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)&#x27;, vendor=&#x27;Google Inc. (Google)&#x27;, hash=6a07e343.</td></tr>
+<tr><td class="script">language_timezone.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: Browser language, request locale, and OS timezone are coherent.</td></tr>
+<tr><td class="script">screen_capture.py</td><td><span class="badge badge n5">5</span></td><td class="comment">No navigator.mediaDevices — not typical for a residential browser (hardened or non-browser profile).</td></tr>
+<tr><td class="script">user_agent_client_hints.py</td><td><span class="badge badge n1">1</span></td><td class="comment">STATUS: UA and available Client Hints are coherent for the detected browser family.</td></tr>
+</tbody></table>
+</section>
+</main>
+</body>
+</html>

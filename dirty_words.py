@@ -169,7 +169,7 @@ def build_rules() -> list[Rule]:
         Rule("url", 3, _bregex(r"\bhttps?://[^\s\"'<>]+", re.I), "URL"),
         Rule("bare-domain", 2, _bregex(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|local|lan|internal|corp|home)\b", re.I), "domain/hostname-like string"),
         Rule("lab-client-name", 4, _bregex(r"(?i)\b(?:my-alpine-client|openwrt[_-]?lan[_-]?client|client[_-]?vm|lab[_-]?client|test[_-]?client|overdrive)\b"), "lab/client identifying name", redact=False),
-        Rule("virtualbox-vm-name", 4, _bregex(r"(?i)\b(?:OpenWrt_2026_Router|OpenWrt_LAN_Client|VirtualBox VMs)\b"), "VM/lab name", redact=False),
+        Rule("virtualbox-vm-name", 4, _bregex(r"(?i)\b(?:Test_Router|Test_Client|Test_Client_Legacy|OpenWrt_2026_Router|OpenWrt_LAN_Client|VirtualBox VMs)\b"), "VM/lab name", redact=False),
     ]
     return _local_identity_rules() + rules
 

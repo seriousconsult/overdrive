@@ -12,7 +12,7 @@ default route. Its purpose is detection calibration: run detections with this
 test artifact down, then up, and compare which local VPN signals change.
 
 There is an opt-in ``--real-wireguard`` mode for systems where the WireGuard
-kernel module is known to be safe. Do not use that mode on the Alpine client if
+kernel module is known to be safe. Do not use that mode on the test client if
 it triggers kernel soft-lockups.
 """
 

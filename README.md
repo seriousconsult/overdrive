@@ -43,7 +43,9 @@ Useful commands:
 python3 run/run_all.py --skip-vms          # detections only
 python3 run/run_all.py --skip-detections   # VM setup/verification only
 python3 detections/run_detections.py
+python3 run/run_browser_detections.py      # browser probes only (Chromium/Selenium)
 python3 run/run_VMs.py
+python3 run/run_VMs.py --headless       # full rebuild without GUI windows
 ```
 
 ## Layout
@@ -51,7 +53,7 @@ python3 run/run_VMs.py
 - `detections/browser`, `detections/network`, `detections/router`, `detections/vpn`: score-producing probes.
 - `detections/common`: shared constants and helper libraries; not run directly.
 - `local_host`: local machine / WSL checks.
-- `VM`: OpenWrt lab VM setup and verification.
+- `VM`: lab VM setup and verification.
 - `run`: batch runners.
 
 ## Gotchas
@@ -90,14 +92,14 @@ Verify after reopening WSL:
 python3 local_host/wsl_config.py
 ```
 
-## OpenWrt Lab
+## Lab VMs
 
 - **WAN checks:** run from the host or the router WAN segment; target the router WAN IP.
-- **LAN checks:** run from the client VM on `openwrt-lan`; target the router LAN IP, usually `192.168.50.1`.
+- **LAN checks:** run from the client VM on `test-lan`; target the router LAN IP, usually `192.168.50.1`.
 - The WSL/Linux host cannot directly reach VirtualBox `intnet` LANs.
 - The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
-- The Alpine LAN client uses hostname `client`, a fresh Dell NIC MAC, tame DHCP client identity, cleared `machine-id`, and a generic timezone User-Agent at build time. Rebuild the Alpine VM after changing those settings. LAN silence is still expected and discovery probes may still score it as lab-like.
-- Alpine client checker/network deps are installed by guest `install.py` during VDI prime (Python libs into `/root/virtual_env`; curl, iproute2, iputils, wireguard-tools, nmap, dig, tcpdump, Chromium via apk). Bootstrap image install keeps `bash` / `python3` / `tzdata` / `iptables` (so `client-firewall` works without `install.py`). Rebuild the client after changing bootstrap packages or `install.py`.
+- The test client uses hostname `client`, a fresh Dell NIC MAC, tame DHCP client identity, cleared `machine-id`, and a generic timezone User-Agent at build time. Rebuild the Alpine VM after changing those settings. LAN silence is still expected and discovery probes may still score it as lab-like.
+- Test client checker/network deps are installed by guest `install.py` during VDI prime (Python libs into `/root/virtual_env`; curl, iproute2, iputils, wireguard-tools, nmap, dig, tcpdump, Chromium via apk). Bootstrap image install keeps `bash` / `python3` / `tzdata` / `iptables` (so `client-firewall` works without `install.py`). Rebuild the client after changing bootstrap packages or `install.py`.
 
 Verify wiring:
 

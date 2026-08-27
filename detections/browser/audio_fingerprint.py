@@ -37,6 +37,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from detections.common.common_browser import (
+    close_driver,
     DEFAULT_TIMEOUT,
     build_driver_with_fallback,
     print_browser_detection_header,
@@ -1120,7 +1121,7 @@ def _run_selenium_audio_probe(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[dict[
         print("[audio] Browser audio probe returned data.", flush=True)
     except Exception as exc:
         try:
-            driver.quit()
+            close_driver(driver)
         except Exception:
             pass
         if server is not None:
@@ -1130,7 +1131,7 @@ def _run_selenium_audio_probe(timeout: int = AUDIO_PROBE_TIMEOUT) -> tuple[dict[
 
     try:
         print("[audio] Closing WebDriver...", flush=True)
-        driver.quit()
+        close_driver(driver)
     except Exception:
         pass
     if server is not None:
@@ -1187,13 +1188,14 @@ def main() -> None:
 
     result, error = _run_selenium_audio_probe(args.timeout)
     if result is None:
-        score = 3
-        description = error or "Audio fingerprint detection failed."
-    else:
-        score, description = _score_audio_result(result)
-        popular_report = popular_windows_audio_deviation_report(result)
-        deviation_count = _popular_windows_audio_deviation_count(popular_report)
-        description = f"{description} Popular Windows audio baseline deviations: {deviation_count}."
+        from detections.common.common_browser import print_browser_probe_error
+
+        return print_browser_probe_error(error or "Audio fingerprint detection failed.")
+
+    score, description = _score_audio_result(result)
+    popular_report = popular_windows_audio_deviation_report(result)
+    deviation_count = _popular_windows_audio_deviation_count(popular_report)
+    description = f"{description} Popular Windows audio baseline deviations: {deviation_count}."
 
     print_browser_detection_score_footer(score, description)
     print(f"STATUS: {description}")
@@ -1216,7 +1218,8 @@ def main() -> None:
             threshold=max(0.0, args.diff_threshold),
             max_diffs=args.max_diffs,
         )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

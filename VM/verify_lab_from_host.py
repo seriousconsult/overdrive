@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Verify VirtualBox wiring for the OpenWrt lab **from WSL or Linux on the host**.
+Verify VirtualBox wiring for the lab **from WSL or Linux on the host**.
 
 This checks what the hypervisor is configured to do. It does **not** prove DHCP or routing inside
 guests — run ``ip addr`` / ``ping`` **inside** the client VM for that (see LAB_TOPOLOGY.md).
 
-Why: the LAN segment (``192.168.50.0/24`` on intnet ``openwrt-lan``) is **not** visible to the host
+Why: the LAN segment (``192.168.50.0/24`` on intnet ``test-lan``) is **not** visible to the host
 OS; only VirtualBox guests on that intnet can talk to each other there.
 
 Exit codes: 0 = all checks passed, 1 = failed check(s), 2 = VBoxManage not found.
@@ -28,11 +28,12 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from detections.common.common_vm import (
-    OPENWRT_CLIENT_VM_NAME,
-    OPENWRT_LAN_INTNET_NAME,
-    OPENWRT_ROUTER_VM_NAME,
+    LEGACY_CLIENT_VM_NAME,
     SERIAL_TCP_HOST,
     SERIAL_TCP_PORT,
+    TEST_CLIENT_VM_NAME,
+    TEST_LAN_INTNET_NAME,
+    TEST_ROUTER_VM_NAME,
     find_vboxmanage_with_windows_fallback,
     vboxmanage_targets_windows,
     vm_is_registered as vm_registered,
@@ -43,9 +44,9 @@ from detections.common.common_vm import (
     serial_uart_mode_and_endpoint,
 )
 
-ROUTER_VM = OPENWRT_ROUTER_VM_NAME
-CLIENT_VM = OPENWRT_CLIENT_VM_NAME
-LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
+ROUTER_VM = TEST_ROUTER_VM_NAME
+CLIENT_VM = LEGACY_CLIENT_VM_NAME
+LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
 
 
 def serial_attach_is_locked(port: int) -> bool:
@@ -114,7 +115,7 @@ def check_client_serial_pipe(
             print(f"  [+] {vm_name} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{port}")
             print(
                 "      Socket-level check only; this does not prove guest ttyS0 output. "
-                f"Run: python VM/{'alpine_client/create_VM_client_browser_pipe_alpine.py' if vm_name == 'OpenWrt_LAN_Client_Alpine' else 'create_VM_client_browser_pipe.py'} --serial-only"
+                f"Run: python VM/{'alpine_client/create_VM_client_browser_pipe_alpine.py' if vm_name == TEST_CLIENT_VM_NAME else 'create_VM_client_browser_pipe.py'} --serial-only"
             )
         else:
             errs.append(
@@ -134,13 +135,12 @@ def check_client_serial_pipe(
 
 
 def resolve_lab_client_vm(vbox: str) -> tuple[str, int]:
-    """Prefer the Alpine lab client; fall back to the legacy Ubuntu client name."""
-    alpine = "OpenWrt_LAN_Client_Alpine"
-    if vm_registered(vbox, alpine):
-        return alpine, 2325
+    """Prefer the test client; fall back to the legacy Ubuntu client name."""
+    if vm_registered(vbox, TEST_CLIENT_VM_NAME):
+        return TEST_CLIENT_VM_NAME, 2325
     if vm_registered(vbox, CLIENT_VM):
         return CLIENT_VM, SERIAL_TCP_PORT
-    return alpine, 2325
+    return TEST_CLIENT_VM_NAME, 2325
 
 
 def nic_promisc_policy(vbox: str, vm_name: str, info: dict[str, str], nic_index: int) -> str | None:
@@ -258,9 +258,9 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
 
     client_vm, client_port = resolve_lab_client_vm(vbox)
     print(f"Lab client VM:         {client_vm} (serial TCP {client_port})")
-    if client_vm == "OpenWrt_LAN_Client_Alpine" and vm_registered(vbox, CLIENT_VM):
+    if client_vm == TEST_CLIENT_VM_NAME and vm_registered(vbox, CLIENT_VM):
         print(
-            f"  [i] Ignoring legacy {CLIENT_VM!r} (still registered but not the Alpine lab client)."
+            f"  [i] Ignoring legacy {CLIENT_VM!r} (still registered but not the test client)."
         )
     print()
 
@@ -331,7 +331,7 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Verify OpenWrt lab VM networking and client serial pipe from the host.",
+        description="Verify lab VM networking and client serial pipe from the host.",
     )
     ap.add_argument(
         "-v",

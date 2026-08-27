@@ -1,4 +1,4 @@
-"""Stage a dummy ALSA default device into the Alpine client image (no GUI).
+"""Stage a dummy ALSA default device into the test client image (no GUI).
 
 Headless Chromium's live ``AudioContext`` still talks to a default PCM. Without
 a card, construction/resume can fail and the audio_fingerprint probe falls

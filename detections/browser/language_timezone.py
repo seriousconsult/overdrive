@@ -38,6 +38,7 @@ try:
     from detections.common.common_browser import (
         DEFAULT_TIMEOUT,
         build_driver_with_fallback,
+        close_driver,
         print_browser_detection_header,
     )
 
@@ -255,7 +256,7 @@ def collect_browser_probe(timeout: int) -> tuple[dict[str, Any] | None, str | No
     finally:
         if driver is not None:
             try:
-                driver.quit()
+                close_driver(driver)
             except Exception:
                 pass
         server.shutdown()

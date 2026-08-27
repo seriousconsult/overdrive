@@ -11,7 +11,7 @@ Bootstrap a project-local Python virtual environment for Overdrive automation.
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
 - Drops into an interactive bash with venv activated (skipped with ``--non-interactive``)
 
-The Alpine LAN client primes by copying this script to ``/root`` and running it
+The test client primes by copying this script to ``/root`` and running it
 with ``--non-interactive`` (do not apk-add those checker packages in
 ``package_assets.py``).
 """
@@ -49,7 +49,7 @@ DIG_PACKAGE_BY_MGR = {
     "apk": "bind-tools",
 }
 
-# Core networking packages used by the Alpine lab client (and useful on hosts).
+# Core networking packages used by the test client (and useful on hosts).
 # Installed here — not by VM/alpine_client/package_assets.py.
 # Package names differ by distro (Debian has iputils-ping, not iputils).
 NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
@@ -59,7 +59,7 @@ NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
 }
 
 # Real, non-GUI runtime assets that make headless Chromium less skeletal on the
-# Alpine lab client. These improve measured fonts/rendering/media capability;
+# Test client. These improve measured fonts/rendering/media capability;
 # they do not mask headless automation or spoof browser identity.
 ALPINE_BROWSER_SUPPORT_PACKAGES: tuple[str, ...] = (
     "fontconfig",
@@ -125,7 +125,7 @@ def get_linux_info():
             "mgr": "apk",
             "pcap": "libpcap",
             "7zip_sets": [["7zip"], ["p7zip"]],
-            # Not useful inside the Alpine lab guest; host WSL uses apt/dnf.
+            # Not useful inside the lab guest; host WSL uses apt/dnf.
             "guestfs_sets": [],
             "cap_provider_sets": [["libcap-utils"], ["libcap"]],
             "chrome_cmd": "chromium",

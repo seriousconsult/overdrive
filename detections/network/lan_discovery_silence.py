@@ -3,7 +3,7 @@
 Windows / legacy LAN discovery silence (LLMNR, NBNS, WS-Discovery).
 
 Typical home Windows/Android stacks answer LLMNR (UDP 5355), NetBIOS name
-service (UDP 137), and often WS-Discovery (UDP 3702). Hardened Alpine clients
+service (UDP 137), and often WS-Discovery (UDP 3702). Hardened test clients
 are usually silent.
 
 Host-authenticity score:

@@ -46,7 +46,7 @@ DEFAULT_SKIP_CREATE_SCRIPTS = frozenset(
 VERIFY_SCRIPT = "verify_lab_from_host.py"
 
 STEP_LABELS = {
-    "create_VM_OpenWrt_router.py": "OpenWrt router + Alpine client",
+    "create_VM_OpenWrt_router.py": "Test router + test client",
     VERIFY_SCRIPT: "Verify lab wiring",
 }
 
@@ -225,7 +225,7 @@ def print_tmux_host_help() -> None:
     session_name = os.environ.get(TMUX_SESSION_ENV, TMUX_SESSION_BASE)
     print("tmux layout")
     print("  top:    host runner, logs, verification")
-    print("  bottom: left Alpine client serial, right OpenWrt router serial")
+    print("  bottom: left test client serial, right test router serial")
     print()
     print("Move between panes (prefix is Ctrl-b: press it, release, then the next key)")
     print("  mouse click         focus a pane")
@@ -344,7 +344,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         pass
     host_command = _tmux_host_command(session_name, argv, ready_file=ready_file)
     client_command = _tmux_serial_loop(
-        "Alpine client serial :2325",
+        "Test client serial :2325",
         [
             sys.executable,
             str(SCRIPT_DIR / "alpine_client" / "create_VM_client_browser_pipe_alpine.py"),
@@ -356,7 +356,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         ready_file=ready_file,
     )
     router_command = _tmux_serial_loop(
-        "OpenWrt router serial :2324",
+        "Test router serial :2324",
         [
             sys.executable,
             str(SCRIPT_DIR / "openwrt_router" / "create_VM_OpenWrt_router.py"),
@@ -458,6 +458,13 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     else:
         subprocess.run(["tmux", "attach-session", "-t", session_name], check=True)
     return 0
+
+
+def _resolve_start_type(*, headless: bool, connect_serial: bool) -> str:
+    """Prefer headless starts when no GUI serial attach is needed."""
+    if headless or not connect_serial:
+        return "headless"
+    return "gui"
 
 
 def discover_create_scripts(
@@ -618,7 +625,7 @@ def _print_log_tail(log_path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Create/refresh the OpenWrt lab VMs, then verify host-side wiring.",
+        description="Create/refresh the lab VMs, then verify host-side wiring.",
     )
     parser.add_argument(
         "--tmux",
@@ -626,6 +633,11 @@ def main() -> int:
         action="store_true",
         default=True,
         help="Run inside the managed tmux layout when stdout is interactive. Default: on.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Use headless VM starts during full create/rebuild (faster than GUI).",
     )
     parser.add_argument(
         "--include-todo",
@@ -681,6 +693,14 @@ def main() -> int:
             log.write("[!] No runnable create_VM_*.py scripts found.\n")
             return 1
 
+        connect_serial = not (
+            os.environ.get(TMUX_ENV_FLAG) or not sys.stdout.isatty() or args.headless
+        )
+        start_type = _resolve_start_type(
+            headless=args.headless,
+            connect_serial=connect_serial,
+        )
+
         steps: list[tuple[str, list[str], Path]] = []
         for script in scripts:
             command = [sys.executable, str(script)]
@@ -688,11 +708,11 @@ def main() -> int:
                 command.extend(
                     [
                         "--start-type",
-                        "gui",
+                        start_type,
                         "--start-alpine-client",
                     ]
                 )
-                if os.environ.get(TMUX_ENV_FLAG) or not sys.stdout.isatty():
+                if not connect_serial:
                     command.append("--no-connect-serial")
             steps.append((step_label(script), command, script))
 

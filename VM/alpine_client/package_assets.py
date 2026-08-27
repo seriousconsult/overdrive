@@ -1,4 +1,4 @@
-"""Bootstrap-only OS packages for the Alpine client builder.
+"""Bootstrap-only OS packages for the test client builder.
 
 ``iptables`` is installed here so ``client-firewall`` can harden the network
 without ``install.py``. Other network tools (curl, iproute2, iputils,

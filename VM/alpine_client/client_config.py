@@ -1,10 +1,10 @@
-"""Constants for the Alpine lab client VM builder."""
+"""Constants for the test client VM builder."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from detections.common.common_vm import OPENWRT_LAN_INTNET_NAME
+from detections.common.common_vm import TEST_CLIENT_VM_NAME, TEST_LAN_INTNET_NAME
 
 __all__ = [
     "ALPINE_CLIENT_DIR",
@@ -27,8 +27,8 @@ ALPINE_CLIENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = str(ALPINE_CLIENT_DIR.parents[1])
 CREATE_SCRIPT_NAME = "create_VM_client_browser_pipe_alpine.py"
 
-LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
-VM_NAME = "OpenWrt_LAN_Client_Alpine"
+LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
+VM_NAME = TEST_CLIENT_VM_NAME
 CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
 CLIENT_GUEST_HOSTNAME = "client"

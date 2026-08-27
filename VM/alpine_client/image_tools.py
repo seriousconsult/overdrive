@@ -193,10 +193,10 @@ def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mi
     if current_bytes is None:
         print(f"Could not determine VDI virtual size; requesting resize to {target_mib} MiB.")
     elif current_bytes >= target_bytes:
-        print(f"Alpine client VDI virtual size is already at least {target_mib} MiB.")
+        print(f"Test client VDI virtual size is already at least {target_mib} MiB.")
     else:
         current_mib = current_bytes // (1024 * 1024)
-        print(f"Growing Alpine client VDI from {current_mib} MiB to {target_mib} MiB...")
+        print(f"Growing test client VDI from {current_mib} MiB to {target_mib} MiB...")
 
     if current_bytes is None or current_bytes < target_bytes:
         vdi_for_vbox = wsl_to_windows_path(vdi_linux) if vboxmanage_targets_windows(vboxmanage) else vdi_linux
@@ -207,12 +207,12 @@ def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mi
     guestfish = shutil.which("guestfish")
     if not guestfish:
         raise RuntimeError(
-            "guestfish is required to expand the Alpine client filesystem.\n"
+            "guestfish is required to expand the test client filesystem.\n"
             "Install it in WSL with:\n"
             "  sudo apt install -y libguestfs-tools"
         )
 
-    print(f"Expanding Alpine client filesystem on {CLIENT_ROOT_DEVICE}...")
+    print(f"Expanding test client filesystem on {CLIENT_ROOT_DEVICE}...")
     subprocess.run(
         [guestfish, "-a", vdi_linux, "run", ":", "resize2fs", CLIENT_ROOT_DEVICE],
         check=True,

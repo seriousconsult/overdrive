@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 r"""
-Create an Alpine Linux VM in VirtualBox for use **behind** the OpenWrt router from
+Create an Alpine Linux VM in VirtualBox for use **behind** the test router from
 ``create_VM_OpenWrt_router.py``.
 
 Networking (lab):
-  * **NIC1** — VirtualBox **internal network** ``openwrt-lan`` (same name as the router’s LAN leg).
+  * **NIC1** — VirtualBox **internal network** ``test-lan`` (same name as the router’s LAN leg).
     The guest gets DHCP from OpenWrt’s LAN; default gateway is the OpenWrt LAN IP.
 
 This VM is **not** bridged to your Windows/WSL LAN. To browse from the host
@@ -33,11 +33,11 @@ Serial console endpoint:
       disconnects with Ctrl-].
 
   * Native Linux host / Linux VirtualBox:
-      VirtualBox exposes the Unix socket ``/tmp/OpenWrt_LAN_Client_serial.sock``. After the VM
+      VirtualBox exposes the Unix socket ``/tmp/Test_Client_serial.sock``. After the VM
       starts, run ``socat`` in one terminal to create a PTY, then attach ``screen`` in another:
-        rm -f /tmp/OpenWrt_LAN_Client_serial.pty
-        socat -d -d UNIX-CONNECT:/tmp/OpenWrt_LAN_Client_serial.sock PTY,link=/tmp/OpenWrt_LAN_Client_serial.pty,raw,echo=0
-        screen /tmp/OpenWrt_LAN_Client_serial.pty 115200
+        rm -f /tmp/Test_Client_serial.pty
+        socat -d -d UNIX-CONNECT:/tmp/Test_Client_serial.sock PTY,link=/tmp/Test_Client_serial.pty,raw,echo=0
+        screen /tmp/Test_Client_serial.pty 115200
 
 
 Username: root
@@ -88,7 +88,6 @@ from detections.common.common_vm import (
     find_vboxmanage,
     get_vm_state,
     get_system_paths,
-    OPENWRT_LAN_INTNET_NAME,
     close_medium_best_effort,
     ensure_kvm_accessible,
     remove_existing_vm,
@@ -109,6 +108,19 @@ from VM.alpine_client.alpine_client_hardening import (
     CLIENT_FIREWALL_INIT_ALPINE,
     CLIENT_FIREWALL_SCRIPT,
     CLIENT_HARDENING_SCRIPT,
+)
+from VM.alpine_client.client_config import (
+    ALPINE_IMAGE_NAME,
+    ALPINE_SERIAL_TCP_PORT,
+    ALPINE_URL,
+    CLIENT_GUEST_HOSTNAME,
+    CLIENT_MEMORY_MIB,
+    CLIENT_ROOT_DEVICE,
+    CLIENT_VDI_NAME,
+    CLIENT_VDI_SIZE_MIB,
+    CLIENT_VM_CPUS,
+    LAN_INTNET_NAME,
+    VM_NAME,
 )
 from VM.alpine_client.package_assets import client_package_install_script
 from VM.alpine_client.pipeline import (
@@ -132,21 +144,6 @@ from VM.vm_config import (
     format_mac_colon,
     random_client_mac_vbox,
 )
-
-LAN_INTNET_NAME = OPENWRT_LAN_INTNET_NAME
-VM_NAME = "OpenWrt_LAN_Client_Alpine"
-CLIENT_VDI_NAME = "client_browser_alpine.vdi"
-CLIENT_VM_CPUS = 1
-CLIENT_GUEST_HOSTNAME = "client"
-# Chromium + detection Python deps need more than the tiny cloud image default.
-CLIENT_VDI_SIZE_MIB = 8192
-CLIENT_MEMORY_MIB = 2048
-CLIENT_ROOT_DEVICE = "/dev/sda"
-
-ALPINE_SERIAL_TCP_PORT = 2325
-
-ALPINE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
-ALPINE_IMAGE_NAME = "nocloud_alpine-3.20.10-x86_64-bios-tiny-r0.qcow2"
 
 
 
@@ -306,10 +303,10 @@ def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mi
     if current_bytes is None:
         print(f"Could not determine VDI virtual size; requesting resize to {target_mib} MiB.")
     elif current_bytes >= target_bytes:
-        print(f"Alpine client VDI virtual size is already at least {target_mib} MiB.")
+        print(f"Test client VDI virtual size is already at least {target_mib} MiB.")
     else:
         current_mib = current_bytes // (1024 * 1024)
-        print(f"Growing Alpine client VDI from {current_mib} MiB to {target_mib} MiB...")
+        print(f"Growing test client VDI from {current_mib} MiB to {target_mib} MiB...")
 
     if current_bytes is None or current_bytes < target_bytes:
         vdi_for_vbox = wsl_to_windows_path(vdi_linux) if vboxmanage_targets_windows(vboxmanage) else vdi_linux
@@ -320,12 +317,12 @@ def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mi
     guestfish = shutil.which("guestfish")
     if not guestfish:
         raise RuntimeError(
-            "guestfish is required to expand the Alpine client filesystem.\n"
+            "guestfish is required to expand the test client filesystem.\n"
             "Install it in WSL with:\n"
             "  sudo apt install -y libguestfs-tools"
         )
 
-    print(f"Expanding Alpine client filesystem on {CLIENT_ROOT_DEVICE}...")
+    print(f"Expanding test client filesystem on {CLIENT_ROOT_DEVICE}...")
     subprocess.run(
         [guestfish, "-a", vdi_linux, "run", ":", "resize2fs", CLIENT_ROOT_DEVICE],
         check=True,
@@ -341,7 +338,7 @@ iface eth0 inet dhcp
 """
 
 LAB_NET_UP_INIT_ALPINE = """#!/sbin/openrc-run
-description="OpenWrt lab LAN: link up + DHCP"
+description="Lab LAN: link up + DHCP"
 
 depend() {
     need localmount client-firewall
@@ -442,7 +439,7 @@ fi
 """
 
 CLIENT_IP_TIMEZONE_SCRIPT = r"""#!/bin/sh
-# Set the Alpine client's timezone to the timezone reported for its current egress IP.
+# Set the test client's timezone to the timezone reported for its current egress IP.
 #
 # This intentionally changes only the local timezone presentation
 # (/etc/localtime + /etc/timezone). The system clock remains UTC internally.
@@ -830,11 +827,13 @@ def setup_client_vm(
     start_vm: bool = True,
     connect_serial: bool = True,
     skip_vdi_prime: bool = False,
+    start_type: str = "gui",
 ) -> None:
     options = AlpineClientBuildOptions(
         start_vm=start_vm,
         connect_serial=connect_serial,
         skip_vdi_prime=skip_vdi_prime,
+        start_type=start_type,
     )
     paths = get_system_paths(VM_NAME, ALPINE_IMAGE_NAME)
     vboxmanage = find_vboxmanage(paths)
@@ -867,6 +866,18 @@ def setup_client_vm(
             vm_base,
             medium_path_for_vbox=wsl_to_windows_path(vdi_wsl) if paths["is_wsl"] else vdi_wsl,
         )
+        # Drop pre-rename lab VM if it is still registered.
+        for legacy_name in ("OpenWrt_LAN_Client_Alpine", "OpenWrt_LAN_Client"):
+            if legacy_name == VM_NAME or not vm_is_registered(vboxmanage, legacy_name):
+                continue
+            legacy_base = os.path.join(vms_root, legacy_name)
+            print(f"Also removing legacy client VM {legacy_name!r}...")
+            remove_existing_vm(
+                vboxmanage,
+                legacy_name,
+                legacy_base,
+                medium_path_for_vbox=os.path.join(legacy_base, CLIENT_VDI_NAME),
+            )
 
     def ensure_workspace() -> None:
         os.makedirs(vm_base, exist_ok=True)
@@ -878,7 +889,7 @@ def setup_client_vm(
     def remove_stale_client_vdi() -> None:
         close_medium_best_effort(vboxmanage, vdi_wsl)
         if os.path.exists(vdi_wsl):
-            print(f"Removing stale Alpine client VDI before conversion: {vdi_wsl}")
+            print(f"Removing stale test client VDI before conversion: {vdi_wsl}")
             try:
                 os.remove(vdi_wsl)
             except OSError as exc:
@@ -894,7 +905,7 @@ def setup_client_vm(
                         os.remove(vdi_wsl)
                     except OSError as retry_exc:
                         raise RuntimeError(
-                            "Could not remove stale Alpine client VDI before conversion.\n"
+                            "Could not remove stale test client VDI before conversion.\n"
                             f"Path: {vdi_wsl}\n"
                             f"Windows path: {vdi_for_vbox}\n"
                             f"Error: {retry_exc}\n"
@@ -916,7 +927,7 @@ def setup_client_vm(
             detail = str(exc)
             if "VERR_ACCESS_DENIED" in detail or "access denied" in detail.lower():
                 raise RuntimeError(
-                    "VirtualBox could not create the Alpine client VDI (access denied).\n"
+                    "VirtualBox could not create the test client VDI (access denied).\n"
                     f"Target: {vdi_wsl}\n"
                     f"Windows target: {vdi_for_vbox}\n"
                     "Likely causes: stale registered medium, VM still running, VirtualBox "
@@ -1038,8 +1049,8 @@ def setup_client_vm(
         )
 
     def start_and_connect() -> None:
-        print(f"Starting {VM_NAME}...")
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", "gui"])
+        print(f"Starting {VM_NAME} ({options.start_type})...")
+        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", options.start_type])
 
         # Unattended: don't leave the Syslinux menu waiting for a human Enter.
         time.sleep(2)
@@ -1053,7 +1064,7 @@ def setup_client_vm(
             extra_args = ["--force-interactive-serial", "--serial-port", str(ALPINE_SERIAL_TCP_PORT)]
             spawned = spawn_serial_console_window(
                 Path(__file__).resolve(),
-                title=f"LAN Alpine Client serial ({ALPINE_SERIAL_TCP_PORT})",
+                title=f"Test client serial ({ALPINE_SERIAL_TCP_PORT})",
                 extra_args=extra_args,
                 cwd=Path(SCRIPT_DIR),
             )
@@ -1111,7 +1122,7 @@ def setup_client_vm(
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Create / configure Alpine Linux router-lab client VM.")
     ap.add_argument("--no-start", action="store_true", help="Configure the VM but do not start it.")
-    ap.add_argument("--serial-only", action="store_true", help="Open serial console for already running Alpine client.")
+    ap.add_argument("--serial-only", action="store_true", help="Open serial console for already running test client.")
     ap.add_argument("--serial-here", action="store_true", help="Attach to serial directly in this console window.")
     ap.add_argument("--force-interactive-serial", action="store_true", help="Forces interactive socket bridge on startup.")
     ap.add_argument("--serial-port", type=int, default=ALPINE_SERIAL_TCP_PORT, help="TCP port for serial console.")
@@ -1126,7 +1137,7 @@ if __name__ == "__main__":
         if ns.serial_only and not ns.serial_here:
             extra_args=["--force-interactive-serial"] if ns.force_interactive_serial else []
             extra_args.extend(["--serial-port", str(ns.serial_port)])
-            spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"LAN Alpine Client serial ({ns.serial_port})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
+            spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"Test client serial ({ns.serial_port})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
             if spawned:
                 raise SystemExit(0)
         connect_serial_console(vboxmanage, serial_endpoint, force_interactive=ns.force_interactive_serial or ns.serial_here)

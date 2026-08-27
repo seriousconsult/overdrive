@@ -24,10 +24,10 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import fetch_browser_json
+from detections.common.common_browser import fetch_browser_json, print_browser_probe_error
 
 API_URL = "https://tls.peet.ws/api/all"
-TIMEOUT = 25
+TIMEOUT = 20
 
 
 def fetch_browser_observation() -> tuple[dict[str, Any] | None, str | None]:
@@ -173,12 +173,7 @@ def main() -> None:
 
     data, err = fetch_browser_observation()
     if not data:
-        score, status = score_quic_fingerprint({}, err or "no data returned")
-        print(f"SCORE: {score}")
-        print(f"STATUS: {status}")
-        print()
-        print("=" * 64)
-        return
+        raise SystemExit(print_browser_probe_error(err or "no data returned"))
 
     sig = extract_quic_signals(data)
     score, status = score_quic_fingerprint(sig, None)
