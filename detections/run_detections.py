@@ -31,6 +31,7 @@ If you don't want a password to be a blocker, either:
 import html
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -48,6 +49,14 @@ SUDO_SCRIPT_TIMEOUT_SEC = 180
 # Browser probes each launch Chromium; keep below suite patience but above probe caps.
 BROWSER_SCRIPT_TIMEOUT_SEC = 75
 DEFAULT_SCRIPT_TIMEOUT_SEC = 120
+BROWSER_SCRIPT_ARGS = {
+    "HTTP2_settings.py": ["--timeout", "12"],
+    "HTTP3_QUIC.py": ["--timeout", "12"],
+}
+PER_SCRIPT_TIMEOUT_SEC = {
+    ("browser", "HTTP2_settings.py"): 30,
+    ("browser", "HTTP3_QUIC.py"): 30,
+}
 
 # Repository root. This file lives under ``detections/``.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -293,8 +302,10 @@ def run_script(
     use_sudo: bool = False,
     *,
     timeout_sec: int | None = None,
+    script_args: list[str] | None = None,
 ) -> tuple[str, str, int]:
     """Run a script and return (output, error, returncode)."""
+    extra_args = script_args or []
     capture_py = _capture_python_path() if use_sudo else None
     if use_sudo and capture_py is not None and (
         _is_root() or python_has_raw_capture_caps(capture_py)
@@ -334,28 +345,43 @@ def run_script(
 
             if wsl_prefix:
                 # Same distro as normal runs: sudo -n must be passwordless in that distro
-                cmd = wsl_prefix + ["-e", "sudo", "-n", wsl_py, wsl_script]
+                cmd = wsl_prefix + ["-e", "sudo", "-n", wsl_py, wsl_script, *extra_args]
             elif sys.platform == "win32":
-                cmd = ["wsl", "-e", "sudo", "-n", wsl_py, wsl_script]
+                cmd = ["wsl", "-e", "sudo", "-n", wsl_py, wsl_script, *extra_args]
             else:
-                cmd = ["sudo", "-n", str(capture_py.resolve()), str(script_path.resolve())]
+                cmd = ["sudo", "-n", str(capture_py.resolve()), str(script_path.resolve()), *extra_args]
         elif capture_py is not None and script_path.name in SUDO_SCRIPTS:
             # Capture script running without sudo (root or setcap).
-            cmd = [str(capture_py), script_str]
+            cmd = [str(capture_py), script_str, *extra_args]
         else:
-            cmd = VENV_PYTHON + [script_str]
+            cmd = VENV_PYTHON + [script_str, *extra_args]
 
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=str(BASE_DIR),
             env=env,
+            start_new_session=(os.name != "nt"),
         )
-        output = (result.stdout or "") + (result.stderr or "")
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+            else:
+                proc.kill()
+            stdout, stderr = proc.communicate()
+            output = (stdout or "") + (stderr or "")
+            return output, "Timeout", -1
+
+        output = (stdout or "") + (stderr or "")
         err = ""
-        if use_sudo and result.returncode != 0:
+        if use_sudo and proc.returncode != 0:
             ol = output.lower()
             if "password" in ol and ("sudo" in ol or "a password is required" in ol):
                 err = (
@@ -364,9 +390,7 @@ def run_script(
                 )
             else:
                 err = "sudo or capture failed (see output; Scapy usually needs root)"
-        return output, err, result.returncode
-    except subprocess.TimeoutExpired:
-        return "", "Timeout", -1
+        return output, err, proc.returncode
     except OSError as e:
         return "", str(e), -1
 
@@ -661,6 +685,87 @@ def select_detection_folders(
     return scripts_map, folder_order, 0
 
 
+def _timeout_for_script(
+    folder: str,
+    script_name: str,
+    script_timeout: int | None,
+) -> int | None:
+    timeout_for_script = script_timeout
+    per_script_timeout = PER_SCRIPT_TIMEOUT_SEC.get((folder, script_name))
+    if per_script_timeout is not None:
+        timeout_for_script = min(timeout_for_script or per_script_timeout, per_script_timeout)
+    return timeout_for_script
+
+
+def _run_detection_script(
+    folder: str,
+    script_name: str,
+    *,
+    script_timeout: int | None = None,
+) -> tuple[str, str, str]:
+    script_path = script_path_for(folder, script_name)
+
+    print(f"\n▶ {script_name}...")
+
+    if not script_path.exists():
+        print(f"  ⚠️  Not found: {script_path}")
+        return script_name, "N/A", "Script not found"
+
+    if script_has_todo(script_path):
+        print("  ⏭️  Contains TODO — skipped (score 0)")
+        return script_name, "0", "TODO:"
+
+    use_sudo = script_name in SUDO_SCRIPTS
+    if use_sudo:
+        print("  (running with sudo -n — needs NOPASSWD for capture scripts; see README)")
+
+    timeout_for_script = _timeout_for_script(folder, script_name, script_timeout)
+
+    output, error, returncode = run_script(
+        script_path,
+        use_sudo=use_sudo,
+        timeout_sec=timeout_for_script,
+        script_args=BROWSER_SCRIPT_ARGS.get(script_name) if folder == "browser" else None,
+    )
+
+    if error == "Timeout" or (returncode == -1 and not output and error):
+        detail = error or "Non-zero exit"
+        if error == "Timeout":
+            detail = (
+                f"TIMEOUT after {timeout_for_script or DEFAULT_SCRIPT_TIMEOUT_SEC}s "
+                "(not a valid 1-5 score)"
+            )
+        print(f"  ❌ {detail}")
+        return script_name, "Error", detail[:500]
+
+    if error or returncode != 0:
+        # Prefer an explicit SCORE: Error from the probe when present.
+        scored, comment = extract_score(output or "")
+        scored, comment = _invalidate_timeout_score(scored, comment, output or "", error or "")
+        if scored == "Error":
+            detail = comment or error or "Non-zero exit"
+            print(f"  ❌ {detail[:200]}")
+            return script_name, "Error", detail[:500]
+        detail = error or "Non-zero exit"
+        tail = (output or "").strip().splitlines()
+        hint = ""
+        if tail:
+            hint = " | " + tail[-1][-200:]
+        print(f"  ❌ {detail}{hint}")
+        return script_name, "Error", (detail + (hint or ""))[:500]
+
+    score, comment = extract_score(output)
+    score, comment = _invalidate_timeout_score(score, comment, output, "")
+    if score == "Error":
+        print(f"  ❌ {comment[:200] if comment else 'Error'}")
+        return script_name, "Error", (comment or "Error")[:500]
+
+    print(f"  ✓ Score: {score}")
+    if comment:
+        print(f"    → {comment[:100]}")
+    return script_name, score, comment
+
+
 def collect_detection_results(
     scripts_map: dict[str, list[str]],
     folder_order: list[str],
@@ -679,72 +784,88 @@ def collect_detection_results(
         print(f"{'=' * 40}")
 
         for script_name in script_names:
-            script_path = script_path_for(folder, script_name)
-
-            print(f"\n▶ {script_name}...")
-
-            if not script_path.exists():
-                print(f"  ⚠️  Not found: {script_path}")
-                results[folder].append((script_name, "N/A", "Script not found"))
-                continue
-
-            if script_has_todo(script_path):
-                print("  ⏭️  Contains TODO — skipped (score 0)")
-                results[folder].append((script_name, "0", "TODO:"))
-                continue
-
-            use_sudo = script_name in SUDO_SCRIPTS
-            if use_sudo:
-                print("  (running with sudo -n — needs NOPASSWD for capture scripts; see README)")
-
-            output, error, returncode = run_script(
-                script_path,
-                use_sudo=use_sudo,
-                timeout_sec=script_timeout,
+            results[folder].append(
+                _run_detection_script(folder, script_name, script_timeout=script_timeout)
             )
 
-            if error == "Timeout" or returncode == -1 and not output and error:
-                detail = error or "Non-zero exit"
-                if error == "Timeout":
-                    detail = (
-                        f"TIMEOUT after {script_timeout or DEFAULT_SCRIPT_TIMEOUT_SEC}s "
-                        "(not a valid 1-5 score)"
-                    )
-                print(f"  ❌ {detail}")
-                results[folder].append((script_name, "Error", detail[:500]))
+    return results
+
+
+def collect_browser_detection_results(
+    scripts_map: dict[str, list[str]],
+    folder_order: list[str],
+    *,
+    script_timeout: int | None = None,
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Run browser probes with a fresh shared Chromium/ChromeDriver per script."""
+    from detections.common.common_browser import shared_chrome_session
+
+    results: dict[str, list[tuple[str, str, str]]] = {k: [] for k in folder_order}
+
+    for folder in folder_order:
+        script_names = scripts_map.get(folder, [])
+        if not script_names:
+            continue
+
+        if folder != "browser":
+            partial = collect_detection_results(
+                {folder: script_names},
+                [folder],
+                script_timeout=script_timeout,
+            )
+            results[folder].extend(partial.get(folder, []))
+            continue
+
+        print(f"\n{'=' * 40}")
+        print(f"FOLDER: {folder.upper()}")
+        print(f"{'=' * 40}")
+        print("Each browser probe gets a fresh Chromium session so one crash cannot poison the rest.")
+        print("If Chromium cannot start, remaining browser probes are skipped with that reason.")
+
+        for index, script_name in enumerate(script_names):
+            script_path = script_path_for(folder, script_name)
+            if not script_path.exists() or script_has_todo(script_path):
+                results[folder].append(
+                    _run_detection_script(folder, script_name, script_timeout=script_timeout)
+                )
                 continue
 
-            if error or returncode != 0:
-                # Prefer an explicit SCORE: Error from the probe when present.
-                scored, comment = extract_score(output or "")
-                scored, comment = _invalidate_timeout_score(
-                    scored, comment, output or "", error or ""
+            try:
+                with shared_chrome_session(debug_port=0):
+                    results[folder].append(
+                        _run_detection_script(
+                            folder,
+                            script_name,
+                            script_timeout=script_timeout,
+                        )
+                    )
+            except Exception as exc:
+                detail = (
+                    "Browser runtime failed before this probe could run: "
+                    f"{type(exc).__name__}: {exc}"
                 )
-                if scored == "Error":
-                    detail = comment or error or "Non-zero exit"
-                    print(f"  ❌ {detail[:200]}")
-                    results[folder].append((script_name, "Error", detail[:500]))
-                    continue
-                detail = error or "Non-zero exit"
-                tail = (output or "").strip().splitlines()
-                hint = ""
-                if tail:
-                    hint = " | " + tail[-1][-200:]
-                print(f"  ❌ {detail}{hint}")
-                results[folder].append(
-                    (script_name, "Error", (detail + (hint or ""))[:500])
-                )
-            else:
-                score, comment = extract_score(output)
-                score, comment = _invalidate_timeout_score(score, comment, output, "")
-                if score == "Error":
-                    print(f"  ❌ {comment[:200] if comment else 'Error'}")
-                    results[folder].append((script_name, "Error", (comment or "Error")[:500]))
-                else:
-                    print(f"  ✓ Score: {score}")
-                    if comment:
-                        print(f"    → {comment[:100]}")
-                    results[folder].append((script_name, score, comment))
+                print(f"\n▶ {script_name}...")
+                print(f"  ❌ {detail[:200]}")
+                results[folder].append((script_name, "Error", detail[:500]))
+                for pending_script in script_names[index + 1 :]:
+                    pending_path = script_path_for(folder, pending_script)
+                    if not pending_path.exists() or script_has_todo(pending_path):
+                        results[folder].append(
+                            _run_detection_script(
+                                folder,
+                                pending_script,
+                                script_timeout=script_timeout,
+                            )
+                        )
+                        continue
+                    skipped_detail = (
+                        "Skipped because Chromium could not start for the previous "
+                        "browser probe. Fix the browser runtime first, then rerun."
+                    )
+                    print(f"\n▶ {pending_script}...")
+                    print(f"  ❌ {skipped_detail}")
+                    results[folder].append((pending_script, "Error", skipped_detail))
+                break
 
     return results
 
@@ -784,11 +905,45 @@ def run_detection_suite(
     if rc != 0:
         return rc
 
-    results = collect_detection_results(
-        scripts_map,
-        folder_order,
-        script_timeout=script_timeout,
-    )
+    if folder_order == ["browser"]:
+        try:
+            from detections.common.common_browser import browser_runtime_diagnostics
+        except ModuleNotFoundError as exc:
+            if exc.name == "selenium":
+                print(
+                    "[!] Browser runtime is incomplete: Python package `selenium` is missing. "
+                    "Rerun `python3 install.py --non-interactive` on the host, or "
+                    "`python3 /root/install.py --non-interactive` inside the Alpine client."
+                )
+                return 2
+            raise
+
+        runtime = browser_runtime_diagnostics()
+        print("[*] Browser runtime:")
+        print(f"    Chromium:     {runtime['chromium']}")
+        print(f"    ChromeDriver: {runtime['chromedriver']}")
+        print(f"    Chromium version:     {runtime['chromium_version']}")
+        print(f"    ChromeDriver version: {runtime['chromedriver_version']}")
+        print()
+        if runtime["chromium"] == "(missing)" or runtime["chromedriver"] == "(missing)":
+            print(
+                "[!] Browser runtime is incomplete. Rerun `python3 install.py --non-interactive` "
+                "on the host, or `python3 /root/install.py --non-interactive` inside the "
+                "Alpine client. Alpine can also install `chromium chromium-chromedriver`."
+            )
+            return 2
+        print("[*] Browser probes will use isolated Chromium sessions.")
+        results = collect_browser_detection_results(
+            scripts_map,
+            folder_order,
+            script_timeout=script_timeout,
+        )
+    else:
+        results = collect_detection_results(
+            scripts_map,
+            folder_order,
+            script_timeout=script_timeout,
+        )
     print_results_summary(results, folder_order)
 
     elapsed_time = time.time() - start_time

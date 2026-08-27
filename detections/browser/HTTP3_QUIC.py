@@ -15,6 +15,7 @@ A standard Chrome browser on Windows has one specific pattern of these settings.
 
 from __future__ import annotations
 
+import argparse
 import re
 from typing import Any
 
@@ -24,14 +25,15 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import fetch_browser_json, print_browser_probe_error
+from detections.common.common_browser import DEFAULT_TIMEOUT, fetch_browser_json, print_browser_probe_error
 
 API_URL = "https://tls.peet.ws/api/all"
-TIMEOUT = 20
+TIMEOUT = max(12, DEFAULT_TIMEOUT)
 
 
-def fetch_browser_observation() -> tuple[dict[str, Any] | None, str | None]:
-    return fetch_browser_json(f"{API_URL}?src=browser", timeout=TIMEOUT, cache_bust=True)
+def fetch_browser_observation(timeout: int) -> tuple[dict[str, Any] | None, str | None]:
+    bounded = max(5, min(timeout, 12))
+    return fetch_browser_json(f"{API_URL}?src=browser", timeout=bounded, cache_bust=True)
 
 
 def _walk_key_values(obj: Any, prefix: str = "") -> list[tuple[str, Any]]:
@@ -163,6 +165,10 @@ def score_quic_fingerprint(sig: dict[str, Any], probe_error: str | None) -> tupl
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Check HTTP/3/QUIC signals for the detected browser.")
+    parser.add_argument("--timeout", type=int, default=TIMEOUT, help="Browser wait timeout.")
+    args = parser.parse_args()
+
     print("=" * 64)
     print("HTTP/3 (QUIC) Fingerprint Detection")
     print("=" * 64)
@@ -171,7 +177,7 @@ def main() -> None:
     print("Method: Selenium browser probe + recursive QUIC signal extraction")
     print()
 
-    data, err = fetch_browser_observation()
+    data, err = fetch_browser_observation(args.timeout)
     if not data:
         raise SystemExit(print_browser_probe_error(err or "no data returned"))
 

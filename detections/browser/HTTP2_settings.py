@@ -228,8 +228,8 @@ def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, An
     if fetch_browser_json is None:
         return None, "browser helpers unavailable"
 
-    # Keep peet.ws waits short — hung Chromium + VPN path was burning the suite.
-    bounded = max(8, min(timeout, 20))
+    # Keep peet.ws waits short; a missing/stuck browser should report Error quickly.
+    bounded = max(5, min(timeout, 12))
     return fetch_browser_json(
         endpoint,
         timeout=bounded,
@@ -330,7 +330,7 @@ def print_observation(details: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check HTTP/2 SETTINGS for the detected browser.")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="JSON observation endpoint.")
-    parser.add_argument("--timeout", type=int, default=max(20, DEFAULT_TIMEOUT), help="Browser wait timeout.")
+    parser.add_argument("--timeout", type=int, default=max(12, DEFAULT_TIMEOUT), help="Browser wait timeout.")
     args = parser.parse_args()
 
     print_browser_detection_header("HTTP/2 SETTINGS Browser Fingerprint Check")

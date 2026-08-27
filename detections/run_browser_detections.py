@@ -16,10 +16,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from detections.common.common_browser import shared_chrome_session  # noqa: E402
 from detections.run_detections import (  # noqa: E402
     BROWSER_SCRIPT_TIMEOUT_SEC,
     BASE_DIR,
+    collect_browser_detection_results,
     collect_detection_results,
     generate_html_report,
     print_results_summary,
@@ -87,13 +87,37 @@ def _run_browser_suite(
     use_shared_browser: bool,
 ) -> int:
     start = time.time()
+    try:
+        from detections.common.common_browser import browser_runtime_diagnostics
+    except ModuleNotFoundError as exc:
+        if exc.name == "selenium":
+            print(
+                "[!] Browser runtime is incomplete: Python package `selenium` is missing. "
+                "Rerun `python3 install.py --non-interactive` on the host, or "
+                "`python3 /root/install.py --non-interactive` inside the Alpine client."
+            )
+            return 2
+        raise
+
+    runtime = browser_runtime_diagnostics()
+
+    print("[*] Browser runtime:")
+    print(f"    Chromium:     {runtime['chromium']}")
+    print(f"    ChromeDriver: {runtime['chromedriver']}")
+    print(f"    Chromium version:     {runtime['chromium_version']}")
+    print(f"    ChromeDriver version: {runtime['chromedriver_version']}")
+    print()
+    if runtime["chromium"] == "(missing)" or runtime["chromedriver"] == "(missing)":
+        print(
+            "[!] Browser runtime is incomplete. Rerun `python3 install.py --non-interactive` "
+            "on the host, or `python3 /root/install.py --non-interactive` inside the "
+            "Alpine client. Alpine can also install `chromium chromium-chromedriver`."
+        )
+        return 2
 
     def _collect_and_report() -> int:
-        results = collect_detection_results(
-            scripts_map,
-            folder_order,
-            script_timeout=script_timeout,
-        )
+        collector = collect_browser_detection_results if use_shared_browser else collect_detection_results
+        results = collector(scripts_map, folder_order, script_timeout=script_timeout)
         print_results_summary(results, folder_order)
         elapsed = time.time() - start
         html_path = BASE_DIR / report_name
@@ -107,18 +131,7 @@ def _run_browser_suite(
         return 0
 
     if use_shared_browser:
-        print("[*] Starting shared Chromium session for browser probes...")
-        try:
-            with shared_chrome_session():
-                if suite_title:
-                    print("=" * 60)
-                    print(suite_title)
-                    print("=" * 60)
-                    print()
-                return _collect_and_report()
-        except Exception as exc:
-            print(f"[!] Shared Chromium failed to start: {exc}", file=sys.stderr)
-            return 2
+        print("[*] Browser probes will use isolated Chromium sessions.")
 
     if suite_title:
         print("=" * 60)
