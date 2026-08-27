@@ -461,8 +461,8 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
 
 
 def _resolve_start_type(*, headless: bool, connect_serial: bool) -> str:
-    """Prefer headless starts when no GUI serial attach is needed."""
-    if headless or not connect_serial:
+    """Use GUI starts by default; headless is opt-in because VBoxHeadless is less reliable."""
+    if headless:
         return "headless"
     return "gui"
 

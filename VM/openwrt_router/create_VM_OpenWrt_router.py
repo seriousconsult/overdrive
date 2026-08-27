@@ -1463,6 +1463,7 @@ def setup_openwrt_vm(
     def ensure_workspace() -> None:
         os.makedirs(vms_root, exist_ok=True)
         os.makedirs(vm_base, exist_ok=True)
+        os.makedirs(os.path.join(vm_base, "Logs"), exist_ok=True)
 
     def download_base_image() -> None:
         download_openwrt_image(OPENWRT_URL, img_path)
