@@ -30,9 +30,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 VENV_DIR = REPO_ROOT / "virtual_env"
-VENV_PYTHON = VENV_DIR / ("Scripts" if sys.platform == "win32" else "bin") / (
-    "python.exe" if sys.platform == "win32" else "python"
-)
 
 PY_DEPS = [
     "requests",
@@ -61,6 +58,12 @@ ALPINE_REQUIRED_BROWSER_PACKAGES: tuple[str, ...] = (
     "xvfb",
     "dbus",
 )
+
+BROWSER_DISPLAY_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
+    "apt": ("xvfb",),
+    "dnf": ("xorg-x11-server-Xvfb",),
+    "apk": ALPINE_REQUIRED_BROWSER_PACKAGES,
+}
 
 # Runtime assets used by the Test client's normal Chromium DevTools probes.
 # Optional font/media packages improve fidelity, but a miss should not stop VM creation.
@@ -671,17 +674,17 @@ def install_system_deps(*, non_interactive: bool = False):
                 + ". Browser detections need Chromium."
             )
 
-    # 4) Alpine browser runtime support: display, fonts, media, and software GL.
+    # 4) Browser runtime support: private display, fonts, media, and software GL.
+    display_pkgs = list(BROWSER_DISPLAY_PACKAGES_BY_MGR.get(mgr, ()))
+    display_missing = [pkg for pkg in display_pkgs if not package_installed(info, pkg)]
+    if display_missing:
+        print(
+            "[*] Installing browser display runtime packages: "
+            + " ".join(display_missing)
+        )
+        install_packages(info, display_missing, non_interactive=non_interactive)
+
     if mgr == "apk":
-        required_missing = [
-            pkg for pkg in ALPINE_REQUIRED_BROWSER_PACKAGES if not package_installed(info, pkg)
-        ]
-        if required_missing:
-            print(
-                "[*] Installing required browser runtime packages: "
-                + " ".join(required_missing)
-            )
-            install_packages(info, required_missing, non_interactive=non_interactive)
         missing_browser_commands = []
         if not have_cmd("Xvfb"):
             missing_browser_commands.append("Xvfb")
@@ -889,6 +892,118 @@ def parse_args():
     return parser.parse_args()
 
 
+def venv_python_path(venv_dir: Path) -> Path:
+    return venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / (
+        "python.exe" if sys.platform == "win32" else "python"
+    )
+
+
+def remove_tree_best_effort(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    for attempt in range(3):
+        try:
+            shutil.rmtree(path, onerror=_rmtree_onerror)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == 2:
+                shutil.rmtree(path, ignore_errors=True)
+                return
+            time.sleep(0.5)
+
+
+def _rmtree_onerror(func, path, _exc_info) -> None:
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    try:
+        func(path)
+    except FileNotFoundError:
+        pass
+
+
+def remove_tree_checked(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+
+    last_exc: BaseException | None = None
+    for attempt in range(5):
+        try:
+            shutil.rmtree(path, onerror=_rmtree_onerror)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last_exc = exc
+
+        if not path.exists() and not path.is_symlink():
+            return
+        time.sleep(0.5 * (attempt + 1))
+
+    raise RuntimeError(
+        f"Could not remove existing venv at {path}. Close shells/processes using it "
+        "and rerun install.py."
+    ) from last_exc
+
+
+def remove_existing_venv() -> None:
+    if not VENV_DIR.exists() and not VENV_DIR.is_symlink():
+        return
+    print(f"[!] Removing existing venv: {VENV_DIR}")
+    remove_tree_checked(VENV_DIR)
+
+
+def create_fresh_venv() -> str:
+    print(f"[*] Creating venv in {VENV_DIR}...")
+    try:
+        venv.create(str(VENV_DIR), with_pip=True)
+    except Exception as exc:
+        print(f"[*] venv.create(with_pip=True) failed ({exc}); retrying without pip...")
+        remove_tree_best_effort(VENV_DIR)
+        venv.create(str(VENV_DIR), with_pip=False)
+
+    python_exe = venv_python_path(VENV_DIR)
+    if not python_exe.exists():
+        raise RuntimeError(f"Expected venv python not found at: {python_exe}")
+    return str(python_exe)
+
+
+def ensure_venv_pip(python_exe: str) -> None:
+    pip_probe = subprocess.run(
+        [python_exe, "-m", "pip", "--version"],
+        capture_output=True,
+        check=False,
+    )
+    if pip_probe.returncode == 0:
+        return
+
+    print("[*] Bootstrapping pip into venv via ensurepip/get-pip...")
+    ensure = subprocess.run(
+        [python_exe, "-m", "ensurepip", "--upgrade"],
+        capture_output=True,
+        check=False,
+    )
+    if ensure.returncode != 0:
+        get_pip = Path(tempfile.gettempdir()) / "get-pip.py"
+        urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip)
+        subprocess.check_call([python_exe, str(get_pip)])
+
+
+def build_python_venv() -> str:
+    remove_existing_venv()
+    try:
+        python_exe = create_fresh_venv()
+        ensure_venv_pip(python_exe)
+        print("Installing Python packages into venv...")
+        subprocess.check_call([python_exe, "-m", "pip", "install", "--no-input", *PY_DEPS])
+    except BaseException:
+        remove_tree_best_effort(VENV_DIR)
+        raise
+
+    return python_exe
+
 
 def main():
     args = parse_args()
@@ -898,46 +1013,9 @@ def main():
     # 0) Ensure host python can create venvs with pip
     ensure_venv_support(non_interactive=args.non_interactive)
 
-    # 1) Always delete and recreate venv (fresh start)
-    if VENV_DIR.exists():
-        print(f"[!] Removing existing venv: {VENV_DIR}")
-        shutil.rmtree(VENV_DIR)
-
-    print(f"[*] Creating venv in {VENV_DIR}...")
-    try:
-        venv.create(str(VENV_DIR), with_pip=True)
-    except Exception as exc:
-        print(f"[*] venv.create(with_pip=True) failed ({exc}); retrying without pip...")
-        if VENV_DIR.exists():
-            shutil.rmtree(VENV_DIR)
-        venv.create(str(VENV_DIR), with_pip=False)
-
-    python_exe = str(VENV_PYTHON)
-    if not Path(python_exe).exists():
-        print(f"[-] Expected venv python not found at: {python_exe}")
-        sys.exit(1)
-
-    # Bootstrap pip when ensurepip was unavailable (common on minimal Alpine).
-    pip_probe = subprocess.run(
-        [python_exe, "-m", "pip", "--version"],
-        capture_output=True,
-        check=False,
-    )
-    if pip_probe.returncode != 0:
-        print("[*] Bootstrapping pip into venv via ensurepip/get-pip...")
-        ensure = subprocess.run(
-            [python_exe, "-m", "ensurepip", "--upgrade"],
-            capture_output=True,
-            check=False,
-        )
-        if ensure.returncode != 0:
-            get_pip = Path(tempfile.gettempdir()) / "get-pip.py"
-            urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip)
-            subprocess.check_call([python_exe, str(get_pip)])
-
-    # 2) Install Python libs
-    print("Installing Python packages into venv...")
-    subprocess.check_call([python_exe, "-m", "pip", "install", "--no-input", *PY_DEPS])
+    # 1-2) Always delete and recreate the venv, then install Python libs.
+    # If the old venv is locked, fail instead of reusing it.
+    python_exe = build_python_venv()
 
     # 3) Install system deps (apt/dnf/apk)
     install_system_deps(non_interactive=args.non_interactive)

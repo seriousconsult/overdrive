@@ -630,7 +630,10 @@ def analyze_headers(
 
 def fetch_headers_via_browser() -> tuple[dict[str, str] | None, str | None, str | None]:
     timeout = max(BROWSER_ECHO_TIMEOUT, 25)
-    server, state, url = _start_header_probe_server()
+    try:
+        server, state, url = _start_header_probe_server()
+    except OSError as exc:
+        return None, f"local echo server could not start: {type(exc).__name__}: {exc}", None
     try:
         nav_error = navigate(url, timeout=timeout)
         if nav_error:

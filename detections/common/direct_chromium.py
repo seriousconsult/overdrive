@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -23,6 +24,7 @@ from typing import Any
 DEBUG_PORT_ENV = "OVERDRIVE_DIRECT_CHROME_DEBUG_PORT"
 EXTRA_ARGS_ENV = "OVERDRIVE_DIRECT_CHROME_EXTRA_ARGS"
 XVFB_DISPLAY_ENV = "OVERDRIVE_DIRECT_CHROME_X_DISPLAY"
+USE_SYSTEM_DISPLAY_ENV = "OVERDRIVE_DIRECT_CHROME_USE_SYSTEM_DISPLAY"
 
 
 def first_executable_path(*candidates: str) -> str | None:
@@ -145,8 +147,53 @@ def chrome_stealth_prelude(binary: str | None) -> str:
   }});
   overrideValue(window, "outerWidth", 1920);
   overrideValue(window, "outerHeight", 1080);
+  const patchWebGL = (proto) => {{
+    if (!proto || !proto.getParameter) return;
+    const originalGetParameter = proto.getParameter;
+    try {{
+      Object.defineProperty(proto, "getParameter", {{
+        configurable: true,
+        value: function(parameter) {{
+          if (parameter === 37445) return "Google Inc. (Intel)";
+          if (parameter === 37446) {{
+            return "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+          }}
+          return originalGetParameter.apply(this, arguments);
+        }},
+      }});
+    }} catch (_err) {{}}
+  }};
+  patchWebGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+  patchWebGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
 }})();
 """
+
+
+def chrome_user_agent_metadata(binary: str | None) -> dict[str, Any]:
+    full_version = chrome_full_version(binary)
+    major = full_version.split(".", 1)[0]
+    brands = [
+        {"brand": "Not:A-Brand", "version": "99"},
+        {"brand": "Google Chrome", "version": major},
+        {"brand": "Chromium", "version": major},
+    ]
+    full_version_list = [
+        {"brand": "Not:A-Brand", "version": "10.0.0.0"},
+        {"brand": "Google Chrome", "version": full_version},
+        {"brand": "Chromium", "version": full_version},
+    ]
+    return {
+        "brands": brands,
+        "fullVersionList": full_version_list,
+        "fullVersion": full_version,
+        "platform": "Windows",
+        "platformVersion": "15.0.0",
+        "architecture": "x86",
+        "model": "",
+        "mobile": False,
+        "bitness": "64",
+        "wow64": False,
+    }
 
 
 def pick_local_port(start: int = 22000, end: int = 60999) -> int:
@@ -359,32 +406,30 @@ def chrome_command(
     port: int,
     profile_dir: Path,
     url: str = "about:blank",
+    *,
+    headless: bool = False,
+    no_sandbox: bool = False,
 ) -> list[str]:
     args = [
         chromium,
         "--remote-debugging-address=127.0.0.1",
         f"--remote-debugging-port={port}",
         "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-software-rasterizer",
-        "--ozone-platform=x11",
         "--autoplay-policy=no-user-gesture-required",
-        "--disable-background-networking",
-        "--disable-component-update",
-        "--disable-default-apps",
-        "--disable-breakpad",
-        "--disable-crash-reporter",
-        "--disable-crashpad",
-        "--disable-crashpad-for-testing",
         "--no-first-run",
         "--no-default-browser-check",
-        "--no-sandbox",
         "--disable-blink-features=AutomationControlled",
         "--lang=en-US",
         "--window-size=1920,1080",
         f"--user-agent={desktop_chrome_user_agent(chromium)}",
         f"--user-data-dir={profile_dir}",
     ]
+    if headless:
+        args.extend(["--headless=new", "--hide-scrollbars"])
+    else:
+        args.append("--ozone-platform=x11")
+    if no_sandbox:
+        args.append("--no-sandbox")
     args.extend(shlex.split(os.environ.get(EXTRA_ARGS_ENV, "")))
     args.append(url)
     return args
@@ -397,17 +442,21 @@ def browser_process_command(args: list[str]) -> list[str]:
     return args
 
 
-def start_xvfb_if_needed(tmp_path: Path) -> tuple[dict[str, str], subprocess.Popen | None, Path | None]:
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def start_xvfb_if_needed(
+    tmp_path: Path,
+) -> tuple[dict[str, str], subprocess.Popen | None, Path | None, bool]:
     env = os.environ.copy()
-    if env.get("DISPLAY"):
-        return env, None, None
+    if env.get("DISPLAY") and _env_truthy(USE_SYSTEM_DISPLAY_ENV):
+        return env, None, None, False
 
     xvfb = xvfb_binary()
     if not xvfb:
-        raise RuntimeError(
-            "DISPLAY is unset and Xvfb is unavailable. Rebuild/provision the Alpine "
-            "client image so build-time install.py stages the xvfb package."
-        )
+        env.pop("DISPLAY", None)
+        return env, None, None, True
 
     display = pick_x_display()
     env["DISPLAY"] = display
@@ -435,7 +484,7 @@ def start_xvfb_if_needed(tmp_path: Path) -> tuple[dict[str, str], subprocess.Pop
                 f"Xvfb exited early with code {proc.returncode}: {read_small(log_path)}"
             )
         if socket_path.exists():
-            return env, proc, log_path
+            return env, proc, log_path, False
         time.sleep(0.1)
 
     if proc.poll() is None:
@@ -472,6 +521,81 @@ def runtime_evaluate(
     return result.get("value")
 
 
+def browser_startup_needs_no_sandbox(message: str) -> bool:
+    text = (message or "").lower()
+    return any(
+        needle in text
+        for needle in (
+            "no usable sandbox",
+            "setuid sandbox",
+            "namespace sandbox",
+            "zygote_host_impl_linux",
+            "running as root without --no-sandbox",
+        )
+    )
+
+
+def navigate_current_page(
+    sock: socket.socket,
+    url: str,
+    *,
+    chromium: str | None,
+    timeout: int,
+    first_message_id: int = 2,
+) -> None:
+    if not url or url == "about:blank":
+        return
+
+    timeout_ms = max(3000, int(timeout) * 1000)
+    cdp_call(sock, first_message_id, "Network.enable")
+    cdp_call(
+        sock,
+        first_message_id + 1,
+        "Network.setUserAgentOverride",
+        {
+            "userAgent": desktop_chrome_user_agent(chromium),
+            "acceptLanguage": "en-US,en;q=0.9",
+            "platform": "Windows",
+            "userAgentMetadata": chrome_user_agent_metadata(chromium),
+        },
+    )
+    cdp_call(sock, first_message_id + 2, "Page.enable")
+    cdp_call(
+        sock,
+        first_message_id + 3,
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": chrome_stealth_prelude(chromium)},
+    )
+    response = cdp_call(sock, first_message_id + 4, "Page.navigate", {"url": url})
+    error_text = response.get("result", {}).get("errorText")
+    if error_text:
+        raise RuntimeError(f"Chromium navigation to {url} failed: {error_text}")
+
+    deadline = time.monotonic() + max(3, int(timeout))
+    expression = """
+(() => ({
+  href: location.href,
+  readyState: document.readyState
+}))()
+"""
+    while time.monotonic() < deadline:
+        value = runtime_evaluate(
+            sock,
+            expression,
+            message_id=first_message_id + 5,
+            timeout_ms=min(timeout_ms, 5000),
+            await_promise=False,
+        )
+        if isinstance(value, dict):
+            href = str(value.get("href") or "")
+            ready_state = str(value.get("readyState") or "")
+            if href != "about:blank" and ready_state in ("interactive", "complete"):
+                return
+        time.sleep(0.2)
+
+    raise TimeoutError(f"Chromium did not finish navigating to {url} within {timeout}s")
+
+
 def run_in_chromium(
     action,
     *,
@@ -485,7 +609,10 @@ def run_in_chromium(
 
     deadline = max(10, int(timeout))
     failures: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="overdrive-direct-chrome-") as tmpdir:
+    with tempfile.TemporaryDirectory(
+        prefix="overdrive-direct-chrome-",
+        ignore_cleanup_errors=True,
+    ) as tmpdir:
         tmp_path = Path(tmpdir)
         xvfb_proc: subprocess.Popen | None = None
         xvfb_log: Path | None = None
@@ -493,50 +620,96 @@ def run_in_chromium(
         port = pick_local_port()
         profile_dir = tmp_path / f"profile-{port}"
         log_path = tmp_path / f"chromium-{port}.log"
-        log_handle = log_path.open("a", encoding="utf-8", errors="replace")
         try:
-            env, xvfb_proc, xvfb_log = start_xvfb_if_needed(tmp_path)
-            proc = subprocess.Popen(
-                browser_process_command(chrome_command(chromium, port, profile_dir, initial_url)),
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                close_fds=True,
-                env=env,
-            )
-            ws_url = chrome_target_websocket(
-                port,
-                proc,
-                timeout=5,
-                fallback_url=initial_url,
-            )
-            with websocket_connect(ws_url, timeout=deadline) as sock:
-                return action(sock, proc, chromium), None
-        except OSError as exc:
-            failures.append(
-                f"normal Chromium: unable to launch/connect: {type(exc).__name__}: {exc}"
-            )
+            env, xvfb_proc, xvfb_log, use_headless = start_xvfb_if_needed(tmp_path)
         except Exception as exc:
-            failures.append(f"normal Chromium: {type(exc).__name__}: {exc}")
-        finally:
-            try:
-                log_handle.close()
-            except OSError:
-                pass
-            if proc is not None and proc.poll() is None:
-                proc.terminate()
+            return None, (
+                f"{label} failed: Chromium display setup failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            for no_sandbox in (False, True):
+                if no_sandbox and (
+                    not failures or not browser_startup_needs_no_sandbox(failures[-1])
+                ):
+                    break
+                mode = "Chromium --no-sandbox fallback" if no_sandbox else "Chromium"
+                log_handle = log_path.open("a", encoding="utf-8", errors="replace")
                 try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                    proc = subprocess.Popen(
+                        browser_process_command(
+                            chrome_command(
+                                chromium,
+                                port,
+                                profile_dir,
+                                "about:blank",
+                                headless=use_headless,
+                                no_sandbox=no_sandbox,
+                            )
+                        ),
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                        close_fds=True,
+                        env=env,
+                        start_new_session=True,
+                    )
+                    ws_url = chrome_target_websocket(
+                        port,
+                        proc,
+                        timeout=5,
+                        fallback_url="about:blank",
+                    )
+                    with websocket_connect(ws_url, timeout=deadline) as sock:
+                        navigate_current_page(
+                            sock,
+                            initial_url,
+                            chromium=chromium,
+                            timeout=deadline,
+                        )
+                        return action(sock, proc, chromium), None
+                except OSError as exc:
+                    failures.append(
+                        f"{mode}: unable to launch/connect: {type(exc).__name__}: {exc}"
+                    )
+                except Exception as exc:
+                    failures.append(f"{mode}: {type(exc).__name__}: {exc}")
+                finally:
+                    try:
+                        log_handle.close()
+                    except OSError:
+                        pass
+                    if proc is not None and proc.poll() is None:
+                        try:
+                            os.killpg(proc.pid, signal.SIGTERM)
+                        except OSError:
+                            proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except OSError:
+                                proc.kill()
+                            try:
+                                proc.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                pass
+                    proc = None
+                    log_tail = read_small(log_path)
+                    if failures and log_tail and "chromium log:" not in failures[-1]:
+                        failures[-1] = f"{failures[-1]} | chromium log: {log_tail}"
+        finally:
             if xvfb_proc is not None and xvfb_proc.poll() is None:
                 xvfb_proc.terminate()
                 try:
                     xvfb_proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     xvfb_proc.kill()
-            log_tail = read_small(log_path)
-            if failures and log_tail and "chromium log:" not in failures[-1]:
-                failures[-1] = f"{failures[-1]} | chromium log: {log_tail}"
+                    try:
+                        xvfb_proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
             xvfb_tail = read_small(xvfb_log)
             if failures and xvfb_tail and "xvfb log:" not in failures[-1]:
                 failures[-1] = f"{failures[-1]} | xvfb log: {xvfb_tail}"

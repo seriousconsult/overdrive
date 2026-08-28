@@ -21,6 +21,8 @@ Host-authenticity score:
 from __future__ import annotations
 
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -207,6 +209,37 @@ _EXPECTED_DENIAL_NAMES = frozenset(
 )
 
 
+class _ScreenCaptureProbeHandler(BaseHTTPRequestHandler):
+    server_version = "OverdriveScreenCaptureProbe/1.0"
+
+    def log_message(self, _fmt: str, *_args) -> None:
+        return
+
+    def do_GET(self) -> None:
+        body = (
+            b"<!doctype html><html><head><meta charset='utf-8'>"
+            b"<title>Screen Capture Probe</title></head><body></body></html>"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _start_screen_capture_probe_server() -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ScreenCaptureProbeHandler)
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+        name="screen-capture-probe",
+    )
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}/"
+
+
 def _browser_profile_issues(profile: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return ``(strong_issues, soft_issues)`` for browser-profile coherence."""
     strong: list[str] = []
@@ -372,9 +405,18 @@ def check_screen_capture() -> tuple[int, str]:
     """Check screen-capture API surface and behavior. Returns (score, description)."""
     # Invoke race + permission queries need headroom beyond INVOKE_TIMEOUT_MS.
     script_timeout = max(DEFAULT_TIMEOUT, (_INVOKE_TIMEOUT_MS // 1000) + 6)
-    detection, error = run_async_script(_DETECTION_SCRIPT, timeout=script_timeout)
-    if error:
-        return 3, f"Chromium DevTools run failed: {error}"
+    server = None
+    try:
+        server, url = _start_screen_capture_probe_server()
+        detection, error = run_async_script(_DETECTION_SCRIPT, timeout=script_timeout, url=url)
+        if error:
+            return 3, f"Chromium DevTools run failed: {error}"
+    except OSError as exc:
+        return 3, f"local screen-capture probe server could not start: {type(exc).__name__}: {exc}"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
 
     if not isinstance(detection, dict):
         return 3, f"Screen capture detection returned unexpected data: {detection!r}"
