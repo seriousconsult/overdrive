@@ -23,6 +23,7 @@ __all__ = [
     "DEFAULT_REPORT_WIDTH",
     "fetch_json",
     "fetch_browser_json",
+    "confirm_external_browser_probe",
     "is_browser_timeout_error",
     "normalize_ip_fields",
     "ipv4_like_strings",
@@ -58,6 +59,33 @@ DRIVER_COMMAND_TIMEOUT = _env_int(
     20 if _IS_LINUX else 15,
 )
 DEFAULT_REPORT_WIDTH = 60
+
+
+def confirm_external_browser_probe(probe_name: str, targets: list[str] | tuple[str, ...] | str) -> tuple[bool, str | None]:
+    """
+    Require an explicit per-run Y/N confirmation before contacting internet endpoints.
+
+    Non-interactive callers must not run external probes, because there is no
+    place to ask the operator for the required confirmation.
+    """
+    if isinstance(targets, str):
+        target_text = targets
+    else:
+        target_text = ", ".join(str(target) for target in targets)
+    if not sys.stdin.isatty():
+        return False, "interactive Y/N confirmation is required before external internet probes"
+
+    prompt = (
+        f"{probe_name} will contact external internet endpoint(s): {target_text}\n"
+        "Run this external probe now? Type Y or N: "
+    )
+    try:
+        answer = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False, "external probe was not confirmed"
+    if answer in {"y", "yes"}:
+        return True, None
+    return False, "user declined external internet probe"
 
 
 def _first_existing_path(*candidates: str) -> str | None:
@@ -134,6 +162,7 @@ def fetch_browser_json(
     *,
     timeout: int = 25,
     cache_bust: bool = False,
+    ignore_certificate_errors: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """
     Load a JSON-rendering page through Chromium DevTools and parse body text.
@@ -146,7 +175,12 @@ def fetch_browser_json(
     except Exception as exc:
         return None, f"direct Chromium helpers unavailable: {type(exc).__name__}: {exc}"
 
-    return direct_fetch_browser_json(url, timeout=timeout, cache_bust=cache_bust)
+    return direct_fetch_browser_json(
+        url,
+        timeout=timeout,
+        cache_bust=cache_bust,
+        ignore_certificate_errors=ignore_certificate_errors,
+    )
 
 
 def normalize_ip_fields(provider: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -255,6 +289,28 @@ def is_browser_timeout_error(message: str | None) -> bool:
     if not message:
         return False
     text = message.lower()
+    if any(
+        needle in text
+        for needle in (
+            "chromium exited early",
+            "chrome exited early",
+            "devtools websocket closed",
+            "zygote_host_impl_linux",
+            "running as root without --no-sandbox",
+            "failed to start message bus",
+            "failed to bind socket",
+            "failed to read machine uuid",
+            "machine-id",
+            "dbus-daemon",
+            "dbus-run-session",
+            "gl_display.cc",
+            "libangle",
+            "requested gl implementation",
+            "vkcreateinstance",
+            "vulkan",
+        )
+    ):
+        return False
     return any(
         needle in text
         for needle in (

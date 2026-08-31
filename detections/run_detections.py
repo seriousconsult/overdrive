@@ -455,6 +455,28 @@ def extract_score(output: str) -> tuple[str, str]:
 
 def _looks_like_timeout(text: str) -> bool:
     lowered = (text or "").lower()
+    if any(
+        needle in lowered
+        for needle in (
+            "chromium exited early",
+            "chrome exited early",
+            "devtools websocket closed",
+            "zygote_host_impl_linux",
+            "running as root without --no-sandbox",
+            "failed to start message bus",
+            "failed to bind socket",
+            "failed to read machine uuid",
+            "machine-id",
+            "dbus-daemon",
+            "dbus-run-session",
+            "gl_display.cc",
+            "libangle",
+            "requested gl implementation",
+            "vkcreateinstance",
+            "vulkan",
+        )
+    ):
+        return False
     return any(
         needle in lowered
         for needle in ("timeout", "timed out", "read timed out", "did not finish within")

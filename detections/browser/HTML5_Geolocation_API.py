@@ -15,26 +15,19 @@ Unified score (see compute_multi_location_score):
 
 from typing import Any, Dict, List
 
-import os
 import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import DEFAULT_TIMEOUT, fetch_json, normalize_ip_fields
+from detections.common.common_browser import (
+    DEFAULT_TIMEOUT,
+    confirm_external_browser_probe,
+    fetch_json,
+    normalize_ip_fields,
+)
 from detections.common.common_config import GEOIP_PROVIDERS
-
-ALLOW_EXTERNAL_ENV = "OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES"
-
-
-def external_browser_probes_allowed() -> bool:
-    return (os.environ.get(ALLOW_EXTERNAL_ENV) or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def compute_multi_location_score(results: List[Dict[str, Any]]) -> tuple[int, str]:
@@ -144,12 +137,14 @@ def consensus_summary(results: List[Dict[str, Any]]) -> None:
 
 def main():
     print("== Geolocation Checker (what servers think) ==")
-    if not external_browser_probes_allowed():
+    provider_targets = [str(provider.get("url") or provider.get("name")) for provider in GEOIP_PROVIDERS]
+    allowed, deny_reason = confirm_external_browser_probe(
+        "HTML5 Geolocation / GeoIP comparison",
+        provider_targets,
+    )
+    if not allowed:
         print("SCORE: N/A")
-        print(
-            "STATUS: Skipped: GeoIP comparison uses third-party external providers; "
-            f"set {ALLOW_EXTERNAL_ENV}=1 to run it explicitly."
-        )
+        print(f"STATUS: External probe not run: {deny_reason}")
         return 0
 
     results = []

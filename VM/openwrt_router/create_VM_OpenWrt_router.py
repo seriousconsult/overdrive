@@ -1818,11 +1818,14 @@ def main() -> None:
             print("\n--- Starting Test client VM ---")
             try:
                 setup_alpine_client_vm(
-                    start_vm=True,
-                    connect_serial=not args.no_connect_serial,
+                    start_vm=args.start_type != "none",
+                    connect_serial=args.start_type != "none" and not args.no_connect_serial,
                     start_type=args.start_type,
                 )
-                print("[+] Test client VM started successfully.")
+                if args.start_type == "none":
+                    print("[+] Test client VM configured. Skipped start because --start-type none was selected.")
+                else:
+                    print("[+] Test client VM started successfully.")
             except Exception as e:
                 print(f"[!] Failed to start test client VM: {e}")
                 raise

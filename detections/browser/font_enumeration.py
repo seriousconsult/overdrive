@@ -31,6 +31,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from detections.common.common_browser import is_browser_timeout_error
 from detections.common.direct_chromium import run_async_script
 
 
@@ -69,17 +70,7 @@ def print_browser_detection_score_footer(
 
 
 def _is_browser_timeout_error(reason: str) -> bool:
-    lowered = reason.lower()
-    return any(
-        needle in lowered
-        for needle in (
-            "timeout",
-            "timed out",
-            "read timed out",
-            "did not start within",
-            "did not finish within",
-        )
-    )
+    return is_browser_timeout_error(reason)
 
 
 def print_browser_probe_error(reason: str, *, width: int = DEFAULT_REPORT_WIDTH) -> int:

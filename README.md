@@ -22,14 +22,15 @@ Initial setup:
 python3 install.py
 ```
 
-Non-interactive setup for scripts/CI:
+`install.py` is non-interactive by default. It always uses `sudo -n` for system
+packages and `setcap`, so it exits instead of prompting if passwordless sudo is
+not already configured.
+
+Open an activated shell after setup:
 
 ```bash
-python3 install.py --non-interactive
+python3 install.py --interactive
 ```
-
-`--non-interactive` uses `sudo -n` for system packages and `setcap`, so it exits
-instead of prompting if passwordless sudo is not already configured.
 
 ```bash
 cd /path/to/overdrive
@@ -44,8 +45,9 @@ python3 run/run_all.py --skip-vms          # detections only
 python3 run/run_all.py --skip-detections   # VM setup/verification only
 python3 detections/run_detections.py       # report: detections/detection_results.html
 python3 run/run_browser_detections.py      # report: detections/browser/browser_detection_results.html
+python3 run/run_VMs_then_client_browser.py # rebuild lab, then run browser probes in the client
 python3 run/run_VMs.py
-python3 run/run_VMs.py --headless       # full rebuild without GUI windows
+python3 run/run_VMs.py --headless          # full rebuild without VM GUI windows, if VirtualBox headless works on the host
 ```
 
 ## Layout

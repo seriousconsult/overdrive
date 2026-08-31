@@ -9,7 +9,9 @@ Bootstrap a project-local Python virtual environment for Overdrive automation.
   Debian uses ``iputils-ping``), network diagnostics (nmap, dig, tcpdump), and a
   Chromium for browser probes
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
-- Drops into an interactive bash with venv activated (skipped with ``--non-interactive``)
+- Runs non-interactively by default; use ``--interactive`` to drop into an
+  activated shell after install. Privileged commands always use ``sudo -n`` so
+  the installer never waits for a sudo password prompt.
 
 The test client primes by copying this script to ``/root`` and running it
 with ``--non-interactive`` (do not apk-add those checker packages in
@@ -250,9 +252,9 @@ def add_sudo(cmd: list[str], *, non_interactive: bool) -> list[str]:
     if not have_cmd("sudo"):
         raise RuntimeError("sudo is required for this step, but it is not installed.")
 
-    sudo_cmd = ["sudo"]
-    if non_interactive:
-        sudo_cmd.append("-n")
+    # Never let install.py block on a sudo password prompt. If passwordless sudo
+    # is not configured, fail clearly from the command result instead.
+    sudo_cmd = ["sudo", "-n"]
     return [*sudo_cmd, *cmd]
 
 def run_cmd(
@@ -811,9 +813,10 @@ def apply_network_capabilities(interpreter_path: Path, *, non_interactive: bool 
         )
         print("[+] Success! Run Scapy with this venv Python (or after activate).")
     except subprocess.CalledProcessError:
-        print("[-] Failed to apply setcap. Ensure you have sudo privileges.")
-        if non_interactive:
-            raise
+        print(
+            "[-] Failed to apply setcap. Install completed, but Scapy capture "
+            "probes may require root or passwordless sudo."
+        )
     except FileNotFoundError:
         print("[-] setcap utility not found. Install it with your distro's libcap package.")
 
@@ -874,14 +877,26 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Create the Overdrive virtual environment and optional system setup."
     )
-    parser.add_argument(
+    interaction = parser.add_mutually_exclusive_group()
+    interaction.add_argument(
         "--non-interactive",
+        dest="non_interactive",
         action="store_true",
         help=(
-            "Never prompt for input. Privileged commands use sudo -n and fail if "
-            "passwordless sudo is unavailable. Also skips opening an activated shell."
+            "Never prompt for input and skip opening an activated shell. This is "
+            "the default."
         ),
     )
+    interaction.add_argument(
+        "--interactive",
+        dest="non_interactive",
+        action="store_false",
+        help=(
+            "Open an activated shell after install. Privileged commands still use "
+            "sudo -n and will not prompt for a password."
+        ),
+    )
+    parser.set_defaults(non_interactive=True)
     parser.add_argument(
         "--apt-lock-wait",
         type=int,

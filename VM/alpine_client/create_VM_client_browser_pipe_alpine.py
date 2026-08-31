@@ -1183,6 +1183,12 @@ if __name__ == "__main__":
     ap.add_argument("--serial-here", action="store_true", help="Attach to serial directly in this console window.")
     ap.add_argument("--force-interactive-serial", action="store_true", help="Forces interactive socket bridge on startup.")
     ap.add_argument("--serial-port", type=int, default=ALPINE_SERIAL_TCP_PORT, help="TCP port for serial console.")
+    ap.add_argument(
+        "--start-type",
+        choices=("gui", "headless", "separate"),
+        default="gui",
+        help="VirtualBox frontend used when starting the VM. Default: gui.",
+    )
     ns = ap.parse_args()
 
     if ns.serial_here or ns.serial_only:
@@ -1203,4 +1209,5 @@ if __name__ == "__main__":
     setup_client_vm(
         start_vm=not ns.no_start,
         connect_serial=not ns.no_start,
+        start_type=ns.start_type,
     )

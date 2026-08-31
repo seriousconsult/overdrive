@@ -325,6 +325,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Pass --keep-going through to run_VMs.py.",
     )
     parser.add_argument(
+        "--vm-start-type",
+        choices=("gui", "headless", "separate", "none"),
+        default=os.environ.get("OVERDRIVE_VM_START_TYPE", "gui"),
+        help=(
+            "VirtualBox frontend passed to run_VMs.py. Default: gui. "
+            "Browser probes still run under private Xvfb/headless Chromium; "
+            "use headless only on hosts where the VirtualBox headless frontend works."
+        ),
+    )
+    parser.add_argument(
         "--vm-timeout",
         type=int,
         default=3600,
@@ -372,7 +382,13 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
         if not args.skip_vms:
-            vm_command = [sys.executable, str(RUN_VMS)]
+            vm_command = [
+                sys.executable,
+                str(RUN_VMS),
+                "--no-tmux",
+                "--start-type",
+                args.vm_start_type,
+            ]
             if args.keep_going:
                 vm_command.append("--keep-going")
             rc = stream_command(
@@ -383,6 +399,16 @@ def main(argv: list[str] | None = None) -> int:
             if rc != 0:
                 print()
                 print(f"[!] run_VMs.py failed with exit {rc}.")
+                if args.vm_start_type == "headless":
+                    try:
+                        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        log_text = ""
+                    if "0xc0000005" in log_text or "terminated unexpectedly during startup" in log_text:
+                        print(
+                            "[!] VirtualBox headless frontend crashed before guest boot. "
+                            "Use --vm-start-type gui on this host, or repair VirtualBox headless support."
+                        )
                 print_log_tail(log_path)
                 return rc
 

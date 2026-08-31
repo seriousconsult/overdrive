@@ -537,9 +537,11 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     return 0
 
 
-def _resolve_start_type() -> str:
-    """Use GUI starts for full create/rebuild runs."""
-    return "gui"
+def _resolve_start_type(args: argparse.Namespace) -> str:
+    """Resolve the VirtualBox start mode for create/rebuild runs."""
+    if getattr(args, "headless", False):
+        return "headless"
+    return str(getattr(args, "start_type", "gui") or "gui")
 
 
 def discover_create_scripts(
@@ -722,6 +724,12 @@ def main() -> int:
         help="Run inside the managed tmux layout when stdout is interactive. Default: on.",
     )
     parser.add_argument(
+        "--no-tmux",
+        dest="tmux",
+        action="store_false",
+        help="Run directly in this process without creating/attaching the managed tmux layout.",
+    )
+    parser.add_argument(
         "--include-todo",
         action="store_true",
         help="Also run create_VM_*.py scripts whose source contains TODO.",
@@ -735,6 +743,17 @@ def main() -> int:
         "--dry-run",
         action="store_true",
         help="Print the commands without running them.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Start lab VMs headless instead of opening VirtualBox GUI windows.",
+    )
+    parser.add_argument(
+        "--start-type",
+        choices=("gui", "headless", "separate", "none"),
+        default="gui",
+        help="VirtualBox start mode passed to VM creation scripts. Default: gui.",
     )
     parser.add_argument(
         "--skip-verify",
@@ -776,7 +795,7 @@ def main() -> int:
             return 1
 
         connect_serial = not (os.environ.get(TMUX_ENV_FLAG) or not sys.stdout.isatty())
-        start_type = _resolve_start_type()
+        start_type = _resolve_start_type(args)
 
         steps: list[tuple[str, list[str], Path]] = []
         for script in scripts:

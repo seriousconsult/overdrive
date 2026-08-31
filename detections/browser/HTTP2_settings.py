@@ -19,11 +19,18 @@ Score:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ipaddress
 import json
-import os
 import re
+import shutil
+import socket
+import ssl
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -35,15 +42,18 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from detections.common.common_browser import (
         DEFAULT_TIMEOUT,
+        confirm_external_browser_probe,
         fetch_browser_json,
         print_browser_detection_header,
         print_browser_probe_error,
     )
+    from detections.common.direct_chromium import run_async_script
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
     DEFAULT_TIMEOUT = 25
     fetch_browser_json = None  # type: ignore[assignment]
+    run_async_script = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
 
     def print_browser_detection_header(title: str, *, width: int = 64) -> None:
@@ -61,8 +71,8 @@ except Exception as exc:
         return 2
 
 
-ALLOW_EXTERNAL_ENV = "OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES"
 DEFAULT_ENDPOINT = ""
+LOCAL_H2_TIMEOUT = 20
 
 PYTHON_LIBRARY_UA_RE = re.compile(
     r"\b(?:python|httpx|requests|urllib|aiohttp|curl|wget|httpie|okhttp|go-http-client)\b",
@@ -223,15 +233,6 @@ def classify_http2_settings(parsed: dict[str, Any], user_agent: str) -> tuple[st
     return "mixed", reasons
 
 
-def external_browser_probes_allowed() -> bool:
-    return (os.environ.get(ALLOW_EXTERNAL_ENV) or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def is_local_endpoint(url: str) -> bool:
     parsed = urlparse(url)
     host = parsed.hostname
@@ -245,6 +246,270 @@ def is_local_endpoint(url: str) -> bool:
         return False
 
 
+def _pick_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _make_localhost_cert(work_dir: Path) -> tuple[Path, Path]:
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise RuntimeError("openssl is required to create the local HTTP/2 test certificate")
+    cert_path = work_dir / "localhost.crt"
+    key_path = work_dir / "localhost.key"
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-days",
+            "1",
+            "-nodes",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1,DNS:localhost",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=15,
+    )
+    return cert_path, key_path
+
+
+def _settings_fingerprint(settings_order: list[int], settings_values: dict[int, int], pseudo_order: str) -> str:
+    left = ";".join(
+        f"{setting}:{settings_values[setting]}"
+        for setting in settings_order
+        if setting in settings_values
+    )
+    return f"{left}||0|{pseudo_order}"
+
+
+class LocalH2ObservationServer:
+    def __init__(self, timeout: int = LOCAL_H2_TIMEOUT) -> None:
+        self.timeout = max(5, int(timeout))
+        self.work_dir_obj = tempfile.TemporaryDirectory(prefix="overdrive-h2-probe-")
+        self.work_dir = Path(self.work_dir_obj.name)
+        self.port = _pick_local_port()
+        self.url = f"https://127.0.0.1:{self.port}/"
+        self.error: str | None = None
+        self._ready = threading.Event()
+        self._done = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve_once, daemon=True)
+
+    def __enter__(self) -> "LocalH2ObservationServer":
+        self._thread.start()
+        if not self._ready.wait(timeout=min(10, self.timeout)):
+            raise RuntimeError(self.error or "local HTTP/2 observer did not start")
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop.set()
+        with contextlib.suppress(OSError):
+            socket.create_connection(("127.0.0.1", self.port), timeout=0.25).close()
+        self._thread.join(timeout=2)
+        self.work_dir_obj.cleanup()
+
+    def _serve_once(self) -> None:
+        try:
+            cert_path, key_path = _make_localhost_cert(self.work_dir)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(str(cert_path), str(key_path))
+            context.set_alpn_protocols(["h2", "http/1.1"])
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                listener.bind(("127.0.0.1", self.port))
+                listener.listen(1)
+                listener.settimeout(0.5)
+                self._ready.set()
+                deadline = time.monotonic() + self.timeout
+                last_error: str | None = None
+                while not self._stop.is_set() and time.monotonic() < deadline:
+                    try:
+                        raw_conn, _addr = listener.accept()
+                    except socket.timeout:
+                        continue
+                    try:
+                        with raw_conn:
+                            raw_conn.settimeout(self.timeout)
+                            with context.wrap_socket(raw_conn, server_side=True) as tls_conn:
+                                tls_conn.settimeout(self.timeout)
+                                alpn = tls_conn.selected_alpn_protocol() or "http/1.1"
+                                if alpn == "h2":
+                                    self._serve_h2(tls_conn, alpn)
+                                else:
+                                    self._serve_http1(tls_conn, alpn)
+                                return
+                    except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        self.error = last_error
+                        continue
+                self.error = last_error or "local HTTP/2 observer was not contacted"
+                return
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            self._ready.set()
+        finally:
+            self._done.set()
+
+    def _serve_http1(self, conn: ssl.SSLSocket, alpn: str) -> None:
+        request = b""
+        while b"\r\n\r\n" not in request and len(request) < 65536:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            request += chunk
+        headers: dict[str, str] = {}
+        for line in request.decode("iso-8859-1", errors="replace").split("\r\n")[1:]:
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+        body = json.dumps(
+            {
+                "source": "overdrive-local-http2-observer",
+                "http_version": "http/1.1",
+                "tls": {"alpn": alpn},
+                "http2": {},
+                "user_agent": headers.get("user-agent", ""),
+            }
+        ).encode("utf-8")
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Access-Control-Allow-Origin: *\r\n"
+            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii")
+            + body
+        )
+        with contextlib.suppress(OSError):
+            conn.shutdown(socket.SHUT_RDWR)
+
+    def _serve_h2(self, conn: ssl.SSLSocket, alpn: str) -> None:
+        try:
+            import h2.config
+            import h2.connection
+            import h2.events
+        except Exception as exc:
+            raise RuntimeError(f"h2 package is required for local HTTP/2 observer: {exc}") from exc
+
+        h2_conn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False))
+        h2_conn.initiate_connection()
+        conn.sendall(h2_conn.data_to_send())
+
+        settings_order: list[int] = []
+        settings_values: dict[int, int] = {}
+        user_agent = ""
+        pseudo_order = ""
+        stream_id: int | None = None
+        window_update: int | None = None
+        deadline = time.monotonic() + self.timeout
+
+        while time.monotonic() < deadline:
+            data = conn.recv(65535)
+            if not data:
+                break
+            for event in h2_conn.receive_data(data):
+                if isinstance(event, h2.events.RemoteSettingsChanged):
+                    for code, changed in event.changed_settings.items():
+                        setting = int(code)
+                        if setting not in settings_order:
+                            settings_order.append(setting)
+                        settings_values[setting] = int(changed.new_value)
+                elif isinstance(event, h2.events.WindowUpdated) and event.stream_id == 0:
+                    window_update = int(event.delta)
+                elif isinstance(event, h2.events.RequestReceived):
+                    stream_id = int(event.stream_id)
+                    pseudo = []
+                    for raw_name, raw_value in event.headers:
+                        name = raw_name.decode("ascii", "ignore") if isinstance(raw_name, bytes) else str(raw_name)
+                        value = raw_value.decode("latin1", "ignore") if isinstance(raw_value, bytes) else str(raw_value)
+                        if name.startswith(":"):
+                            pseudo.append(name[1:2])
+                        elif name.lower() == "user-agent":
+                            user_agent = value
+                    pseudo_order = ",".join(pseudo)
+                    body_obj = {
+                        "source": "overdrive-local-http2-observer",
+                        "http_version": "h2",
+                        "user_agent": user_agent,
+                        "tls": {"alpn": alpn},
+                        "http2": {
+                            "settings": settings_values,
+                            "settings_order": settings_order,
+                            "window_update": window_update,
+                            "pseudo_header_order": pseudo_order,
+                            "akamai_fingerprint": _settings_fingerprint(
+                                settings_order,
+                                settings_values,
+                                pseudo_order,
+                            ),
+                        },
+                    }
+                    body = json.dumps(body_obj).encode("utf-8")
+                    h2_conn.send_headers(
+                        stream_id,
+                        [
+                            (":status", "200"),
+                            ("content-type", "application/json"),
+                            ("access-control-allow-origin", "*"),
+                            ("cache-control", "no-store"),
+                        ],
+                    )
+                    h2_conn.send_data(stream_id, body, end_stream=True)
+                    h2_conn.close_connection(error_code=0)
+                    conn.sendall(h2_conn.data_to_send())
+                    time.sleep(0.25)
+                    return
+                elif isinstance(event, h2.events.StreamEnded) and stream_id == event.stream_id:
+                    body_obj = {
+                        "source": "overdrive-local-http2-observer",
+                        "http_version": "h2",
+                        "user_agent": user_agent,
+                        "tls": {"alpn": alpn},
+                        "http2": {
+                            "settings": settings_values,
+                            "settings_order": settings_order,
+                            "window_update": window_update,
+                            "pseudo_header_order": pseudo_order,
+                            "akamai_fingerprint": _settings_fingerprint(
+                                settings_order,
+                                settings_values,
+                                pseudo_order,
+                            ),
+                        },
+                    }
+                    body = json.dumps(body_obj).encode("utf-8")
+                    h2_conn.send_headers(
+                        stream_id,
+                        [
+                            (":status", "200"),
+                            ("content-type", "application/json"),
+                            ("access-control-allow-origin", "*"),
+                            ("cache-control", "no-store"),
+                        ],
+                    )
+                    h2_conn.send_data(stream_id, body, end_stream=True)
+                    h2_conn.close_connection(error_code=0)
+                    conn.sendall(h2_conn.data_to_send())
+                    time.sleep(0.25)
+                    return
+            outbound = h2_conn.data_to_send()
+            if outbound:
+                conn.sendall(outbound)
+
+        raise TimeoutError("local HTTP/2 observer did not receive a complete browser request")
+
+
 def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, Any] | None, str | None]:
     if BROWSER_HELPER_IMPORT_ERROR is not None:
         return None, (
@@ -254,18 +519,61 @@ def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, An
     if fetch_browser_json is None:
         return None, "browser helpers unavailable"
     if not endpoint:
-        return None, "HTTP/2 fingerprint endpoint is not configured."
-    if not is_local_endpoint(endpoint) and not external_browser_probes_allowed():
-        return None, (
-            "external HTTP/2 fingerprint endpoints are disabled by default; "
-            f"set {ALLOW_EXTERNAL_ENV}=1 to run one explicitly."
+        if run_async_script is None:
+            return None, "direct Chromium async helpers unavailable"
+        try:
+            with LocalH2ObservationServer(timeout=max(LOCAL_H2_TIMEOUT, timeout)) as server:
+                target = json.dumps(f"{server.url}?t={int(time.time())}")
+                script = f"""
+const callback = arguments[arguments.length - 1];
+(async () => {{
+  try {{
+    const response = await fetch({target}, {{ cache: "no-store" }});
+    const text = await response.text();
+    let data = null;
+    try {{ data = JSON.parse(text); }} catch (_err) {{}}
+    callback({{ ok: response.ok, status: response.status, data, text }});
+  }} catch (err) {{
+    callback({{ ok: false, error: String(err && err.message ? err.message : err) }});
+  }}
+}})();
+"""
+                result, error = run_async_script(
+                    script,
+                    timeout=timeout,
+                    ignore_certificate_errors=True,
+                )
+                if error:
+                    server._done.wait(timeout=1)
+                if error and server.error:
+                    return None, f"{error}; local HTTP/2 observer: {server.error}"
+                if error:
+                    return None, error
+                if not isinstance(result, dict):
+                    return None, f"browser fetch returned unexpected result: {result!r}"
+                if result.get("ok") is False:
+                    return None, str(result.get("error") or "browser fetch failed")
+                data = result.get("data")
+                if not isinstance(data, dict):
+                    text = str(result.get("text") or "")
+                    return None, f"browser fetch did not return JSON: {text[:160]}"
+                return data, None
+        except Exception as exc:
+            return None, f"local HTTP/2 observer failed: {type(exc).__name__}: {exc}"
+    if not is_local_endpoint(endpoint):
+        allowed, deny_reason = confirm_external_browser_probe(
+            "HTTP/2 browser fingerprint",
+            endpoint,
         )
+        if not allowed:
+            return None, f"external HTTP/2 probe not run: {deny_reason}"
 
     bounded = max(5, min(timeout, 12))
     return fetch_browser_json(
         endpoint,
         timeout=bounded,
         cache_bust=True,
+        ignore_certificate_errors=is_local_endpoint(endpoint),
     )
 
 
@@ -371,7 +679,7 @@ def main() -> int:
 
     print_browser_detection_header("HTTP/2 SETTINGS Browser Fingerprint Check")
     print(f"Endpoint: {args.endpoint or '(none; local-only default)'}")
-    print("Method: Chromium DevTools browser navigation; no Python HTTP client fallback is scored.")
+    print("Method: Chromium DevTools browser fetch/navigation; no Python HTTP client fallback is scored.")
     print()
 
     data, error = fetch_browser_observation(args.endpoint, args.timeout)

@@ -25,6 +25,8 @@ DEBUG_PORT_ENV = "OVERDRIVE_DIRECT_CHROME_DEBUG_PORT"
 EXTRA_ARGS_ENV = "OVERDRIVE_DIRECT_CHROME_EXTRA_ARGS"
 XVFB_DISPLAY_ENV = "OVERDRIVE_DIRECT_CHROME_X_DISPLAY"
 USE_SYSTEM_DISPLAY_ENV = "OVERDRIVE_DIRECT_CHROME_USE_SYSTEM_DISPLAY"
+USE_DBUS_RUN_SESSION_ENV = "OVERDRIVE_DIRECT_CHROME_USE_DBUS_RUN_SESSION"
+STARTUP_TIMEOUT_ENV = "OVERDRIVE_DIRECT_CHROME_STARTUP_TIMEOUT"
 
 
 def first_executable_path(*candidates: str) -> str | None:
@@ -58,6 +60,16 @@ def xvfb_binary() -> str | None:
 
 def dbus_run_session_binary() -> str | None:
     return shutil.which("dbus-run-session") or first_executable_path("/usr/bin/dbus-run-session")
+
+
+def dbus_machine_id_present() -> bool:
+    for path in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
+        try:
+            if path.read_text(encoding="utf-8", errors="ignore").strip():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def chrome_full_version(binary: str | None) -> str:
@@ -241,6 +253,69 @@ def read_small(path: Path | None, limit: int = 2500) -> str:
         return ""
 
 
+def _process_cmdline(pid: int) -> str:
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", "ignore").strip()
+
+
+def _pids_using_profile(profile_dir: Path) -> set[int]:
+    if not Path("/proc").exists():
+        return set()
+    needles = {str(profile_dir), str(profile_dir.parent)}
+    pids: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == os.getpid():
+            continue
+        cmdline = _process_cmdline(pid)
+        if "overdrive-direct-chrome-" not in cmdline:
+            continue
+        if any(needle in cmdline for needle in needles):
+            pids.add(pid)
+    return pids
+
+
+def terminate_profile_processes(profile_dir: Path) -> None:
+    """
+    Reap Chrome descendants that survive the dbus/Xvfb wrapper process.
+
+    Chromium can leave stopped process-group members behind after DevTools
+    teardown on some WSL/Chrome builds. Match on the unique temp profile so a
+    cleanup pass cannot touch normal user browser windows.
+    """
+    for sig, wait_seconds in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.2)):
+        pids = _pids_using_profile(profile_dir)
+        if not pids:
+            return
+        pgids: set[int] = set()
+        for pid in pids:
+            try:
+                pgids.add(os.getpgid(pid))
+            except OSError:
+                continue
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                pass
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            if not _pids_using_profile(profile_dir):
+                return
+            time.sleep(0.05)
+
+
 def wait_for_chrome_json(url: str, proc: subprocess.Popen, timeout: int) -> Any:
     deadline = time.monotonic() + max(1, timeout)
     while time.monotonic() < deadline:
@@ -409,6 +484,7 @@ def chrome_command(
     *,
     headless: bool = False,
     no_sandbox: bool = False,
+    ignore_certificate_errors: bool = False,
 ) -> list[str]:
     args = [
         chromium,
@@ -419,6 +495,12 @@ def chrome_command(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
+        "--disable-vulkan",
+        "--disable-gpu-vsync",
+        "--disable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
         "--lang=en-US",
         "--window-size=1920,1080",
         f"--user-agent={desktop_chrome_user_agent(chromium)}",
@@ -430,14 +512,20 @@ def chrome_command(
         args.append("--ozone-platform=x11")
     if no_sandbox:
         args.append("--no-sandbox")
+    if ignore_certificate_errors:
+        args.append("--ignore-certificate-errors")
     args.extend(shlex.split(os.environ.get(EXTRA_ARGS_ENV, "")))
     args.append(url)
     return args
 
 
 def browser_process_command(args: list[str]) -> list[str]:
+    dbus_pref = (os.environ.get(USE_DBUS_RUN_SESSION_ENV) or "").strip().lower()
+    if dbus_pref in {"0", "false", "no", "off"}:
+        return args
+
     dbus_run_session = dbus_run_session_binary()
-    if dbus_run_session:
+    if dbus_run_session and (dbus_pref in {"1", "true", "yes", "on"} or dbus_machine_id_present()):
         return [dbus_run_session, "--", *args]
     return args
 
@@ -446,16 +534,44 @@ def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def chromium_startup_timeout(total_timeout: int) -> int:
+    """Give slow VM/Xvfb/DBus startups enough time without hiding real hangs."""
+    total = max(1, int(total_timeout))
+    default = min(total, max(15, min(45, total // 2)))
+    return _env_int(STARTUP_TIMEOUT_ENV, default, minimum=1, maximum=total)
+
+
 def start_xvfb_if_needed(
     tmp_path: Path,
 ) -> tuple[dict[str, str], subprocess.Popen | None, Path | None, bool]:
     env = os.environ.copy()
+    env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    env.setdefault("GALLIUM_DRIVER", "llvmpipe")
+    env.setdefault("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
     if env.get("DISPLAY") and _env_truthy(USE_SYSTEM_DISPLAY_ENV):
         return env, None, None, False
 
     def use_headless() -> tuple[dict[str, str], None, Path | None, bool]:
         headless_env = os.environ.copy()
         headless_env.pop("DISPLAY", None)
+        headless_env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+        headless_env.setdefault("GALLIUM_DRIVER", "llvmpipe")
+        headless_env.setdefault("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
         return headless_env, None, None, True
 
     xvfb = xvfb_binary()
@@ -541,6 +657,11 @@ def browser_startup_needs_no_sandbox(message: str) -> bool:
     )
 
 
+def chromium_needs_no_sandbox() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    return bool(geteuid and geteuid() == 0)
+
+
 def navigate_current_page(
     sock: socket.socket,
     url: str,
@@ -608,6 +729,7 @@ def run_in_chromium(
     timeout: int,
     label: str = "direct Chromium probe",
     initial_url: str = "about:blank",
+    ignore_certificate_errors: bool = False,
 ) -> tuple[Any | None, str | None]:
     chromium = chromium_binary()
     if not chromium:
@@ -635,9 +757,13 @@ def run_in_chromium(
             )
 
         try:
-            for no_sandbox in (False, True):
+            first_no_sandbox = chromium_needs_no_sandbox()
+            no_sandbox_attempts = (True,) if first_no_sandbox else (False, True)
+            startup_timeout = chromium_startup_timeout(deadline)
+            for no_sandbox in no_sandbox_attempts:
                 if no_sandbox and (
-                    not failures or not browser_startup_needs_no_sandbox(failures[-1])
+                    not first_no_sandbox
+                    and (not failures or not browser_startup_needs_no_sandbox(failures[-1]))
                 ):
                     break
                 mode = "Chromium --no-sandbox fallback" if no_sandbox else "Chromium"
@@ -652,6 +778,7 @@ def run_in_chromium(
                                 "about:blank",
                                 headless=use_headless,
                                 no_sandbox=no_sandbox,
+                                ignore_certificate_errors=ignore_certificate_errors,
                             )
                         ),
                         stdout=log_handle,
@@ -663,7 +790,7 @@ def run_in_chromium(
                     ws_url = chrome_target_websocket(
                         port,
                         proc,
-                        timeout=5,
+                        timeout=startup_timeout,
                         fallback_url="about:blank",
                     )
                     with websocket_connect(ws_url, timeout=deadline) as sock:
@@ -674,6 +801,8 @@ def run_in_chromium(
                             timeout=deadline,
                         )
                         return action(sock, proc, chromium), None
+                except TimeoutError as exc:
+                    failures.append(f"{mode}: browser/devtools timed out: {type(exc).__name__}: {exc}")
                 except OSError as exc:
                     failures.append(
                         f"{mode}: unable to launch/connect: {type(exc).__name__}: {exc}"
@@ -701,6 +830,7 @@ def run_in_chromium(
                                 proc.wait(timeout=3)
                             except subprocess.TimeoutExpired:
                                 pass
+                    terminate_profile_processes(profile_dir)
                     proc = None
                     log_tail = read_small(log_path)
                     if failures and log_tail and "chromium log:" not in failures[-1]:
@@ -723,7 +853,12 @@ def run_in_chromium(
     return None, f"{label} failed: " + " | ".join(failures)
 
 
-def navigate_and_read_text(url: str, *, timeout: int) -> tuple[str | None, str | None]:
+def navigate_and_read_text(
+    url: str,
+    *,
+    timeout: int,
+    ignore_certificate_errors: bool = False,
+) -> tuple[str | None, str | None]:
     timeout_ms = max(3000, int(timeout) * 1000)
 
     def action(sock: socket.socket, _proc: subprocess.Popen, _chromium: str) -> str | None:
@@ -757,6 +892,7 @@ def navigate_and_read_text(url: str, *, timeout: int) -> tuple[str | None, str |
         timeout=timeout,
         label="direct Chromium navigation",
         initial_url=url,
+        ignore_certificate_errors=ignore_certificate_errors,
     )
     if error:
         return None, error
@@ -798,6 +934,7 @@ def run_async_script(
     *,
     timeout: int,
     url: str = "about:blank",
+    ignore_certificate_errors: bool = False,
 ) -> tuple[Any | None, str | None]:
     """Run callback-style async JavaScript in Chromium via DevTools."""
     timeout_ms = max(3000, int(timeout) * 1000)
@@ -836,6 +973,7 @@ new Promise((resolve) => {{
         timeout=timeout,
         label="direct Chromium async script",
         initial_url=url,
+        ignore_certificate_errors=ignore_certificate_errors,
     )
 
 
@@ -844,12 +982,17 @@ def fetch_browser_json(
     *,
     timeout: int = 25,
     cache_bust: bool = False,
+    ignore_certificate_errors: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     target = url
     if cache_bust:
         sep = "&" if "?" in target else "?"
         target = f"{target}{sep}t={int(time.time())}"
-    text, error = navigate_and_read_text(target, timeout=timeout)
+    text, error = navigate_and_read_text(
+        target,
+        timeout=timeout,
+        ignore_certificate_errors=ignore_certificate_errors,
+    )
     if error:
         return None, error
     if not text:

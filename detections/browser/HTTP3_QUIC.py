@@ -16,9 +16,19 @@ A standard Chrome browser on Windows has one specific pattern of these settings.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import ipaddress
 import os
 import re
+import shutil
+import socket
+import ssl
+import subprocess
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
@@ -28,20 +38,17 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from detections.common.common_browser import DEFAULT_TIMEOUT, fetch_browser_json, print_browser_probe_error
+from detections.common.common_browser import (
+    DEFAULT_TIMEOUT,
+    confirm_external_browser_probe,
+    fetch_browser_json,
+    print_browser_probe_error,
+)
+from detections.common.direct_chromium import run_async_script
 
-ALLOW_EXTERNAL_ENV = "OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES"
 DEFAULT_ENDPOINT = ""
 TIMEOUT = max(12, DEFAULT_TIMEOUT)
-
-
-def external_browser_probes_allowed() -> bool:
-    return (os.environ.get(ALLOW_EXTERNAL_ENV) or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+LOCAL_QUIC_TIMEOUT = 20
 
 
 def is_local_endpoint(url: str) -> bool:
@@ -57,14 +64,213 @@ def is_local_endpoint(url: str) -> bool:
         return False
 
 
+def _pick_local_port(kind: int) -> int:
+    sock_type = socket.SOCK_DGRAM if kind == socket.SOCK_DGRAM else socket.SOCK_STREAM
+    with socket.socket(socket.AF_INET, sock_type) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _make_localhost_cert(work_dir: str) -> tuple[str, str]:
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise RuntimeError("openssl is required to create the local HTTP/3 test certificate")
+    cert_path = os.path.join(work_dir, "localhost.crt")
+    key_path = os.path.join(work_dir, "localhost.key")
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-days",
+            "1",
+            "-nodes",
+            "-keyout",
+            key_path,
+            "-out",
+            cert_path,
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=15,
+    )
+    return cert_path, key_path
+
+
+class LocalQuicAltSvcProbe:
+    def __init__(self, timeout: int = LOCAL_QUIC_TIMEOUT) -> None:
+        self.timeout = max(5, int(timeout))
+        self.tcp_port = _pick_local_port(socket.SOCK_STREAM)
+        self.udp_port = _pick_local_port(socket.SOCK_DGRAM)
+        self.url = f"https://127.0.0.1:{self.tcp_port}/"
+        self.error: str | None = None
+        self.udp_packet_size: int | None = None
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._tmp = tempfile.TemporaryDirectory(prefix="overdrive-h3-probe-")
+        self._tcp_thread = threading.Thread(target=self._serve_https, daemon=True)
+        self._udp_thread = threading.Thread(target=self._listen_udp, daemon=True)
+
+    def __enter__(self) -> "LocalQuicAltSvcProbe":
+        self._udp_thread.start()
+        self._tcp_thread.start()
+        if not self._ready.wait(timeout=min(10, self.timeout)):
+            raise RuntimeError(self.error or "local HTTP/3 Alt-Svc observer did not start")
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop.set()
+        with contextlib.suppress(OSError):
+            socket.create_connection(("127.0.0.1", self.tcp_port), timeout=0.25).close()
+        with contextlib.suppress(OSError):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.sendto(b"\0", ("127.0.0.1", self.udp_port))
+        self._tcp_thread.join(timeout=2)
+        self._udp_thread.join(timeout=2)
+        self._tmp.cleanup()
+
+    def _listen_udp(self) -> None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.bind(("127.0.0.1", self.udp_port))
+                sock.settimeout(0.25)
+                deadline = time.monotonic() + self.timeout
+                while not self._stop.is_set() and time.monotonic() < deadline:
+                    try:
+                        data, _addr = sock.recvfrom(4096)
+                    except socket.timeout:
+                        continue
+                    if data and data != b"\0":
+                        self.udp_packet_size = len(data)
+                        return
+        except Exception as exc:
+            self.error = f"UDP observer failed: {type(exc).__name__}: {exc}"
+
+    def _serve_https(self) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                body = json.dumps(
+                    {
+                        "source": "overdrive-local-quic-alt-svc",
+                        "ok": True,
+                        "path": self.path,
+                        "user_agent": self.headers.get("user-agent", ""),
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("cache-control", "no-store")
+                self.send_header("alt-svc", f'h3=":{outer.udp_port}"; ma=60')
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _fmt: str, *_args: Any) -> None:
+                return
+
+        try:
+            cert_path, key_path = _make_localhost_cert(self._tmp.name)
+            httpd = HTTPServer(("127.0.0.1", self.tcp_port), Handler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert_path, key_path)
+            context.set_alpn_protocols(["http/1.1"])
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+            httpd.timeout = 0.25
+            self._ready.set()
+            deadline = time.monotonic() + self.timeout
+            while not self._stop.is_set() and time.monotonic() < deadline:
+                httpd.handle_request()
+                if self.udp_packet_size is not None:
+                    return
+        except Exception as exc:
+            self.error = f"HTTPS Alt-Svc observer failed: {type(exc).__name__}: {exc}"
+            self._ready.set()
+
+
+def fetch_local_quic_observation(timeout: int) -> tuple[dict[str, Any] | None, str | None]:
+    script = """
+const callback = arguments[arguments.length - 1];
+function done(value) { callback(value); }
+(async () => {
+  try {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const first = await fetch("/first?x=" + Date.now(), {cache: "no-store"});
+    await first.text();
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const second = await fetch("/second?x=" + Date.now(), {cache: "no-store"});
+    const text = await second.text();
+    let parsed = {};
+    try { parsed = JSON.parse(text); } catch (_) {}
+    done({ok: true, userAgent: navigator.userAgent || "", second: parsed});
+  } catch (err) {
+    done({ok: false, error: String(err && err.message ? err.message : err), userAgent: navigator.userAgent || ""});
+  }
+})();
+"""
+    try:
+        with LocalQuicAltSvcProbe(timeout=max(timeout, LOCAL_QUIC_TIMEOUT)) as server:
+            result, error = run_async_script(
+                script,
+                timeout=timeout,
+                url=server.url,
+                ignore_certificate_errors=True,
+            )
+            deadline = time.monotonic() + min(5, max(1, timeout // 4))
+            while server.udp_packet_size is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            user_agent = ""
+            if isinstance(result, dict):
+                user_agent = str(result.get("userAgent") or "")
+            observed = server.udp_packet_size is not None
+            data = {
+                "source": "overdrive-local-quic-alt-svc",
+                "http_version": "h3-attempted" if observed else "http/1.1-alt-svc",
+                "user_agent": user_agent,
+                "tls": {"alpn": "h3-alt-svc" if observed else "http/1.1"},
+                "quic": {
+                    "udp_initial_seen": observed,
+                    "initial_packet_size": server.udp_packet_size,
+                    "alt_svc_udp_port": server.udp_port,
+                },
+                "transport": {
+                    "local_alt_svc_quic_packet": server.udp_packet_size,
+                }
+                if observed
+                else {},
+            }
+            if error:
+                return data, error
+            if isinstance(result, dict) and result.get("ok") is False:
+                return data, str(result.get("error") or "browser fetch failed")
+            if server.error:
+                return data, server.error
+            return data, None
+    except Exception as exc:
+        return None, f"local HTTP/3 Alt-Svc observer failed: {type(exc).__name__}: {exc}"
+
+
 def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, Any] | None, str | None]:
     if not endpoint:
-        return None, "HTTP/3/QUIC fingerprint endpoint is not configured."
-    if not is_local_endpoint(endpoint) and not external_browser_probes_allowed():
-        return None, (
-            "external HTTP/3/QUIC fingerprint endpoints are disabled by default; "
-            f"set {ALLOW_EXTERNAL_ENV}=1 to run one explicitly."
+        return fetch_local_quic_observation(timeout)
+    if not is_local_endpoint(endpoint):
+        allowed, deny_reason = confirm_external_browser_probe(
+            "HTTP/3 QUIC browser fingerprint",
+            endpoint,
         )
+        if not allowed:
+            return None, f"external HTTP/3/QUIC probe not run: {deny_reason}"
     bounded = max(5, min(timeout, 12))
     return fetch_browser_json(endpoint, timeout=bounded, cache_bust=True)
 
@@ -118,9 +324,11 @@ def extract_quic_signals(data: dict[str, Any]) -> dict[str, Any]:
             transport_param_paths.append(k)
 
     return {
+        "source": data.get("source") or "",
         "http_version": http_version,
         "alpn": alpn,
         "user_agent": ua,
+        "quic": data.get("quic") if isinstance(data.get("quic"), dict) else {},
         "has_h3_or_quic": has_h3,
         "matched_entries": matched_entries[:80],
         "transport_param_paths": transport_param_paths[:40],
@@ -136,6 +344,19 @@ def score_quic_fingerprint(sig: dict[str, Any], probe_error: str | None) -> tupl
     4 = Suspicious mismatch (automation-like behavior or missing expected evidence)
     5 = Strong non-browser / bot-like inconsistency
     """
+    source = str(sig.get("source") or "")
+    if source == "overdrive-local-quic-alt-svc":
+        quic = sig.get("quic") if isinstance(sig.get("quic"), dict) else {}
+        if quic.get("udp_initial_seen"):
+            size = quic.get("initial_packet_size")
+            return (
+                2,
+                f"Chromium attempted QUIC to a local Alt-Svc endpoint (initial UDP packet {size} bytes).",
+            )
+        if probe_error:
+            return 3, f"Local Alt-Svc probe ran, but no QUIC attempt was observed ({probe_error})."
+        return 3, "Local Alt-Svc probe ran, but Chromium did not attempt QUIC on loopback."
+
     if probe_error:
         return 3, f"Could not complete browser observation ({probe_error})"
 
