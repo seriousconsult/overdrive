@@ -7,7 +7,7 @@ Discovers scripts dynamically under ``detections/``. Shared helpers live in
 Section order: Root first, then subfolders A–Z.
 
 Outputs to console and generates a compact HTML report
-(``detection_results.html``) with one section per folder and every discovered
+(``detections/detection_results.html``) with one section per folder and every discovered
 script (including LAN neighbor density, LAN discovery silence, and mDNS
 consumer diversity).
 
@@ -61,6 +61,7 @@ PER_SCRIPT_TIMEOUT_SEC = {
 # Repository root. This file lives under ``detections/``.
 BASE_DIR = Path(__file__).resolve().parent.parent
 DETECTIONS_DIR = BASE_DIR / "detections"
+REPORT_FOLDERS = frozenset({"browser", "network", "router", "vpn"})
 
 # Python files to skip globally (runner / tooling / package markers, not detection modules)
 EXCLUDE_SCRIPT_NAMES = frozenset(
@@ -667,6 +668,18 @@ tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
     return "".join(parts)
 
 
+def resolve_report_path(report_name: str, folder_order: list[str] | None = None) -> Path:
+    """Return the report path for default and explicitly scoped suite outputs."""
+    report_path = Path(report_name)
+    if report_path.is_absolute():
+        return report_path
+    if report_path.parent != Path("."):
+        return BASE_DIR / report_path
+    if folder_order and len(folder_order) == 1 and folder_order[0] in REPORT_FOLDERS:
+        return DETECTIONS_DIR / folder_order[0] / report_path.name
+    return DETECTIONS_DIR / report_path.name
+
+
 def select_detection_folders(
     folders: list[str] | None = None,
 ) -> tuple[dict[str, list[str]], list[str], int]:
@@ -903,7 +916,8 @@ def run_detection_suite(
 
     elapsed_time = time.time() - start_time
     html_content = generate_html_report(results, folder_order, elapsed_time)
-    html_path = BASE_DIR / report_name
+    html_path = resolve_report_path(report_name, folder_order)
+    html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_content, encoding="utf-8")
 
     minutes, seconds = divmod(int(elapsed_time), 60)

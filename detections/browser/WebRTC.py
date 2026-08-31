@@ -5,23 +5,18 @@ This script is a WebRTC Leak Tester. It uses Chromium DevTools
 to see if your real local or public IP address is "leaking" through your browser's
 WebRTC protocol, even if you are using a VPN or Proxy.
 
-WebRTC Leak Tester using Chromium DevTools + browserleaks.com/webrtc.
-
 - Launches Chromium directly through DevTools; no Selenium/WebDriver.
 - Better error output (exception type + message)
 - Keeps page text in memory only (no files written)
 
-WebRTC leak tester using Chromium DevTools (BrowserLeaks page)
+WebRTC leak tester using Chromium DevTools and local RTCPeerConnection probing.
 
 What it does:
-- Opens https://browserleaks.com/webrtc in Chromium
-- Waits for JS to populate WebRTC results
-- Tries multiple ways to extract the WebRTC-revealed IP:
-    1) Look for element id="rtc-ipv4"
-    2) Look for any element with id starting "rtc-"
-    3) If still missing, scan page text for IPv4-like strings
+- Opens a localhost page in Chromium.
+- Creates an RTCPeerConnection with no STUN/TURN servers.
+- Extracts IPv4-like strings from local ICE candidates only.
 - Prints diagnostics so you can distinguish:
-    - "No leak data present" vs "JS didn’t populate / selectors wrong"
+    - "No host candidate data present" vs "WebRTC API unavailable"
 
 This script is a WebRTC Leak Tester. It uses Chromium DevTools
 to see if your real local or public IP address is "leaking" through your browser's
@@ -29,6 +24,8 @@ WebRTC protocol, even if you are using a VPN or Proxy.
 '''
 
 import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import sys
 from pathlib import Path
@@ -38,10 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from detections.common.common_browser import ipv4_like_strings, is_private_ipv4, print_browser_probe_error
 from detections.common.direct_chromium import run_async_script
-from detections.common.common_config import BROWSERLEAKS_WEBRTC_URL
 
-
-URL = BROWSERLEAKS_WEBRTC_URL
 
 WEBRTC_PROBE_JS = r"""
 const callback = arguments[arguments.length - 1];
@@ -51,36 +45,73 @@ function finish(value) {
   }
 }
 
-function collect() {
-  const byId = (id) => {
-    const el = document.getElementById(id);
-    return el ? (el.innerText || el.textContent || "").trim() : "";
-  };
-  const rtcIds = Array.from(document.querySelectorAll('[id^="rtc-"]')).map((el) => el.id);
-  const bodyText = document.body ? (document.body.innerText || document.body.textContent || "") : "";
-  return {
-    ok: true,
-    rtcIds,
-    rtcIpv4: byId("rtc-ipv4"),
-    rtcLocal: byId("rtc-local"),
-    rtcPublic: byId("rtc-public"),
-    bodyText,
-  };
-}
-
 (async () => {
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    const data = collect();
-    if (data.rtcIpv4 || data.rtcLocal || data.rtcPublic || data.rtcIds.length > 0) {
-      finish(data);
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+  const RTCPeerConnectionClass =
+    window.RTCPeerConnection || window.webkitRTCPeerConnection || null;
+  if (!RTCPeerConnectionClass) {
+    finish({ok: true, supported: false, candidates: [], localDescription: ""});
+    return;
   }
-  finish(collect());
+  const pc = new RTCPeerConnectionClass({iceServers: []});
+  const candidates = [];
+  pc.onicecandidate = (event) => {
+    if (event && event.candidate && event.candidate.candidate) {
+      candidates.push(String(event.candidate.candidate));
+    }
+  };
+  try {
+    pc.createDataChannel("overdrive");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && pc.iceGatheringState !== "complete") {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const localDescription = pc.localDescription && pc.localDescription.sdp
+      ? String(pc.localDescription.sdp)
+      : "";
+    try { pc.close(); } catch (_ignore) {}
+    finish({
+      ok: true,
+      supported: true,
+      iceGatheringState: pc.iceGatheringState,
+      candidates,
+      localDescription,
+    });
+  } catch (err) {
+    try { pc.close(); } catch (_ignore) {}
+    finish({
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+      candidates,
+    });
+  }
 })().catch((err) => finish({ok: false, error: String(err && err.message ? err.message : err)}));
 """
+
+
+class WebRTCProbeHandler(BaseHTTPRequestHandler):
+    server_version = "OverdriveWebRTCProbe/1.0"
+
+    def log_message(self, _fmt: str, *_args) -> None:
+        return
+
+    def do_GET(self) -> None:
+        body = b"<!doctype html><meta charset='utf-8'><title>WebRTC Probe</title>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def start_webrtc_probe_server() -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), WebRTCProbeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True, name="webrtc-probe")
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}/"
 
 
 def compute_webrtc_leak_score(
@@ -160,77 +191,47 @@ def try_extract_webrtc_evidence(timeout=30):
         "ip_source_text": None,
     }
 
-    result, error = run_async_script(WEBRTC_PROBE_JS, timeout=max(25, timeout), url=URL)
-    if error:
-        raise RuntimeError(error)
-    if not isinstance(result, dict):
-        raise RuntimeError(f"WebRTC probe returned unexpected data: {result!r}")
-    if result.get("ok") is False:
-        raise RuntimeError(str(result.get("error") or "WebRTC page probe failed"))
+    server = None
+    try:
+        server, url = start_webrtc_probe_server()
+        result, error = run_async_script(WEBRTC_PROBE_JS, timeout=max(10, timeout), url=url)
+        if error:
+            raise RuntimeError(error)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"WebRTC probe returned unexpected data: {result!r}")
+        if result.get("ok") is False:
+            raise RuntimeError(str(result.get("error") or "WebRTC local probe failed"))
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+
+    evidence["supported"] = bool(result.get("supported"))
+    evidence["ice_gathering_state"] = result.get("iceGatheringState")
+    evidence["local_candidate_lines"] = list(result.get("candidates") or [])[:30]
+
+    candidate_texts = list(result.get("candidates") or [])
+    local_description = str(result.get("localDescription") or "")
+    if local_description:
+        candidate_texts.extend(
+            line.strip()
+            for line in local_description.splitlines()
+            if line.strip().startswith("a=candidate:")
+        )
 
     def record_candidate(ip, source):
         evidence["detected_ip_candidates"].append({"ip": ip, "source": source})
         if is_private_ipv4(ip):
             evidence["private_ips"].append({"ip": ip, "source": source})
 
-    # 1) Try rtc-ipv4 specifically (original selector)
-    evidence["selector_attempts"].append('query #rtc-ipv4')
-    txt = str(result.get("rtcIpv4") or "").strip()
-    if txt:
-        evidence["rtc_ipv4_found"] = True
-
-        evidence["ip_source_id"] = "rtc-ipv4"
-        evidence["ip_source_text"] = txt
-
-        ips = ipv4_like_strings(txt)
-        if ips:
-            # record all IPv4s we can see in that element
-            for ip in ips:
-                record_candidate(ip, "rtc-ipv4")
-            # choose first as primary
-            evidence["ip_source_text"] = txt
-            return ips[0], evidence
-
-        # if rtc-ipv4 exists but no IPv4 strings matched, continue
-
-    # 2) Collect rtc-* ids for diagnostics
-    evidence["rtc_ids_found"] = list(result.get("rtcIds") or [])
-    evidence["selector_attempts"].append('querySelectorAll([id^="rtc-"])')
-
-    # Explicit rtc-local / rtc-public extraction (important for ticket meaning)
-    evidence["rtc_local_raw"] = str(result.get("rtcLocal") or "").strip()
-    evidence["rtc_local_ipv4"] = ipv4_like_strings(evidence["rtc_local_raw"])
-    for ip in evidence["rtc_local_ipv4"]:
-        record_candidate(ip, "rtc-local")
-
-    evidence["rtc_public_raw"] = str(result.get("rtcPublic") or "").strip()
-    evidence["rtc_public_ipv4"] = ipv4_like_strings(evidence["rtc_public_raw"])
-    for ip in evidence["rtc_public_ipv4"]:
-        record_candidate(ip, "rtc-public")
-
-    # If we saw any IP candidates so far, choose a primary to display.
-    # Prefer showing rtc-local first (since that's what your ticket rejects).
-    if evidence["rtc_local_ipv4"]:
-        evidence["ip_source_id"] = "rtc-local"
-        evidence["ip_source_text"] = evidence["rtc_local_raw"]
-        return evidence["rtc_local_ipv4"][0], evidence
-
-    if evidence["rtc_public_ipv4"]:
-        evidence["ip_source_id"] = "rtc-public"
-        evidence["ip_source_text"] = evidence["rtc_public_raw"]
-        return evidence["rtc_public_ipv4"][0], evidence
-
-    # 3) Fallback: scan body text for IPv4-like strings
-    text = str(result.get("bodyText") or "")
-    ips = ipv4_like_strings(text)
-    evidence["ipv4_strings_in_body_text"] = ips[:20]
-
-    for ip in ips:
-        record_candidate(ip, "body_text")
+    ips: list[str] = []
+    for text in candidate_texts:
+        for ip in ipv4_like_strings(text):
+            ips.append(ip)
+            record_candidate(ip, "local_ice_candidate")
 
     if ips:
-        # choose first non-empty for display
-        evidence["ip_source_id"] = "body_text"
+        evidence["ip_source_id"] = "local_ice_candidate"
         evidence["ip_source_text"] = ips[0]
         return ips[0], evidence
 
@@ -243,8 +244,8 @@ def main():
     evidence: dict = {}
 
     try:
-        print("Loading BrowserLeaks WebRTC test...")
-        print("Waiting for WebRTC results to render (JS)...")
+        print("Running local WebRTC candidate probe...")
+        print("Waiting for browser ICE gathering...")
         ip, evidence = try_extract_webrtc_evidence(timeout=25)
 
         # ---- ticket rule ----
@@ -256,7 +257,7 @@ def main():
             print("WebRTC IP not detected in the DOM/text.")
             print("This can mean either:")
             print("  - WebRTC leak is blocked/hidden (good for privacy), OR")
-            print("  - BrowserLeaks JS did not populate results / selector mismatch.")
+            print("  - Browser used mDNS/host obfuscation for local candidates.")
         else:
             print("--- RESULT ---")
             print(f"WebRTC Detected IP candidate: {ip}")
@@ -278,10 +279,11 @@ def main():
 
         # Print concise evidence to make it debuggable
         print("\n[Diagnostics]")
-        print(f"rtc-ipv4 found?     {evidence.get('rtc_ipv4_found')}")
-        rtc_ids = evidence.get("rtc_ids_found", [])
-        print(f"rtc-* element ids:  {rtc_ids[:30]}")
-        print(f"IPv4-like strings in body text (top): {evidence.get('ipv4_strings_in_body_text', [])[:10]}")
+        print(f"RTCPeerConnection supported? {evidence.get('supported')}")
+        print(f"ICE gathering state:         {evidence.get('ice_gathering_state')}")
+        print("Local candidate lines:")
+        for line in evidence.get("local_candidate_lines", [])[:10]:
+            print(f"  - {line[:180]}")
 
         print("\n[Extracted rtc-local / rtc-public]")
         print(f"rtc-local raw:      {evidence.get('rtc_local_raw')}")

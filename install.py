@@ -38,6 +38,9 @@ PY_DEPS = [
     "zeroconf",
 ]
 
+PIP_INSTALL_TIMEOUT_SECONDS = "20"
+PIP_INSTALL_RETRIES = "2"
+
 # OS packages that provide the ``dig`` CLI (name differs by distro).
 DIG_PACKAGE_BY_MGR = {
     "apt": "dnsutils",
@@ -997,7 +1000,27 @@ def build_python_venv() -> str:
         python_exe = create_fresh_venv()
         ensure_venv_pip(python_exe)
         print("Installing Python packages into venv...")
-        subprocess.check_call([python_exe, "-m", "pip", "install", "--no-input", *PY_DEPS])
+        pip_env = os.environ.copy()
+        pip_env.setdefault("PYTHONUNBUFFERED", "1")
+        pip_env.setdefault("PIP_DEFAULT_TIMEOUT", PIP_INSTALL_TIMEOUT_SECONDS)
+        pip_env.setdefault("PIP_RETRIES", PIP_INSTALL_RETRIES)
+        subprocess.check_call(
+            [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--prefer-binary",
+                "--timeout",
+                PIP_INSTALL_TIMEOUT_SECONDS,
+                "--retries",
+                PIP_INSTALL_RETRIES,
+                *PY_DEPS,
+            ],
+            env=pip_env,
+        )
     except BaseException:
         remove_tree_best_effort(VENV_DIR)
         raise
@@ -1006,6 +1029,11 @@ def build_python_venv() -> str:
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
+
     args = parse_args()
     global APT_LOCK_WAIT_SECONDS
     APT_LOCK_WAIT_SECONDS = max(0, args.apt_lock_wait)

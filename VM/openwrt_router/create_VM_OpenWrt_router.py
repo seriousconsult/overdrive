@@ -17,7 +17,7 @@ start, serial runs that script once (no upload/retry loop) and **requires**
 **2325**). Attach with ``./create_VM_OpenWrt_router.py --serial-only``.
 
 At startup, any **existing VirtualBox VM with the same name** and the matching folder under
-``~/VirtualBox VMs/<VM_NAME>/`` are **removed** (power off, ``unregistervm --delete``, then delete
+``VM/VirtualBox VMs/<VM_NAME>/`` are **removed** (power off, ``unregistervm --delete``, then delete
 leftover directory) so the script always builds the same thing from a clean slate.
 """
 

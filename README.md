@@ -1,6 +1,6 @@
 # Overdrive
 
-Python probes for browser, VPN, network, router, local-host, and VM-lab signals. Detection probes live under `detections/`; results print to the console and `detection_results.html`.
+Python probes for browser, VPN, network, router, local-host, and VM-lab signals. Detection probes live under `detections/`; results print to the console and HTML reports are written under the matching `detections/` folder.
 
 ## Score
 
@@ -42,8 +42,8 @@ Useful commands:
 ```bash
 python3 run/run_all.py --skip-vms          # detections only
 python3 run/run_all.py --skip-detections   # VM setup/verification only
-python3 detections/run_detections.py
-python3 run/run_browser_detections.py      # browser probes only (Chromium/Selenium)
+python3 detections/run_detections.py       # report: detections/detection_results.html
+python3 run/run_browser_detections.py      # report: detections/browser/browser_detection_results.html
 python3 run/run_VMs.py
 python3 run/run_VMs.py --headless       # full rebuild without GUI windows
 ```
@@ -52,8 +52,9 @@ python3 run/run_VMs.py --headless       # full rebuild without GUI windows
 
 - `detections/browser`, `detections/network`, `detections/router`, `detections/vpn`: score-producing probes.
 - `detections/common`: shared constants and helper libraries; not run directly.
+- `detections/*/*_detection_results.html`: category-specific HTML reports.
 - `local_host`: local machine / WSL checks.
-- `VM`: lab VM setup and verification.
+- `VM`: lab VM setup, verification, VM disks, and downloaded VM build assets.
 - `run`: batch runners.
 
 ## Gotchas

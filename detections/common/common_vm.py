@@ -18,6 +18,9 @@ from detections.common.common_local import (
     wsl_windows_host_ip as _wsl_windows_host_ip,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_VM_STORAGE_ROOT = REPO_ROOT / "VM"
+
 __all__ = [
     "CLIENT_VDI_NAME",
     "OPENWRT_CLIENT_VM_NAME",
@@ -280,7 +283,8 @@ def vboxmanage_targets_windows(vboxmanage: str) -> bool:
 
 
 def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, str | bool | None]:
-    linux_home = str(Path.home())
+    storage_root = Path(os.environ.get("OVERDRIVE_VM_STORAGE_DIR", str(DEFAULT_VM_STORAGE_ROOT))).expanduser()
+    linux_home = str(storage_root)
     win_profile: str | None = None
 
     if _is_wsl_local() and _windows_cmd_available():
@@ -297,12 +301,10 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
         except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             win_profile = None
 
-    # IMPORTANT: when we have a Windows profile, store downloads/VMs on Windows filesystem
-    # so VBoxManage.exe can access them via C:\... (not \\wsl.localhost\...).
-    if win_profile:
-        linux_home = windows_to_wsl_path(win_profile)  # typically /mnt/c/Users/<name>
-
-    downloads = os.path.join(linux_home, "Downloads")
+    # Keep VM build outputs repo-owned. If the repo lives under /mnt/c, the
+    # existing wsl_to_windows_path conversion still gives VBoxManage.exe C:\...
+    # paths without using the user's Windows Downloads directory.
+    downloads = os.path.join(linux_home, "downloads")
     vms_root = os.path.join(linux_home, "VirtualBox VMs")
     vm_base = os.path.join(vms_root, vm_name)
 

@@ -21,6 +21,7 @@ from detections.run_detections import (
     collect_detection_results,
     generate_html_report,
     print_results_summary,
+    resolve_report_path,
     select_detection_folders,
 )
 
@@ -62,7 +63,8 @@ def run_vpn_phase(label: str, report_name: str) -> dict[str, list[tuple[str, str
     print_results_summary(results, folder_order)
 
     elapsed = time.time() - start
-    html_path = BASE_DIR / report_name
+    html_path = resolve_report_path(report_name, folder_order)
+    html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(generate_html_report(results, folder_order, elapsed), encoding="utf-8")
     minutes, seconds = divmod(int(elapsed), 60)
     print(f"\nHTML report: {html_path}")

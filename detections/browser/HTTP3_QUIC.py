@@ -16,8 +16,11 @@ A standard Chrome browser on Windows has one specific pattern of these settings.
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import sys
 from pathlib import Path
@@ -27,13 +30,43 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from detections.common.common_browser import DEFAULT_TIMEOUT, fetch_browser_json, print_browser_probe_error
 
-API_URL = "https://tls.peet.ws/api/all"
+ALLOW_EXTERNAL_ENV = "OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES"
+DEFAULT_ENDPOINT = ""
 TIMEOUT = max(12, DEFAULT_TIMEOUT)
 
 
-def fetch_browser_observation(timeout: int) -> tuple[dict[str, Any] | None, str | None]:
+def external_browser_probes_allowed() -> bool:
+    return (os.environ.get(ALLOW_EXTERNAL_ENV) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def is_local_endpoint(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+    if host.lower() in {"localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, Any] | None, str | None]:
+    if not endpoint:
+        return None, "HTTP/3/QUIC fingerprint endpoint is not configured."
+    if not is_local_endpoint(endpoint) and not external_browser_probes_allowed():
+        return None, (
+            "external HTTP/3/QUIC fingerprint endpoints are disabled by default; "
+            f"set {ALLOW_EXTERNAL_ENV}=1 to run one explicitly."
+        )
     bounded = max(5, min(timeout, 12))
-    return fetch_browser_json(f"{API_URL}?src=browser", timeout=bounded, cache_bust=True)
+    return fetch_browser_json(endpoint, timeout=bounded, cache_bust=True)
 
 
 def _walk_key_values(obj: Any, prefix: str = "") -> list[tuple[str, Any]]:
@@ -166,6 +199,11 @@ def score_quic_fingerprint(sig: dict[str, Any], probe_error: str | None) -> tupl
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check HTTP/3/QUIC signals for the detected browser.")
+    parser.add_argument(
+        "--endpoint",
+        default=DEFAULT_ENDPOINT,
+        help="Local JSON observation endpoint. External endpoints require explicit opt-in.",
+    )
     parser.add_argument("--timeout", type=int, default=TIMEOUT, help="Browser wait timeout.")
     args = parser.parse_args()
 
@@ -173,12 +211,18 @@ def main() -> None:
     print("HTTP/3 (QUIC) Fingerprint Detection")
     print("=" * 64)
     print()
-    print("Probe endpoint:", API_URL)
+    print("Probe endpoint:", args.endpoint or "(none; local-only default)")
     print("Method: Chromium DevTools browser probe + recursive QUIC signal extraction")
     print()
 
-    data, err = fetch_browser_observation(args.timeout)
+    data, err = fetch_browser_observation(args.endpoint, args.timeout)
     if not data:
+        if err and ("disabled by default" in err or "not configured" in err):
+            print("SCORE: N/A")
+            print(f"STATUS: Skipped: {err}")
+            print()
+            print("=" * 64)
+            return
         raise SystemExit(print_browser_probe_error(err or "no data returned"))
 
     sig = extract_quic_signals(data)

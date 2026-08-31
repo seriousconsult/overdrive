@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -56,6 +57,7 @@ TMUX_SESSION_BASE = "overdrive-vms"
 TMUX_ENV_FLAG = "OVERDRIVE_RUN_VMS_TMUX"
 TMUX_SESSION_ENV = "OVERDRIVE_RUN_VMS_TMUX_SESSION"
 TMUX_SERIAL_READY_ENV = "OVERDRIVE_RUN_VMS_SERIAL_READY_FILE"
+LIVE_STATUS_WIDTH = 82
 
 
 def script_has_todo(script_path: Path) -> bool:
@@ -83,6 +85,45 @@ def console_is_tty() -> bool:
 
 def progress_line(step: int, total: int, label: str, status: str) -> str:
     return f"  [{step}/{total}] {label:<{LABEL_WIDTH}}  {status}"
+
+
+def _shorten_status(text: str, width: int = LIVE_STATUS_WIDTH) -> str:
+    text = " ".join(text.split())
+    if len(text) <= width:
+        return text
+    return text[: max(0, width - 1)].rstrip() + "…"
+
+
+def _child_status_from_line(line: str) -> str | None:
+    text = line.strip()
+    if not text:
+        return None
+    if text.startswith("[overdrive]"):
+        return _shorten_status(text.removeprefix("[overdrive]").strip())
+    if text.startswith("[libguestfs]"):
+        return _shorten_status(text)
+    if re.match(r"^\[\s*\d+(?:\.\d+)?\]", text):
+        return _shorten_status(text)
+    if text.startswith(
+        (
+            "Building ",
+            "Collecting ",
+            "Converting ",
+            "Download ",
+            "Downloading ",
+            "Executing:",
+            "Expanding ",
+            "Fresh rebuild:",
+            "Growing ",
+            "Installing ",
+            "Running:",
+            "Successfully ",
+        )
+    ):
+        return _shorten_status(text)
+    if " stage " in text.lower():
+        return _shorten_status(text)
+    return None
 
 
 def write_progress(step: int, total: int, label: str, status: str) -> None:
@@ -150,6 +191,41 @@ def _cleanup_legacy_tmux_serial_panes() -> None:
             continue
         subprocess.run(["tmux", "kill-pane", "-t", pane_id], check=False)
         print(f"[tmux] Stopped legacy serial retry pane {pane_id}.")
+
+
+def _current_tmux_session_name() -> str | None:
+    if not os.environ.get("TMUX"):
+        return None
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "#S"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _cleanup_stale_tmux_sessions() -> None:
+    """Remove old managed Overdrive tmux layouts before creating a new one."""
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return
+
+    current_session = _current_tmux_session_name()
+    for session_name in result.stdout.splitlines():
+        if not session_name.startswith(TMUX_SESSION_BASE):
+            continue
+        if current_session and session_name == current_session:
+            continue
+        subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
+        print(f"[tmux] Stopped stale Overdrive tmux session {session_name}.")
 
 
 def _available_tmux_session_name() -> str:
@@ -336,6 +412,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         return None
 
     _cleanup_legacy_tmux_serial_panes()
+    _cleanup_stale_tmux_sessions()
     session_name = _available_tmux_session_name()
     ready_file = Path("/tmp") / f"overdrive-{session_name}-serial-ready"
     try:
@@ -571,16 +648,28 @@ def run_logged_step(
 
     assert proc.stdout is not None
     stop_pulse = threading.Event()
+    status_lock = threading.Lock()
+    latest_child_status = ""
 
     def pump_output() -> None:
+        nonlocal latest_child_status
         for line in proc.stdout:
             log.write(line)
             log.flush()
+            child_status = _child_status_from_line(line)
+            if child_status:
+                with status_lock:
+                    latest_child_status = child_status
 
     def pulse() -> None:
         while not stop_pulse.wait(0.5):
             elapsed = format_duration(time.monotonic() - started)
-            write_progress(step, total, label, f"running … {elapsed}")
+            with status_lock:
+                child_status = latest_child_status
+            status = f"running … {elapsed}"
+            if child_status:
+                status = f"{status} | {child_status}"
+            write_progress(step, total, label, status)
 
     reader = threading.Thread(target=pump_output, name="run_VMs-log", daemon=True)
     reader.start()

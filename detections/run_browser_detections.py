@@ -18,10 +18,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 from detections.run_detections import (  # noqa: E402
     BROWSER_SCRIPT_TIMEOUT_SEC,
-    BASE_DIR,
     collect_browser_detection_results,
     generate_html_report,
     print_results_summary,
+    resolve_report_path,
     select_detection_folders,
 )
 
@@ -40,7 +40,7 @@ def _list_browser_scripts() -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run every probe in detections/browser and write browser_detection_results.html."
+            "Run every probe in detections/browser and write detections/browser/browser_detection_results.html."
         ),
     )
     parser.add_argument(
@@ -56,7 +56,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--report-name",
         default="browser_detection_results.html",
-        help="HTML report filename (default: browser_detection_results.html).",
+        help="HTML report filename (default: detections/browser/browser_detection_results.html).",
     )
     parser.add_argument(
         "--timeout",
@@ -100,7 +100,8 @@ def _run_browser_suite(
         )
         print_results_summary(results, folder_order)
         elapsed = time.time() - start
-        html_path = BASE_DIR / report_name
+        html_path = resolve_report_path(report_name, folder_order)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.write_text(
             generate_html_report(results, folder_order, elapsed_time=elapsed),
             encoding="utf-8",

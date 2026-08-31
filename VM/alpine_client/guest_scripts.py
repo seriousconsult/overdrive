@@ -240,7 +240,11 @@ CLIENT_IDENTITY_COMMAND = (
     f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname"
 )
 
-INSTALL_DETECTION_LIBRARIES_COMMAND = "cd /root && python3 /root/install.py --non-interactive"
+INSTALL_DETECTION_LIBRARIES_COMMAND = (
+    "timeout 900 sh -lc "
+    "'cd /root && env PYTHONUNBUFFERED=1 PIP_DEFAULT_TIMEOUT=20 PIP_RETRIES=2 "
+    "python3 /root/install.py --non-interactive'"
+)
 
 REMOVE_CLIENT_INSTALL_PY_COMMAND = (
     "find /root /tmp /var/tmp -maxdepth 4 -name 'install.py' -type f -delete"

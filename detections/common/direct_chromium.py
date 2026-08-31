@@ -453,10 +453,14 @@ def start_xvfb_if_needed(
     if env.get("DISPLAY") and _env_truthy(USE_SYSTEM_DISPLAY_ENV):
         return env, None, None, False
 
+    def use_headless() -> tuple[dict[str, str], None, Path | None, bool]:
+        headless_env = os.environ.copy()
+        headless_env.pop("DISPLAY", None)
+        return headless_env, None, None, True
+
     xvfb = xvfb_binary()
     if not xvfb:
-        env.pop("DISPLAY", None)
-        return env, None, None, True
+        return use_headless()
 
     display = pick_x_display()
     env["DISPLAY"] = display
@@ -480,9 +484,7 @@ def start_xvfb_if_needed(
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(
-                f"Xvfb exited early with code {proc.returncode}: {read_small(log_path)}"
-            )
+            return use_headless()
         if socket_path.exists():
             return env, proc, log_path, False
         time.sleep(0.1)
@@ -493,7 +495,11 @@ def start_xvfb_if_needed(
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
-    raise TimeoutError(f"Xvfb did not become ready on display {display}: {read_small(log_path)}")
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+    return use_headless()
 
 
 def runtime_evaluate(

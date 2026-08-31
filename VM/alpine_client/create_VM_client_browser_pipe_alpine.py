@@ -946,26 +946,42 @@ def setup_client_vm(
         # target can leave VBoxManage cloning into a locked or inaccessible file.
         remove_stale_client_vdi()
         print("Converting base Alpine image into VDI format...")
-        try:
-            run_vboxmanage(
-                vboxmanage,
-                ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"],
-            )
-        except RuntimeError as exc:
-            detail = str(exc)
-            if "VERR_ACCESS_DENIED" in detail or "access denied" in detail.lower():
+        qemu_img = shutil.which("qemu-img")
+        if qemu_img:
+            try:
+                subprocess.run(
+                    [qemu_img, "convert", "-p", "-O", "vdi", img_path, vdi_wsl],
+                    check=True,
+                )
+            except subprocess.CalledProcessError as exc:
                 raise RuntimeError(
-                    "VirtualBox could not create the test client VDI (access denied).\n"
-                    f"Target: {vdi_wsl}\n"
-                    f"Windows target: {vdi_for_vbox}\n"
-                    "Likely causes: stale registered medium, VM still running, VirtualBox "
-                    "Manager holding the disk, Windows Controlled Folder Access/antivirus, "
-                    "or missing write permission on the VM folder.\n"
-                    "Fast fix: close VirtualBox Manager, power off the client VM, remove/detach "
-                    "the stale client_browser_alpine.vdi from VirtualBox Media Manager if present, "
-                    "then rerun."
+                    "qemu-img could not convert the Alpine base image to VDI.\n"
+                    f"Source: {img_path}\n"
+                    f"Target: {vdi_wsl}"
                 ) from exc
-            raise
+        else:
+            try:
+                run_vboxmanage(
+                    vboxmanage,
+                    ["clonemedium", "disk", src_path, vdi_for_vbox, "--format", "VDI"],
+                )
+            except RuntimeError as exc:
+                detail = str(exc)
+                if "VERR_ACCESS_DENIED" in detail or "access denied" in detail.lower():
+                    raise RuntimeError(
+                        "VirtualBox could not create the test client VDI (access denied).\n"
+                        f"Target: {vdi_wsl}\n"
+                        f"Windows target: {vdi_for_vbox}\n"
+                        "Likely causes: stale registered medium, VM still running, VirtualBox "
+                        "Manager holding the disk, Windows Controlled Folder Access/antivirus, "
+                        "or missing write permission on the VM folder.\n"
+                        "Fast fix: close VirtualBox Manager, power off the client VM, remove/detach "
+                        "the stale client_browser_alpine.vdi from VirtualBox Media Manager if present, "
+                        "then rerun."
+                    ) from exc
+                raise
+        if not os.path.exists(vdi_wsl):
+            raise RuntimeError(f"VDI conversion finished but target was not created: {vdi_wsl}")
         close_medium_best_effort(vboxmanage, vdi_wsl)
         wait_after_disk_operation(vboxmanage, seconds=2.0)
 

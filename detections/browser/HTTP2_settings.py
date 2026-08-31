@@ -19,11 +19,14 @@ Score:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -58,7 +61,8 @@ except Exception as exc:
         return 2
 
 
-DEFAULT_ENDPOINT = "https://tls.peet.ws/api/all"
+ALLOW_EXTERNAL_ENV = "OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES"
+DEFAULT_ENDPOINT = ""
 
 PYTHON_LIBRARY_UA_RE = re.compile(
     r"\b(?:python|httpx|requests|urllib|aiohttp|curl|wget|httpie|okhttp|go-http-client)\b",
@@ -219,6 +223,28 @@ def classify_http2_settings(parsed: dict[str, Any], user_agent: str) -> tuple[st
     return "mixed", reasons
 
 
+def external_browser_probes_allowed() -> bool:
+    return (os.environ.get(ALLOW_EXTERNAL_ENV) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def is_local_endpoint(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+    if host.lower() in {"localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, Any] | None, str | None]:
     if BROWSER_HELPER_IMPORT_ERROR is not None:
         return None, (
@@ -227,8 +253,14 @@ def fetch_browser_observation(endpoint: str, timeout: int) -> tuple[dict[str, An
         )
     if fetch_browser_json is None:
         return None, "browser helpers unavailable"
+    if not endpoint:
+        return None, "HTTP/2 fingerprint endpoint is not configured."
+    if not is_local_endpoint(endpoint) and not external_browser_probes_allowed():
+        return None, (
+            "external HTTP/2 fingerprint endpoints are disabled by default; "
+            f"set {ALLOW_EXTERNAL_ENV}=1 to run one explicitly."
+        )
 
-    # Keep peet.ws waits short; a missing/stuck browser should report Error quickly.
     bounded = max(5, min(timeout, 12))
     return fetch_browser_json(
         endpoint,
@@ -329,17 +361,27 @@ def print_observation(details: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check HTTP/2 SETTINGS for the detected browser.")
-    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="JSON observation endpoint.")
+    parser.add_argument(
+        "--endpoint",
+        default=DEFAULT_ENDPOINT,
+        help="Local JSON observation endpoint. External endpoints require explicit opt-in.",
+    )
     parser.add_argument("--timeout", type=int, default=max(12, DEFAULT_TIMEOUT), help="Browser wait timeout.")
     args = parser.parse_args()
 
     print_browser_detection_header("HTTP/2 SETTINGS Browser Fingerprint Check")
-    print(f"Endpoint: {args.endpoint}")
+    print(f"Endpoint: {args.endpoint or '(none; local-only default)'}")
     print("Method: Chromium DevTools browser navigation; no Python HTTP client fallback is scored.")
     print()
 
     data, error = fetch_browser_observation(args.endpoint, args.timeout)
     if error and not data:
+        if "disabled by default" in error or "not configured" in error:
+            print("SCORE: N/A")
+            print(f"STATUS: Skipped: {error}")
+            print()
+            print("=" * 64)
+            return 0
         return print_browser_probe_error(error)
 
     score, status, details = score_http2_browser_observation(data, error)
