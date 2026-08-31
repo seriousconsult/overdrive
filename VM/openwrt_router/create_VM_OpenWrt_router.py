@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from detections.common.common_vm import (
     ROUTER_SERIAL_UNIX_SOCKET_PATH,
     SERIAL_BAUD,
     SERIAL_TCP_HOST,
+    assign_fresh_lab_macs,
     ensure_kvm_accessible,
     find_vboxmanage,
     get_active_bridged_interface,
@@ -70,6 +72,7 @@ from detections.common.common_vm import (
 from VM.openwrt_router.openwrt_assets import (
     APPLY_MULLVAD_DOT_SH,
     OVERDRIVE_MULLVAD_INIT_D,
+    SCRUB_OS_IDENTIFIERS_SH,
     UCI_DEFAULTS_ENABLE_MULLVAD,
 )
 from VM.openwrt_router.pipeline import (
@@ -78,13 +81,10 @@ from VM.openwrt_router.pipeline import (
     run_openwrt_router_pipeline,
 )
 from VM.vm_config import (
-    G3100_MAC_OUI,
     MULLVAD_DOT_PORT,
     MULLVAD_DOT_RESOLVERS,
     OPENWRT_LAN_DNS,
-    format_mac_colon,
     openwrt_root_password,
-    random_g3100_mac_vbox,
 )
 
 try:
@@ -163,6 +163,9 @@ def fetch_openwrt_stubby_apks(*, cache_dir: Path | None = None) -> Path:
 
     OpenWrt 25.12 apk filenames are often ABI-suffixed (e.g. libopenssl → libopenssl3-….apk),
     so we resolve the real filename from each feed's directory listing.
+
+    If the host cannot reach downloads.openwrt.org but a previous cache already
+    contains ``.apk`` files, reuse that cache instead of failing the rebuild.
     """
     import json
     import re
@@ -170,6 +173,35 @@ def fetch_openwrt_stubby_apks(*, cache_dir: Path | None = None) -> Path:
     release = _openwrt_release_from_url()
     dest = cache_dir or (Path(SCRIPT_DIR) / ".cache" / f"openwrt-{release}-stubby-apks")
     dest.mkdir(parents=True, exist_ok=True)
+
+    def _cached_apks() -> list[Path]:
+        return sorted(
+            path
+            for path in dest.glob("*.apk")
+            if path.is_file() and path.stat().st_size > 0
+        )
+
+    def _use_existing_cache(reason: str) -> Path:
+        cached = _cached_apks()
+        if not cached:
+            raise RuntimeError(
+                f"{reason} and no cached OpenWrt stubby .apk files were found in {dest}. "
+                "Restore network access and re-run, or populate that cache directory."
+            )
+        # Require the core packages so a half-filled cache cannot silently ship a broken DoT image.
+        names = " ".join(path.name for path in cached).lower()
+        required = ("stubby-", "getdns-", "ca-bundle-", "libopenssl")
+        missing = [needle for needle in required if needle not in names]
+        if missing:
+            raise RuntimeError(
+                f"{reason} and cached APKs in {dest} are incomplete "
+                f"(missing markers: {', '.join(missing)})."
+            )
+        print(f"[!] {reason}")
+        print(f"[*] Reusing {len(cached)} cached OpenWrt stubby APK(s) from {dest}")
+        for path in cached:
+            print(f"[overdrive]   cached {path.name}")
+        return dest
 
     def _list_apk_hrefs(feed_url: str) -> set[str]:
         html = urllib.request.urlopen(feed_url + "/", timeout=60).read().decode(
@@ -194,15 +226,20 @@ def fetch_openwrt_stubby_apks(*, cache_dir: Path | None = None) -> Path:
 
     indexes: dict[str, dict[str, str]] = {}
     hrefs_by_feed: dict[str, set[str]] = {}
-    for feed, tmpl in _OPENWRT_APK_FEEDS.items():
-        feed_url = tmpl.format(release=release)
-        idx_url = feed_url + "/index.json"
-        print(f"[overdrive] Fetching package index {feed}...")
-        with urllib.request.urlopen(idx_url, timeout=60) as resp:
-            data = json.load(resp)
-        indexes[feed] = {k: str(v) for k, v in data["packages"].items()}
-        print(f"[overdrive] Listing {feed} package files...")
-        hrefs_by_feed[feed] = _list_apk_hrefs(feed_url)
+    try:
+        for feed, tmpl in _OPENWRT_APK_FEEDS.items():
+            feed_url = tmpl.format(release=release)
+            idx_url = feed_url + "/index.json"
+            print(f"[overdrive] Fetching package index {feed}...")
+            with urllib.request.urlopen(idx_url, timeout=60) as resp:
+                data = json.load(resp)
+            indexes[feed] = {k: str(v) for k, v in data["packages"].items()}
+            print(f"[overdrive] Listing {feed} package files...")
+            hrefs_by_feed[feed] = _list_apk_hrefs(feed_url)
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return _use_existing_cache(
+            f"Could not refresh OpenWrt package indexes ({type(exc).__name__}: {exc})"
+        )
 
     # libevent2 often pulls core; include both so offline apk add is self-contained.
     packages = list(_STUBBY_APK_PACKAGES)
@@ -210,21 +247,28 @@ def fetch_openwrt_stubby_apks(*, cache_dir: Path | None = None) -> Path:
         packages.append(("base", "libevent2-core"))
 
     paths: list[Path] = []
-    for feed, name in packages:
-        ver = indexes.get(feed, {}).get(name)
-        if not ver:
-            raise RuntimeError(
-                f"Package {name!r} not found in OpenWrt {release} feed {feed!r}"
+    try:
+        for feed, name in packages:
+            ver = indexes.get(feed, {}).get(name)
+            if not ver:
+                raise RuntimeError(
+                    f"Package {name!r} not found in OpenWrt {release} feed {feed!r}"
+                )
+            filename = _resolve_apk_filename(hrefs_by_feed[feed], name, ver)
+            local = dest / filename
+            url = f"{_OPENWRT_APK_FEEDS[feed].format(release=release)}/{filename}"
+            if local.is_file() and local.stat().st_size > 0:
+                print(f"[overdrive]   cached {filename}")
+            else:
+                print(f"[overdrive]   downloading {filename}...")
+                urllib.request.urlretrieve(url, local)
+            paths.append(local)
+    except (OSError, urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+        if _cached_apks():
+            return _use_existing_cache(
+                f"Could not download one or more OpenWrt stubby APKs ({type(exc).__name__}: {exc})"
             )
-        filename = _resolve_apk_filename(hrefs_by_feed[feed], name, ver)
-        local = dest / filename
-        url = f"{_OPENWRT_APK_FEEDS[feed].format(release=release)}/{filename}"
-        if local.is_file() and local.stat().st_size > 0:
-            print(f"[overdrive]   cached {filename}")
-        else:
-            print(f"[overdrive]   downloading {filename}...")
-            urllib.request.urlretrieve(url, local)
-        paths.append(local)
+        raise
 
     print(f"[+] Offline stubby APKs ready ({len(paths)} packages) in {dest}")
     return dest
@@ -357,9 +401,26 @@ def inject_mullvad_dot_into_openwrt_image(
         apply = tmp_path / "apply_mullvad_dot.sh"
         initd = tmp_path / "overdrive-mullvad-dot"
         uci_def = tmp_path / "99-overdrive-mullvad-dot"
+        scrub = tmp_path / "scrub_os_identifiers.sh"
+        os_release = tmp_path / "os-release"
         apply.write_text(APPLY_MULLVAD_DOT_SH, encoding="utf-8", newline="\n")
         initd.write_text(OVERDRIVE_MULLVAD_INIT_D, encoding="utf-8", newline="\n")
         uci_def.write_text(UCI_DEFAULTS_ENABLE_MULLVAD, encoding="utf-8", newline="\n")
+        scrub.write_text(SCRUB_OS_IDENTIFIERS_SH, encoding="utf-8", newline="\n")
+        os_release.write_text(
+            'NAME="Generic"\n'
+            "ID=generic\n"
+            'PRETTY_NAME="Generic"\n'
+            "VERSION_ID=\n"
+            "VERSION=\n"
+            "HOME_URL=\n"
+            "SUPPORT_URL=\n"
+            "BUG_REPORT_URL=\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        empty_banner = tmp_path / "empty_banner"
+        empty_banner.write_text("", encoding="utf-8")
         env = _libguestfs_env()
 
         apk_upload_lines = ""
@@ -383,6 +444,17 @@ mkdir-p /etc/rc.d
 upload {apply.as_posix()} /root/apply_mullvad_dot.sh
 upload {initd.as_posix()} /etc/init.d/overdrive-mullvad-dot
 upload {uci_def.as_posix()} /etc/uci-defaults/99-overdrive-mullvad-dot
+upload {os_release.as_posix()} /etc/os-release
+upload {os_release.as_posix()} /usr/lib/os-release
+upload {empty_banner.as_posix()} /etc/banner
+upload {empty_banner.as_posix()} /etc/banner.failsafe
+upload {empty_banner.as_posix()} /etc/issue
+upload {empty_banner.as_posix()} /etc/issue.net
+upload {empty_banner.as_posix()} /etc/motd
+rm-f /etc/openwrt_release
+rm-f /etc/openwrt_version
+rm-f /etc/device_info
+rm-f /etc/lsb-release
 {apk_upload_lines}chmod 0755 /root/apply_mullvad_dot.sh
 chmod 0755 /etc/init.d/overdrive-mullvad-dot
 chmod 0755 /etc/uci-defaults/99-overdrive-mullvad-dot
@@ -445,6 +517,8 @@ umount /
                 f"{initd.as_posix()}:/etc/init.d/overdrive-mullvad-dot",
                 "--upload",
                 f"{uci_def.as_posix()}:/etc/uci-defaults/99-overdrive-mullvad-dot",
+                "--upload",
+                f"{scrub.as_posix()}:/root/scrub_os_identifiers.sh",
             ]
             for apk in apk_files:
                 cmd.extend(
@@ -458,6 +532,12 @@ umount /
                     "0755:/etc/init.d/overdrive-mullvad-dot",
                     "--chmod",
                     "0755:/etc/uci-defaults/99-overdrive-mullvad-dot",
+                    "--chmod",
+                    "0755:/root/scrub_os_identifiers.sh",
+                    "--run-command",
+                    "/root/scrub_os_identifiers.sh",
+                    "--delete",
+                    "/root/scrub_os_identifiers.sh",
                     "--link",
                     "/etc/init.d/overdrive-mullvad-dot:/etc/rc.d/S99overdrive-mullvad-dot",
                 ]
@@ -1169,31 +1249,11 @@ def assign_g3100_macs(vboxmanage: str) -> tuple[str, str]:
     """
     Assign fresh Verizon FiOS G3100-style MACs to LAN (NIC1) and WAN (NIC2).
 
-    Must be called while the VM is powered off. A new pair is generated on every
-    create so the lab router does not keep a sticky VirtualBox OUI.
+    Must be called while the VM is powered off. Also invoked before every
+    ``startvm`` so each launch gets a unique pair.
     """
-    lan = random_g3100_mac_vbox()
-    wan = random_g3100_mac_vbox()
-    while wan == lan:
-        wan = random_g3100_mac_vbox()
-    run_vboxmanage(
-        vboxmanage,
-        [
-            "modifyvm",
-            VM_NAME,
-            "--macaddress1",
-            lan,
-            "--macaddress2",
-            wan,
-        ],
-    )
-    oui = G3100_MAC_OUI.lower().replace(":", "")
-    oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
-    print(
-        f"[overdrive] G3100 MACs (OUI {oui_colon}): "
-        f"LAN={format_mac_colon(lan)}  WAN={format_mac_colon(wan)}"
-    )
-    return lan, wan
+    macs = assign_fresh_lab_macs(vboxmanage, VM_NAME)
+    return macs["nic1"], macs["nic2"]
 
 
 def wait_for_router_running(vboxmanage: str, *, timeout_s: float = 60.0) -> None:
@@ -1529,7 +1589,7 @@ def setup_openwrt_vm(
                         "--name",
                         VM_NAME,
                         "--ostype",
-                        "Linux_64",
+                        "Other_64",
                         "--basefolder",
                         vms_root_for_vbox,
                         "--register",
@@ -1611,7 +1671,8 @@ def setup_openwrt_vm(
         )
 
     def assign_fresh_router_macs() -> None:
-        # Fresh Verizon FiOS G3100-style MACs on every create. The VM must be powered off.
+        # Initial MACs when create skips start (--start-type none). Launch paths
+        # re-assign again immediately before startvm.
         assign_g3100_macs(vboxmanage)
 
     def start_router_vm() -> None:
@@ -1621,6 +1682,8 @@ def setup_openwrt_vm(
             return
 
         print(f"Starting VM ({options.start_type})...")
+        # Fresh MAC on every launch (VirtualBox only allows this while powered off).
+        assign_fresh_lab_macs(vboxmanage, VM_NAME)
         run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", options.start_type])
         wait_for_router_running(vboxmanage, timeout_s=90.0)
         print(f"[+] VM is running with --type {options.start_type!r}.")

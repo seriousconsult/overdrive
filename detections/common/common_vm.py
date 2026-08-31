@@ -65,6 +65,7 @@ __all__ = [
     "serial_uart_mode_and_endpoint",
     "spawn_wsl_interactive_terminal",
     "spawn_serial_console_window",
+    "assign_fresh_lab_macs",
     "start_vm_headless_safe",
     "ensure_vm_ready_to_start",
     "close_medium_best_effort",
@@ -715,12 +716,67 @@ def ensure_vm_ready_to_start(vboxmanage: str, vm_name: str, *, wait_s: int = 60)
                 break
 
 
+def assign_fresh_lab_macs(vboxmanage: str, vm_name: str) -> dict[str, str]:
+    """Assign unique lab NIC MACs. Must run while the VM is powered off.
+
+    Called before every ``startvm`` so each launch gets a new address while
+    keeping the stable OUI (client Dell / router G3100).
+    """
+    from VM.vm_config import (
+        CLIENT_NIC_OUI,
+        G3100_MAC_OUI,
+        format_mac_colon,
+        random_client_mac_vbox,
+        random_g3100_mac_vbox,
+    )
+
+    if vm_name == TEST_CLIENT_VM_NAME:
+        mac = random_client_mac_vbox()
+        run_vboxmanage(
+            vboxmanage,
+            ["modifyvm", vm_name, "--macaddress1", mac],
+        )
+        oui = CLIENT_NIC_OUI.lower().replace(":", "")
+        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
+        print(
+            f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {format_mac_colon(mac)}"
+        )
+        return {"nic1": mac}
+
+    if vm_name == TEST_ROUTER_VM_NAME:
+        lan = random_g3100_mac_vbox()
+        wan = random_g3100_mac_vbox()
+        while wan == lan:
+            wan = random_g3100_mac_vbox()
+        run_vboxmanage(
+            vboxmanage,
+            [
+                "modifyvm",
+                vm_name,
+                "--macaddress1",
+                lan,
+                "--macaddress2",
+                wan,
+            ],
+        )
+        oui = G3100_MAC_OUI.lower().replace(":", "")
+        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
+        print(
+            f"[overdrive] {vm_name} G3100 MACs (OUI {oui_colon}): "
+            f"LAN={format_mac_colon(lan)}  WAN={format_mac_colon(wan)}"
+        )
+        return {"nic1": lan, "nic2": wan}
+
+    return {}
+
+
 def start_vm_headless_safe(vboxmanage: str, vm_name: str) -> None:
     """Start a VM headless after clearing stale locks from recent disk operations."""
     if get_vm_state(vboxmanage, vm_name) == "running":
         return
     terminate_stale_vboxmanage_processes()
     ensure_vm_ready_to_start(vboxmanage, vm_name)
+    assign_fresh_lab_macs(vboxmanage, vm_name)
     wait_after_disk_operation(vboxmanage)
     run_vboxmanage(
         vboxmanage,

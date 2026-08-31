@@ -21,9 +21,12 @@ __all__ = [
     "DEFAULT_SCRIPT_TIMEOUT",
     "DRIVER_COMMAND_TIMEOUT",
     "DEFAULT_REPORT_WIDTH",
+    "EXTERNAL_BROWSER_PROBES_ENV",
     "fetch_json",
     "fetch_browser_json",
     "confirm_external_browser_probe",
+    "prompt_suite_external_browser_access",
+    "set_external_browser_probe_decision",
     "is_browser_timeout_error",
     "normalize_ip_fields",
     "ipv4_like_strings",
@@ -35,6 +38,7 @@ __all__ = [
 ]
 
 _IS_LINUX = sys.platform.startswith("linux")
+EXTERNAL_BROWSER_PROBES_ENV = "OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES"
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
@@ -51,27 +55,132 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
     return value
 
 
-DEFAULT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_TIMEOUT", 8)
-DEFAULT_PAGE_LOAD_TIMEOUT = _env_int("OVERDRIVE_BROWSER_PAGE_LOAD_TIMEOUT", 10)
-DEFAULT_SCRIPT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_SCRIPT_TIMEOUT", 12)
+DEFAULT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_TIMEOUT", 500, minimum=0)
+DEFAULT_PAGE_LOAD_TIMEOUT = _env_int("OVERDRIVE_BROWSER_PAGE_LOAD_TIMEOUT", 500, minimum=0)
+DEFAULT_SCRIPT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_SCRIPT_TIMEOUT", 500, minimum=0)
 DRIVER_COMMAND_TIMEOUT = _env_int(
     "OVERDRIVE_BROWSER_DRIVER_COMMAND_TIMEOUT",
-    20 if _IS_LINUX else 15,
+    500,
+    minimum=0,
 )
 DEFAULT_REPORT_WIDTH = 60
 
 
+def _parse_external_probe_env(raw: str) -> bool | None:
+    value = raw.strip().lower()
+    if value in {"1", "y", "yes", "true", "on", "allow"}:
+        return True
+    if value in {"0", "n", "no", "false", "off", "deny"}:
+        return False
+    return None
+
+
+def set_external_browser_probe_decision(allowed: bool) -> None:
+    """Publish a suite-level Y/N decision for probe subprocesses."""
+    os.environ[EXTERNAL_BROWSER_PROBES_ENV] = "1" if allowed else "0"
+
+
+def prompt_suite_external_browser_access(
+    *,
+    script_names: list[str] | None = None,
+    force: bool | None = None,
+) -> bool:
+    """
+    Ask once at suite start whether external-internet browser probes may run.
+
+    Returns True when external probes are allowed. When ``force`` is set, skip the
+    prompt and publish that decision. Probe subprocesses inherit the decision via
+    ``OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES`` (their stdin is typically DEVNULL).
+    """
+    if force is not None:
+        set_external_browser_probe_decision(force)
+        print(
+            "[*] External internet browser probes: "
+            + ("allowed (--allow-external)." if force else "denied (--deny-external).")
+        )
+        return force
+
+    existing = _parse_external_probe_env(os.environ.get(EXTERNAL_BROWSER_PROBES_ENV) or "")
+    if existing is not None:
+        print(
+            "[*] External internet browser probes: "
+            + ("allowed" if existing else "denied")
+            + f" (from {EXTERNAL_BROWSER_PROBES_ENV})."
+        )
+        return existing
+
+    names = script_names or []
+    external_scripts = [
+        name
+        for name in names
+        if name
+        in {
+            "HTML5_Geolocation_API.py",
+            "HTTP2_settings.py",
+            "HTTP3_QUIC.py",
+        }
+    ]
+    if not external_scripts:
+        set_external_browser_probe_decision(False)
+        return False
+
+    print("[*] Some browser probes can contact the public internet:")
+    for name in external_scripts:
+        if name == "HTML5_Geolocation_API.py":
+            print("    - HTML5_Geolocation_API.py  (GeoIP providers)")
+        elif name == "HTTP2_settings.py":
+            print("    - HTTP2_settings.py         (only if a non-local endpoint is configured)")
+        elif name == "HTTP3_QUIC.py":
+            print("    - HTTP3_QUIC.py             (only if a non-local endpoint is configured)")
+    print()
+
+    if not sys.stdin.isatty():
+        set_external_browser_probe_decision(False)
+        print(
+            "[!] No TTY for Y/N confirmation; external internet probes will be skipped. "
+            "Re-run with --allow-external or --deny-external."
+        )
+        return False
+
+    try:
+        answer = input(
+            "Allow external internet browser probes for this run? Type Y or N: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        set_external_browser_probe_decision(False)
+        print("[!] External probe confirmation interrupted; skipping external probes.")
+        return False
+
+    allowed = answer in {"y", "yes"}
+    set_external_browser_probe_decision(allowed)
+    print(
+        "[*] External internet browser probes: "
+        + ("allowed." if allowed else "denied; those probes will report N/A.")
+    )
+    print()
+    return allowed
+
+
 def confirm_external_browser_probe(probe_name: str, targets: list[str] | tuple[str, ...] | str) -> tuple[bool, str | None]:
     """
-    Require an explicit per-run Y/N confirmation before contacting internet endpoints.
+    Require an explicit confirmation before contacting internet endpoints.
 
-    Non-interactive callers must not run external probes, because there is no
-    place to ask the operator for the required confirmation.
+    Prefer the suite-level decision in ``OVERDRIVE_ALLOW_EXTERNAL_BROWSER_PROBES``.
+    Fall back to an interactive Y/N prompt only when that env var is unset and a
+    TTY is available (standalone probe runs).
     """
     if isinstance(targets, str):
         target_text = targets
     else:
         target_text = ", ".join(str(target) for target in targets)
+
+    env_decision = _parse_external_probe_env(os.environ.get(EXTERNAL_BROWSER_PROBES_ENV) or "")
+    if env_decision is True:
+        return True, None
+    if env_decision is False:
+        return False, "external probe denied for this suite run"
+
     if not sys.stdin.isatty():
         return False, "interactive Y/N confirmation is required before external internet probes"
 
@@ -147,10 +256,12 @@ def fetch_json(
     """GET JSON from a URL with a stable User-Agent (GeoIP / API probes)."""
     if requests is None:
         raise RuntimeError("The requests package is required for fetch_json()")
+    # timeout<=0 means "no suite kill"; HTTP still needs a finite socket timeout.
+    request_timeout = 15 if not timeout or timeout <= 0 else timeout
     r = requests.get(
         url,
         params=params,
-        timeout=timeout,
+        timeout=request_timeout,
         headers={"User-Agent": "geo-leak-check/1.0"},
     )
     r.raise_for_status()

@@ -23,10 +23,8 @@ import contextlib
 import ipaddress
 import json
 import re
-import shutil
 import socket
 import ssl
-import subprocess
 import sys
 import tempfile
 import threading
@@ -51,7 +49,7 @@ try:
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
-    DEFAULT_TIMEOUT = 25
+    DEFAULT_TIMEOUT = 0
     fetch_browser_json = None  # type: ignore[assignment]
     run_async_script = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
@@ -72,7 +70,7 @@ except Exception as exc:
 
 
 DEFAULT_ENDPOINT = ""
-LOCAL_H2_TIMEOUT = 20
+LOCAL_H2_TIMEOUT = 600
 
 PYTHON_LIBRARY_UA_RE = re.compile(
     r"\b(?:python|httpx|requests|urllib|aiohttp|curl|wget|httpie|okhttp|go-http-client)\b",
@@ -253,37 +251,9 @@ def _pick_local_port() -> int:
 
 
 def _make_localhost_cert(work_dir: Path) -> tuple[Path, Path]:
-    openssl = shutil.which("openssl")
-    if not openssl:
-        raise RuntimeError("openssl is required to create the local HTTP/2 test certificate")
-    cert_path = work_dir / "localhost.crt"
-    key_path = work_dir / "localhost.key"
-    subprocess.run(
-        [
-            openssl,
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-sha256",
-            "-days",
-            "1",
-            "-nodes",
-            "-keyout",
-            str(key_path),
-            "-out",
-            str(cert_path),
-            "-subj",
-            "/CN=127.0.0.1",
-            "-addext",
-            "subjectAltName=IP:127.0.0.1,DNS:localhost",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-        timeout=15,
-    )
-    return cert_path, key_path
+    from detections.common.localhost_tls import make_localhost_probe_cert
+
+    return make_localhost_probe_cert(work_dir)
 
 
 def _settings_fingerprint(settings_order: list[int], settings_values: dict[int, int], pseudo_order: str) -> str:
@@ -310,7 +280,7 @@ class LocalH2ObservationServer:
 
     def __enter__(self) -> "LocalH2ObservationServer":
         self._thread.start()
-        if not self._ready.wait(timeout=min(10, self.timeout)):
+        if not self._ready.wait(timeout=max(30, self.timeout)):
             raise RuntimeError(self.error or "local HTTP/2 observer did not start")
         return self
 

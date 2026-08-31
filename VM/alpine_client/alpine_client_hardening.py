@@ -300,6 +300,42 @@ install_filesystem_hardening() {
   rm -f /root/.wget-hsts /root/.python_history /root/.lesshst /root/.bash_history 2>/dev/null || true
 }
 
+scrub_os_identifiers() {
+  # Neutralize Linux distro banners/release files (Alpine/Linux strings).
+  # Keep generic keys so tools that expect os-release still work.
+  for path in /etc/os-release /usr/lib/os-release; do
+    [ -e "$path" ] || continue
+    cat > "$path" <<'OSRELEASE'
+NAME="Generic"
+ID=generic
+PRETTY_NAME="Generic"
+VERSION_ID=
+VERSION=
+HOME_URL=
+SUPPORT_URL=
+BUG_REPORT_URL=
+OSRELEASE
+    chmod 0644 "$path" 2>/dev/null || true
+  done
+  rm -rf /usr/lib/os-release.d 2>/dev/null || true
+  rm -f \
+    /etc/alpine-release \
+    /etc/lsb-release \
+    /etc/redhat-release \
+    /etc/debian_version \
+    /etc/arch-release \
+    /etc/SuSE-release \
+    /etc/system-release \
+    /etc/system-release-cpe \
+    2>/dev/null || true
+  for path in /etc/issue /etc/issue.net /etc/motd; do
+    [ -e "$path" ] || continue
+    : > "$path" 2>/dev/null || true
+    chmod 0644 "$path" 2>/dev/null || true
+  done
+  rm -rf /etc/motd.d 2>/dev/null || true
+}
+
 scrub_tracking_identifiers() {
   # Remove stable host/instance IDs that can correlate DHCP or local state.
   rm -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
@@ -307,6 +343,7 @@ scrub_tracking_identifiers() {
   chmod 0444 /etc/machine-id 2>/dev/null || true
   rm -rf /var/lib/cloud 2>/dev/null || true
   rm -f /etc/cloud/cloud.cfg.d/* 2>/dev/null || true
+  scrub_os_identifiers
 }
 
 clean_private_artifacts() {
@@ -416,6 +453,7 @@ done
 install_privacy_profile
 install_sysctl_hardening
 install_filesystem_hardening
+scrub_os_identifiers
 
 remove_matching_packages openssh
 remove_matching_packages dropbear

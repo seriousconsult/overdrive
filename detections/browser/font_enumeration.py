@@ -45,7 +45,7 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return default
 
 
-DEFAULT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_TIMEOUT", 8)
+DEFAULT_TIMEOUT = _env_int("OVERDRIVE_BROWSER_TIMEOUT", 500, minimum=0)
 DEFAULT_REPORT_WIDTH = 60
 
 

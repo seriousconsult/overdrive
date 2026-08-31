@@ -46,17 +46,13 @@ from detections.common.common_runner import file_matches_pattern
 
 # Longer capture + scapy startup
 SUDO_SCRIPT_TIMEOUT_SEC = 180
-# Browser probes each launch Chromium; keep below suite patience but above probe caps.
-BROWSER_SCRIPT_TIMEOUT_SEC = 75
+# Browser probes finish via process-exit callback; kill after this safety wait.
+BROWSER_SCRIPT_TIMEOUT_SEC = 500
 DEFAULT_SCRIPT_TIMEOUT_SEC = 120
-BROWSER_SCRIPT_ARGS = {
-    "HTTP2_settings.py": ["--timeout", "12"],
-    "HTTP3_QUIC.py": ["--timeout", "12"],
-}
-PER_SCRIPT_TIMEOUT_SEC = {
-    ("browser", "HTTP2_settings.py"): 30,
-    ("browser", "HTTP3_QUIC.py"): 30,
-}
+# Do not force short --timeout args onto browser probes; they wait on JS callbacks.
+BROWSER_SCRIPT_ARGS: dict[str, list[str]] = {}
+# Do not tighten browser probes below the suite safety expiration.
+PER_SCRIPT_TIMEOUT_SEC: dict[tuple[str, str], int] = {}
 
 # Repository root. This file lives under ``detections/``.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -298,6 +294,53 @@ def script_has_todo(script_path: Path) -> bool:
     return file_matches_pattern(script_path, TODO_PATTERN)
 
 
+def _wait_for_process_callback(
+    proc: subprocess.Popen,
+    *,
+    expiration_sec: int | None,
+    progress_label: str = "",
+    progress_every_sec: int = 30,
+) -> tuple[str, str, str | None]:
+    """
+    Wait for a subprocess to exit (completion callback).
+
+    ``expiration_sec`` is only a long safety net. ``None`` or ``<= 0`` waits
+    until the process exits with no wall-clock kill.
+    """
+    if expiration_sec is None or expiration_sec <= 0:
+        stdout, stderr = proc.communicate()
+        return stdout or "", stderr or "", None
+
+    deadline = time.monotonic() + max(1, int(expiration_sec))
+    started = time.monotonic()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        slice_s = min(max(1, progress_every_sec), remaining)
+        try:
+            stdout, stderr = proc.communicate(timeout=slice_s)
+            return stdout or "", stderr or "", None
+        except subprocess.TimeoutExpired:
+            elapsed = int(time.monotonic() - started)
+            if progress_label:
+                print(
+                    f"  … waiting on {progress_label} "
+                    f"({elapsed}s elapsed; safety expiration {expiration_sec}s)",
+                    flush=True,
+                )
+
+    if os.name != "nt":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+    else:
+        proc.kill()
+    stdout, stderr = proc.communicate()
+    return stdout or "", stderr or "", "Timeout"
+
+
 def run_script(
     script_path: Path,
     use_sudo: bool = False,
@@ -361,22 +404,18 @@ def run_script(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
             cwd=str(BASE_DIR),
             env=env,
             start_new_session=(os.name != "nt"),
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if os.name != "nt":
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    proc.kill()
-            else:
-                proc.kill()
-            stdout, stderr = proc.communicate()
+        stdout, stderr, wait_error = _wait_for_process_callback(
+            proc,
+            expiration_sec=timeout,
+            progress_label=script_path.name,
+        )
+        if wait_error == "Timeout":
             output = (stdout or "") + (stderr or "")
             return output, "Timeout", -1
 
@@ -476,10 +515,18 @@ def _looks_like_timeout(text: str) -> bool:
             "vulkan",
         )
     ):
+        # Startup/environment failures are not scored as timeouts.
         return False
     return any(
         needle in lowered
-        for needle in ("timeout", "timed out", "read timed out", "did not finish within")
+        for needle in (
+            "timeout",
+            "timed out",
+            "read timed out",
+            "did not finish within",
+            "safety expiration",
+            "expired after",
+        )
     )
 
 
@@ -728,7 +775,13 @@ def _timeout_for_script(
     timeout_for_script = script_timeout
     per_script_timeout = PER_SCRIPT_TIMEOUT_SEC.get((folder, script_name))
     if per_script_timeout is not None:
-        timeout_for_script = min(timeout_for_script or per_script_timeout, per_script_timeout)
+        # Explicit per-script safety expiration wins; never tighten below the suite value.
+        if timeout_for_script is None:
+            timeout_for_script = per_script_timeout
+        else:
+            timeout_for_script = max(timeout_for_script, per_script_timeout)
+    if folder == "browser" and timeout_for_script is None:
+        timeout_for_script = BROWSER_SCRIPT_TIMEOUT_SEC
     return timeout_for_script
 
 
@@ -767,7 +820,7 @@ def _run_detection_script(
         detail = error or "Non-zero exit"
         if error == "Timeout":
             detail = (
-                f"TIMEOUT after {timeout_for_script or DEFAULT_SCRIPT_TIMEOUT_SEC}s "
+                f"EXPIRED after {timeout_for_script or DEFAULT_SCRIPT_TIMEOUT_SEC}s safety wait "
                 "(not a valid 1-5 score)"
             )
         print(f"  ❌ {detail}")
@@ -852,7 +905,10 @@ def collect_browser_detection_results(
         print(f"\n{'=' * 40}")
         print(f"FOLDER: {folder.upper()}")
         print(f"{'=' * 40}")
-        print("Each browser probe runs in its own isolated Chromium subprocess.")
+        if os.environ.get("OVERDRIVE_DIRECT_CHROME_ATTACH_PORT"):
+            print("Browser probes attach to the shared Chromium session.")
+        else:
+            print("Each browser probe runs in its own isolated Chromium subprocess.")
 
         for script_name in script_names:
             script_path = script_path_for(folder, script_name)
@@ -910,6 +966,7 @@ def run_detection_suite(
 
     if folder_order == ["browser"]:
         from detections.common.common_browser import browser_runtime_diagnostics
+        from detections.common.direct_chromium import shared_chromium_session
 
         runtime = browser_runtime_diagnostics()
         print("[*] Browser runtime:")
@@ -922,12 +979,23 @@ def run_detection_suite(
                 "so build-time install.py can stage Chromium before the VM boots."
             )
             return 2
-        print("[*] Browser probes will run in isolated Chromium subprocesses.")
-        results = collect_browser_detection_results(
-            scripts_map,
-            folder_order,
-            script_timeout=script_timeout,
-        )
+        print("[*] Starting shared Chromium session for browser probes...")
+        try:
+            with shared_chromium_session():
+                print("[*] Shared Chromium is ready; probes will attach via DevTools.")
+                results = collect_browser_detection_results(
+                    scripts_map,
+                    folder_order,
+                    script_timeout=script_timeout,
+                )
+        except Exception as exc:
+            print(f"[!] Shared Chromium failed to start: {exc}")
+            print("[*] Falling back to isolated Chromium launches per probe.")
+            results = collect_browser_detection_results(
+                scripts_map,
+                folder_order,
+                script_timeout=script_timeout,
+            )
     else:
         results = collect_detection_results(
             scripts_map,

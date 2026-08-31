@@ -44,7 +44,7 @@ try:
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
-    DEFAULT_TIMEOUT = 8
+    DEFAULT_TIMEOUT = 0
     navigate = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
 
@@ -360,10 +360,13 @@ def collect_browser_probe(timeout: int) -> tuple[dict[str, Any] | None, str | No
         return None, f"local probe server could not start: {type(exc).__name__}: {exc}"
 
     try:
-        nav_error = navigate(url, timeout=max(2, timeout))
+        nav_error = navigate(url, timeout=timeout if timeout and timeout > 0 else 0)
         if nav_error:
             return None, f"browser probe failed: {nav_error}"
-        state.done.wait(timeout=max(2, timeout))
+        if timeout and timeout > 0:
+            state.done.wait(timeout=timeout)
+        else:
+            state.done.wait()
         with state.lock:
             result = {
                 "probe_url": url,

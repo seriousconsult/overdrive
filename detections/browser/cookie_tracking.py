@@ -50,7 +50,7 @@ function finish(value) {
     callback(value);
   }
 }
-const FETCH_TIMEOUT_MS = 12000;
+const FETCH_TIMEOUT_MS = 600000;
 
 async function fetchWithTimeout(url, options = {}) {
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;

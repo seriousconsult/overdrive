@@ -16,6 +16,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from detections.common.common_browser import prompt_suite_external_browser_access  # noqa: E402
+from detections.common.direct_chromium import shared_chromium_session  # noqa: E402
 from detections.run_detections import (  # noqa: E402
     BROWSER_SCRIPT_TIMEOUT_SEC,
     collect_browser_detection_results,
@@ -63,7 +65,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=BROWSER_SCRIPT_TIMEOUT_SEC,
         metavar="SEC",
-        help=f"Per-probe subprocess timeout (default: {BROWSER_SCRIPT_TIMEOUT_SEC}).",
+        help=(
+            "Long safety expiration while waiting for each probe's completion callback "
+            f"(default: {BROWSER_SCRIPT_TIMEOUT_SEC}; use 0 to wait indefinitely)."
+        ),
+    )
+    parser.add_argument(
+        "--no-shared-browser",
+        action="store_true",
+        help=(
+            "Cold-start a fresh Chromium for each probe instead of one shared session "
+            "(slower on VMs; useful for debugging a single failing probe)."
+        ),
+    )
+    external = parser.add_mutually_exclusive_group()
+    external.add_argument(
+        "--allow-external",
+        action="store_true",
+        help="Allow probes that contact the public internet (skip the Y/N prompt).",
+    )
+    external.add_argument(
+        "--deny-external",
+        action="store_true",
+        help="Skip probes that contact the public internet (skip the Y/N prompt).",
     )
     return parser.parse_args(argv)
 
@@ -75,6 +99,8 @@ def _run_browser_suite(
     report_name: str,
     suite_title: str | None,
     script_timeout: int,
+    use_shared_browser: bool,
+    allow_external: bool | None,
 ) -> int:
     start = time.time()
     from detections.common.common_browser import browser_runtime_diagnostics
@@ -91,6 +117,14 @@ def _run_browser_suite(
             "so build-time install.py can stage Chromium before the VM boots."
         )
         return 2
+
+    browser_scripts: list[str] = []
+    for folder in folder_order:
+        browser_scripts.extend(scripts_map.get(folder, []))
+    prompt_suite_external_browser_access(
+        script_names=browser_scripts,
+        force=allow_external,
+    )
 
     def _collect_and_report() -> int:
         results = collect_browser_detection_results(
@@ -116,13 +150,27 @@ def _run_browser_suite(
         )
         return 2 if has_errors else 0
 
-    print("[*] Browser probes will run in isolated Chromium subprocesses.")
+    def _with_title() -> None:
+        if suite_title:
+            print("=" * 60)
+            print(suite_title)
+            print("=" * 60)
+            print()
 
-    if suite_title:
-        print("=" * 60)
-        print(suite_title)
-        print("=" * 60)
-        print()
+    if use_shared_browser:
+        print("[*] Starting shared Chromium session for browser probes...")
+        try:
+            with shared_chromium_session():
+                print("[*] Shared Chromium is ready; probes will attach via DevTools.")
+                _with_title()
+                return _collect_and_report()
+        except Exception as exc:
+            print(f"[!] Shared Chromium failed to start: {exc}", file=sys.stderr)
+            print("[*] Falling back to isolated Chromium launches per probe.")
+            use_shared_browser = False
+
+    print("[*] Browser probes will run in isolated Chromium subprocesses.")
+    _with_title()
     return _collect_and_report()
 
 
@@ -137,6 +185,14 @@ def main(argv: list[str] | None = None) -> int:
         for name in scripts:
             print(name)
         return 0
+
+    allow_external: bool | None
+    if args.allow_external:
+        allow_external = True
+    elif args.deny_external:
+        allow_external = False
+    else:
+        allow_external = None
 
     if args.script:
         script_name = _normalize_script_name(args.script)
@@ -164,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
             report_name=args.report_name,
             suite_title=None,
             script_timeout=args.timeout,
+            use_shared_browser=not args.no_shared_browser,
+            allow_external=allow_external,
         )
 
     scripts_map, folder_order, rc = select_detection_folders(["browser"])
@@ -176,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         report_name=args.report_name,
         suite_title="OVERDRIVE BROWSER DETECTION SUITE",
         script_timeout=args.timeout,
+        use_shared_browser=not args.no_shared_browser,
+        allow_external=allow_external,
     )
 
 

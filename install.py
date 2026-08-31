@@ -10,8 +10,10 @@ Bootstrap a project-local Python virtual environment for Overdrive automation.
   Chromium for browser probes
 - Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
 - Runs non-interactively by default; use ``--interactive`` to drop into an
-  activated shell after install. Privileged commands always use ``sudo -n`` so
-  the installer never waits for a sudo password prompt.
+  activated shell after install. Privileged commands use ``sudo -n``. If
+  passwordless sudo is missing, the installer installs
+  ``/etc/sudoers.d/overdrive`` (one interactive password when a TTY is
+  available) so the rest of the run stays non-interactive.
 
 The test client primes by copying this script to ``/root`` and running it
 with ``--non-interactive`` (do not apk-add those checker packages in
@@ -19,8 +21,10 @@ with ``--non-interactive`` (do not apk-add those checker packages in
 """
 
 import argparse
+import getpass
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +36,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 VENV_DIR = REPO_ROOT / "virtual_env"
+SUDOERS_DROP_IN = Path("/etc/sudoers.d/overdrive")
 
 PY_DEPS = [
     "requests",
@@ -54,9 +59,9 @@ DIG_PACKAGE_BY_MGR = {
 # Installed here — not by VM/alpine_client/package_assets.py.
 # Package names differ by distro (Debian has iputils-ping, not iputils).
 NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
-    "apt": ("curl", "iproute2", "iptables", "iputils-ping", "wireguard-tools"),
-    "dnf": ("curl", "iproute", "iptables", "iputils", "wireguard-tools"),
-    "apk": ("curl", "iproute2", "iptables", "iputils", "wireguard-tools"),
+    "apt": ("curl", "iproute2", "iptables", "iputils-ping", "wireguard-tools", "openssl"),
+    "dnf": ("curl", "iproute", "iptables", "iputils", "wireguard-tools", "openssl"),
+    "apk": ("curl", "iproute2", "iptables", "iputils", "wireguard-tools", "openssl"),
 }
 
 ALPINE_REQUIRED_BROWSER_PACKAGES: tuple[str, ...] = (
@@ -246,16 +251,113 @@ def browser_binary_for_info(info: dict) -> str | None:
 def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
+
+def current_username() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return (os.environ.get("USER") or os.environ.get("LOGNAME") or "").strip()
+
+
+def sudo_noninteractive_works() -> bool:
+    if is_root():
+        return True
+    if not have_cmd("sudo"):
+        return False
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def ensure_passwordless_sudo() -> None:
+    """
+    Make sure ``sudo -n`` works for the rest of install.
+
+    If passwordless sudo is already configured, this is a no-op. Otherwise it
+    installs ``/etc/sudoers.d/overdrive`` for the current user. That one step may
+    prompt for a password when a TTY is available; after that, apt/setcap keep
+    using non-interactive ``sudo -n``.
+    """
+    if is_root():
+        return
+    if not have_cmd("sudo"):
+        raise RuntimeError("sudo is required for this step, but it is not installed.")
+    if sudo_noninteractive_works():
+        return
+
+    user = current_username()
+    if not user or user == "root":
+        raise RuntimeError("Unable to determine a non-root username for passwordless sudo.")
+
+    rule = (
+        f"# Managed by Overdrive install.py — passwordless sudo for lab installs\n"
+        f"{user} ALL=(ALL) NOPASSWD:ALL\n"
+    )
+    # Validate with visudo, then install with mode 0440.
+    helper = (
+        "set -euo pipefail\n"
+        "tmp=$(mktemp)\n"
+        f"printf '%s' {shlex.quote(rule)} > \"$tmp\"\n"
+        "visudo -cf \"$tmp\"\n"
+        f"install -m 440 \"$tmp\" {shlex.quote(str(SUDOERS_DROP_IN))}\n"
+        "rm -f \"$tmp\"\n"
+    )
+
+    print(
+        f"[*] Passwordless sudo is not configured; installing {SUDOERS_DROP_IN} "
+        f"for user '{user}'."
+    )
+    can_prompt = sys.stdin.isatty() and sys.stderr.isatty()
+    if can_prompt:
+        print("[*] Enter your sudo password once; later install steps stay non-interactive.")
+        sudo_prefix = ["sudo"]
+    else:
+        # Automation without a TTY cannot invent credentials; try -n (usually fails)
+        # and then give an exact one-liner.
+        sudo_prefix = ["sudo", "-n"]
+
+    try:
+        subprocess.run([*sudo_prefix, "bash", "-c", helper], check=True)
+    except subprocess.CalledProcessError as exc:
+        if can_prompt:
+            raise RuntimeError(
+                "Failed to install passwordless sudo. Re-run install.py and enter "
+                "your sudo password when prompted."
+            ) from exc
+        raise RuntimeError(
+            "Non-interactive install needs passwordless sudo.\n"
+            "Run this once in a terminal, then re-run install.py:\n"
+            f"  printf '%s' {shlex.quote(rule)}"
+            f" | sudo tee {SUDOERS_DROP_IN} >/dev/null"
+            f" && sudo chmod 440 {SUDOERS_DROP_IN}"
+            f" && sudo visudo -cf {SUDOERS_DROP_IN}"
+        ) from exc
+
+    if not sudo_noninteractive_works():
+        raise RuntimeError(
+            f"Installed {SUDOERS_DROP_IN}, but sudo -n still fails. "
+            "Check that file and re-run install.py."
+        )
+    print("[+] Passwordless sudo is ready.")
+
+
 def add_sudo(cmd: list[str], *, non_interactive: bool) -> list[str]:
     if is_root():
         return cmd
     if not have_cmd("sudo"):
         raise RuntimeError("sudo is required for this step, but it is not installed.")
 
-    # Never let install.py block on a sudo password prompt. If passwordless sudo
-    # is not configured, fail clearly from the command result instead.
-    sudo_cmd = ["sudo", "-n"]
-    return [*sudo_cmd, *cmd]
+    # Always use sudo -n after ensure_passwordless_sudo() so install never blocks
+    # on a password prompt mid-run.
+    _ = non_interactive
+    return ["sudo", "-n", *cmd]
 
 def run_cmd(
     cmd: list[str],
@@ -893,7 +995,7 @@ def parse_args():
         action="store_false",
         help=(
             "Open an activated shell after install. Privileged commands still use "
-            "sudo -n and will not prompt for a password."
+            "sudo -n; passwordless sudo is configured automatically if needed."
         ),
     )
     parser.set_defaults(non_interactive=True)
@@ -1053,7 +1155,11 @@ def main():
     global APT_LOCK_WAIT_SECONDS
     APT_LOCK_WAIT_SECONDS = max(0, args.apt_lock_wait)
 
-    # 0) Ensure host python can create venvs with pip
+    # 0) Ensure sudo -n works for apt/setcap (may prompt once to install sudoers).
+    if sys.platform != "win32":
+        ensure_passwordless_sudo()
+
+    # 1) Ensure host python can create venvs with pip
     ensure_venv_support(non_interactive=args.non_interactive)
 
     # 1-2) Always delete and recreate the venv, then install Python libs.
@@ -1107,8 +1213,9 @@ if __name__ == "__main__":
         )
         if used_noninteractive_sudo(exc.cmd):
             print(
-                "[-] Non-interactive sudo was denied. Configure passwordless sudo "
-                "or run the script interactively.",
+                "[-] Non-interactive sudo was denied. Re-run install.py in a terminal "
+                "so it can install /etc/sudoers.d/overdrive (one password), "
+                "or configure passwordless sudo yourself.",
                 file=sys.stderr,
             )
         sys.exit(exc.returncode)

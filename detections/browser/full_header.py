@@ -629,17 +629,20 @@ def analyze_headers(
 
 
 def fetch_headers_via_browser() -> tuple[dict[str, str] | None, str | None, str | None]:
-    timeout = max(BROWSER_ECHO_TIMEOUT, 25)
+    timeout = BROWSER_ECHO_TIMEOUT
     try:
         server, state, url = _start_header_probe_server()
     except OSError as exc:
         return None, f"local echo server could not start: {type(exc).__name__}: {exc}", None
     try:
-        nav_error = navigate(url, timeout=timeout)
+        nav_error = navigate(url, timeout=0 if not timeout or timeout <= 0 else timeout)
         if nav_error:
             return None, nav_error, url
-        if not state.done.wait(timeout):
-            return None, f"header probe timed out after {timeout}s", url
+        if timeout and timeout > 0:
+            if not state.done.wait(timeout):
+                return None, f"header probe timed out after {timeout}s", url
+        else:
+            state.done.wait()
         with state.lock:
             headers = dict(state.headers)
         if not headers:

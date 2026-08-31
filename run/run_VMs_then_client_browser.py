@@ -37,9 +37,9 @@ RUN_DIR = Path(__file__).resolve().parent
 LOG_DIR = RUN_DIR / "logs"
 RUN_VMS = RUN_DIR / "run_VMs.py"
 
-DEFAULT_BROWSER_TIMEOUT = 75
+DEFAULT_BROWSER_TIMEOUT = 500
 DEFAULT_CLIENT_READY_TIMEOUT = 180
-DEFAULT_BROWSER_RUN_TIMEOUT = 900
+DEFAULT_BROWSER_RUN_TIMEOUT = 0
 TAIL_LINES_ON_FAILURE = 24
 ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -244,6 +244,92 @@ def wait_for_client_shell(
     raise RuntimeError(f"Client serial shell did not become ready. Last output:\n{collected[-1500:]}")
 
 
+def serial_run(sock: socket.socket, command: str, *, marker: str, wait_s: float = 8.0) -> str:
+    """Run one shell command over serial and wait for a unique end marker."""
+    end = f"OD{marker}DONE"
+    serial_drain(sock, wait_s=0.2)
+    serial_send(sock, f"{command}; echo {end}:$?")
+    deadline = time.monotonic() + wait_s
+    collected = ""
+    while time.monotonic() < deadline:
+        chunk = serial_drain(sock, wait_s=0.4)
+        if chunk:
+            collected += chunk
+            for line in collected.replace("\r", "\n").splitlines():
+                if re.match(rf"^\s*{re.escape(end)}:\d+\s*$", line):
+                    return collected
+        time.sleep(0.05)
+    raise TimeoutError(f"Serial command did not finish: {command[:120]}")
+
+
+def build_detections_sync_tarball() -> bytes:
+    """Pack detection sources/assets for live guest sync (no HTML reports)."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    detections = REPO_ROOT / "detections"
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path in sorted(detections.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".py", ".crt", ".key"}:
+                continue
+            if path.name.startswith("_test"):
+                continue
+            arcname = path.relative_to(REPO_ROOT).as_posix()
+            tar.add(path, arcname=arcname)
+    return buf.getvalue()
+
+
+def sync_detections_to_client(sock: socket.socket, log) -> None:
+    """
+    Push current host detections/*.py into the running Alpine guest over serial.
+
+    Guest images only get detections at VDI prime time; without this sync the
+    client keeps running stale timeout logic until the next full rebuild.
+    """
+    import base64
+
+    payload = build_detections_sync_tarball()
+    print(f"[*] Syncing detections to guest ({len(payload)} bytes gzip)...")
+    log.write(f"[sync] detections tarball bytes={len(payload)}\n")
+    log.flush()
+
+    b64 = base64.b64encode(payload).decode("ascii")
+    tmp_b64 = "/tmp/overdrive-detections.b64"
+    tmp_tar = "/tmp/overdrive-detections.tgz"
+    serial_run(sock, f"rm -f {tmp_b64} {tmp_tar}", marker="S0", wait_s=5.0)
+
+    chunk_size = 40
+    chunks = [b64[i : i + chunk_size] for i in range(0, len(b64), chunk_size)]
+    for index, piece in enumerate(chunks, start=1):
+        serial_run(
+            sock,
+            f"printf '%s' '{piece}' >> {tmp_b64}",
+            marker=f"S{index % 1000}",
+            wait_s=5.0,
+        )
+        if index == 1 or index % 100 == 0 or index == len(chunks):
+            print(f"[*]   sync chunk {index}/{len(chunks)}")
+
+    serial_run(
+        sock,
+        f"base64 -d < {tmp_b64} > {tmp_tar} || base64 -D < {tmp_b64} > {tmp_tar}",
+        marker="SD",
+        wait_s=30.0,
+    )
+    serial_run(
+        sock,
+        f"tar -xzf {tmp_tar} -C /root && rm -f {tmp_b64} {tmp_tar}",
+        marker="SX",
+        wait_s=60.0,
+    )
+    print("[+] Guest detections synced from host.")
+    log.write("[sync] detections extract complete\n")
+    log.flush()
+
+
 def run_client_browser_detections(
     sock: socket.socket,
     *,
@@ -270,10 +356,10 @@ def run_client_browser_detections(
 
     started_seen = False
     output = ""
-    deadline = time.monotonic() + run_timeout
+    deadline = None if run_timeout <= 0 else time.monotonic() + run_timeout
     serial_send(sock, f"{command}; rc=$?; echo {end_marker}:$rc")
 
-    while time.monotonic() < deadline:
+    while deadline is None or time.monotonic() < deadline:
         chunk = serial_drain(sock, wait_s=0.6)
         if chunk:
             log.write(chunk)
@@ -350,19 +436,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--browser-timeout",
         type=int,
         default=DEFAULT_BROWSER_TIMEOUT,
-        help="Per-probe timeout passed to run_browser_detections.py.",
+        help=(
+            "Per-probe safety expiration passed to run_browser_detections.py "
+            "(0 = wait forever for completion callbacks)."
+        ),
     )
     parser.add_argument(
         "--browser-run-timeout",
         type=int,
         default=DEFAULT_BROWSER_RUN_TIMEOUT,
-        help="Seconds to allow the full browser suite inside the client.",
+        help=(
+            "Seconds to allow the full browser suite inside the client "
+            "(0 = wait forever)."
+        ),
     )
     parser.add_argument(
         "--browser-arg",
         action="append",
         default=[],
         help="Extra argument passed to run_browser_detections.py; repeat as needed.",
+    )
+    external = parser.add_mutually_exclusive_group()
+    external.add_argument(
+        "--allow-external",
+        action="store_true",
+        help="Allow guest browser probes that contact the public internet.",
+    )
+    external.add_argument(
+        "--deny-external",
+        action="store_true",
+        help="Skip guest browser probes that contact the public internet.",
     )
     return parser.parse_args(argv)
 
@@ -380,6 +483,25 @@ def main(argv: list[str] | None = None) -> int:
         print("Overdrive VM + client browser run")
         print(f"  Log: {log_path.relative_to(REPO_ROOT)}")
         print()
+
+        from detections.common.common_browser import prompt_suite_external_browser_access
+
+        if args.allow_external:
+            external_force: bool | None = True
+        elif args.deny_external:
+            external_force = False
+        else:
+            external_force = None
+        allow_external = prompt_suite_external_browser_access(
+            script_names=[
+                "HTML5_Geolocation_API.py",
+                "HTTP2_settings.py",
+                "HTTP3_QUIC.py",
+            ],
+            force=external_force,
+        )
+        browser_args = list(args.browser_arg)
+        browser_args.append("--allow-external" if allow_external else "--deny-external")
 
         if not args.skip_vms:
             vm_command = [
@@ -424,10 +546,11 @@ def main(argv: list[str] | None = None) -> int:
                     timeout_s=args.client_ready_timeout,
                     log=log,
                 )
+                sync_detections_to_client(sock, log)
                 rc, output = run_client_browser_detections(
                     sock,
                     browser_timeout=args.browser_timeout,
-                    browser_args=args.browser_arg,
+                    browser_args=browser_args,
                     run_timeout=args.browser_run_timeout,
                     log=log,
                 )

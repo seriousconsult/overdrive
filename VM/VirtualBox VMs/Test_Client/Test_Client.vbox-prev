@@ -5,18 +5,18 @@
 ** is running, your changes will be overwritten later, without taking effect.
 ** Use VBoxManage or the VirtualBox Manager GUI to make changes.
 **
-** Written by VirtualBox 7.2.6 (r172322)
+** Written by VirtualBox 7.2.4 (r170995)
 -->
 <VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">
-  <Machine uuid="{52dff3a1-02ce-49ea-a1a8-b426325315b2}" name="Test_Client" OSType="Linux_64" snapshotFolder="Snapshots" lastStateChange="2026-08-31T16:40:47Z">
+  <Machine uuid="{b5187d3d-9b48-4331-b093-9d5bfd24e1da}" name="Test_Client" OSType="Linux_64" snapshotFolder="Snapshots" lastStateChange="2026-08-31T22:28:41Z">
     <MediaRegistry>
       <HardDisks>
-        <HardDisk uuid="{155b5b75-1576-43a4-aa20-3a2049e02a2a}" location="client_browser_alpine.vdi" format="VDI" type="Normal"/>
+        <HardDisk uuid="{733d7ac6-72c8-4a28-94e9-2d0e52b4a004}" location="client_browser_alpine.vdi" format="VDI" type="Normal"/>
       </HardDisks>
     </MediaRegistry>
     <ExtraData>
-      <ExtraDataItem name="GUI/LastGuestSizeHint" value="600,400"/>
-      <ExtraDataItem name="GUI/LastNormalWindowPosition" value="550,240,921,570"/>
+      <ExtraDataItem name="GUI/LastGuestSizeHint" value="792,600"/>
+      <ExtraDataItem name="GUI/LastNormalWindowPosition" value="641,323,480,320"/>
     </ExtraData>
     <Hardware>
       <Memory RAMSize="2048"/>
@@ -27,7 +27,7 @@
         <AutoSerialNumGen enabled="true"/>
       </BIOS>
       <Network>
-        <Adapter slot="0" enabled="true" MACAddress="001422BBA77E" type="82540EM">
+        <Adapter slot="0" enabled="true" MACAddress="001422817AD1" type="82540EM">
           <DisabledModes>
             <NATNetwork name="NatNetwork"/>
           </DisabledModes>
@@ -40,16 +40,16 @@
       <AudioAdapter useDefault="true" driver="WAS" enabled="true"/>
       <Clipboard/>
       <GuestProperties>
-        <GuestProperty name="/VirtualBox/GuestAdd/GuiOnFocus" value="1" timestamp="1788194447037445200" flags="TRANSIENT, RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/GUI/LanguageID" value="en_US" timestamp="1788194471563335200" flags="RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/VBoxRev" value="172322" timestamp="1788194447001422202" flags="TRANSIENT, RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/VBoxVer" value="7.2.6" timestamp="1788194447001422200" flags="TRANSIENT, RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/VBoxVerExt" value="7.2.6" timestamp="1788194447001422201" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/GuestAdd/GuiOnFocus" value="1" timestamp="1788215321236503100" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/GUI/LanguageID" value="en_US" timestamp="1788215341449092100" flags="RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/VBoxRev" value="170995" timestamp="1788215321221891202" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/VBoxVer" value="7.2.4" timestamp="1788215321221891200" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/VBoxVerExt" value="7.2.4" timestamp="1788215321221891201" flags="TRANSIENT, RDONLYGUEST"/>
       </GuestProperties>
       <StorageControllers>
         <StorageController name="SATA" type="AHCI" PortCount="30" useHostIOCache="false" Bootable="true" IDE0MasterEmulationPort="0" IDE0SlaveEmulationPort="1" IDE1MasterEmulationPort="2" IDE1SlaveEmulationPort="3">
           <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
-            <Image uuid="{155b5b75-1576-43a4-aa20-3a2049e02a2a}"/>
+            <Image uuid="{733d7ac6-72c8-4a28-94e9-2d0e52b4a004}"/>
           </AttachedDevice>
         </StorageController>
       </StorageControllers>

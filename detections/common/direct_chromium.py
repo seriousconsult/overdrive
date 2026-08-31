@@ -14,19 +14,91 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 DEBUG_PORT_ENV = "OVERDRIVE_DIRECT_CHROME_DEBUG_PORT"
+ATTACH_PORT_ENV = "OVERDRIVE_DIRECT_CHROME_ATTACH_PORT"
 EXTRA_ARGS_ENV = "OVERDRIVE_DIRECT_CHROME_EXTRA_ARGS"
 XVFB_DISPLAY_ENV = "OVERDRIVE_DIRECT_CHROME_X_DISPLAY"
 USE_SYSTEM_DISPLAY_ENV = "OVERDRIVE_DIRECT_CHROME_USE_SYSTEM_DISPLAY"
 USE_DBUS_RUN_SESSION_ENV = "OVERDRIVE_DIRECT_CHROME_USE_DBUS_RUN_SESSION"
 STARTUP_TIMEOUT_ENV = "OVERDRIVE_DIRECT_CHROME_STARTUP_TIMEOUT"
+SHARED_STARTUP_TIMEOUT_ENV = "OVERDRIVE_DIRECT_CHROME_SHARED_STARTUP_TIMEOUT"
+
+_IS_LINUX = sys.platform.startswith("linux")
+# 0 means wait forever for DevTools / probe callbacks (no wall-clock kill).
+DEFAULT_SHARED_STARTUP_TIMEOUT = 500
+DEFAULT_PROBE_EXPIRATION = 500
+DEFAULT_STARTUP_EXPIRATION = 500
+
+
+class _AliveProc:
+    """Stand-in process handle for DevTools waits against an already-running Chromium."""
+
+    def poll(self) -> None:
+        return None
+
+
+def _expiration_or_none(timeout: int | None) -> int | None:
+    """Normalize expiration: ``None``/``<=0`` means wait forever."""
+    if timeout is None:
+        return None
+    value = int(timeout)
+    return None if value <= 0 else value
+
+
+def resolve_probe_expiration(timeout: int | None) -> int | None:
+    """
+    Browser probes wait on callbacks with a safety wall-clock expiration.
+
+    Default is ``DEFAULT_PROBE_EXPIRATION`` (500s). ``0`` / env ``0`` waits forever.
+    ``OVERDRIVE_BROWSER_TIMEOUT`` overrides when set.
+    """
+    env_raw = (os.environ.get("OVERDRIVE_BROWSER_TIMEOUT") or "").strip()
+    if env_raw:
+        try:
+            return _expiration_or_none(int(env_raw))
+        except ValueError:
+            pass
+    if timeout is not None and int(timeout) > 0:
+        if DEFAULT_PROBE_EXPIRATION <= 0:
+            return int(timeout)
+        return max(DEFAULT_PROBE_EXPIRATION, int(timeout))
+    if timeout is not None and int(timeout) <= 0:
+        return None
+    return _expiration_or_none(DEFAULT_PROBE_EXPIRATION)
+
+
+def wait_until(
+    predicate,
+    *,
+    expiration_sec: int | None,
+    poll_sec: float = 0.2,
+    label: str = "condition",
+    on_progress=None,
+    progress_every_sec: float = 15.0,
+) -> None:
+    """Poll until ``predicate()`` is true. ``expiration_sec=None`` waits forever."""
+    started = time.monotonic()
+    last_progress = started
+    deadline = None if expiration_sec is None else started + max(1, int(expiration_sec))
+    while deadline is None or time.monotonic() < deadline:
+        if predicate():
+            return
+        now = time.monotonic()
+        if on_progress is not None and (now - last_progress) >= progress_every_sec:
+            on_progress(int(now - started), expiration_sec)
+            last_progress = now
+        time.sleep(poll_sec)
+    raise TimeoutError(f"{label} did not complete within {expiration_sec}s safety expiration")
 
 
 def first_executable_path(*candidates: str) -> str | None:
@@ -208,10 +280,11 @@ def chrome_user_agent_metadata(binary: str | None) -> dict[str, Any]:
     }
 
 
-def pick_local_port(start: int = 22000, end: int = 60999) -> int:
-    env_port = (os.environ.get(DEBUG_PORT_ENV) or "").strip()
-    if env_port.isdigit():
-        return int(env_port)
+def pick_local_port(start: int = 22000, end: int = 60999, *, honor_env: bool = True) -> int:
+    if honor_env:
+        env_port = (os.environ.get(DEBUG_PORT_ENV) or "").strip()
+        if env_port.isdigit():
+            return int(env_port)
 
     span = max(1, end - start)
     first = start + ((os.getpid() * 41) % span)
@@ -229,6 +302,14 @@ def pick_local_port(start: int = 22000, end: int = 60999) -> int:
             if sock is not None:
                 sock.close()
     return 9222 + (os.getpid() % 1000)
+
+
+def attach_debug_port() -> int | None:
+    """Port of a suite-owned Chromium that probes should attach to instead of launching."""
+    raw = (os.environ.get(ATTACH_PORT_ENV) or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return None
 
 
 def pick_x_display(start: int = 90, end: int = 199) -> str:
@@ -316,32 +397,53 @@ def terminate_profile_processes(profile_dir: Path) -> None:
             time.sleep(0.05)
 
 
-def wait_for_chrome_json(url: str, proc: subprocess.Popen, timeout: int) -> Any:
-    deadline = time.monotonic() + max(1, timeout)
-    while time.monotonic() < deadline:
+def wait_for_chrome_json(url: str, proc: subprocess.Popen, timeout: int | None) -> Any:
+    expiration = _expiration_or_none(timeout)
+    started = time.monotonic()
+    last_progress = started
+    while True:
+        if expiration is not None and time.monotonic() >= started + expiration:
+            break
         if proc.poll() is not None:
             raise RuntimeError(f"Chromium exited early with code {proc.returncode}")
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
+            with urllib.request.urlopen(url, timeout=2) as response:
                 return json.load(response)
         except (OSError, json.JSONDecodeError):
-            time.sleep(0.2)
-    raise TimeoutError(f"Chromium DevTools endpoint did not become ready within {timeout}s")
+            now = time.monotonic()
+            if now - last_progress >= 15:
+                if expiration is None:
+                    print(
+                        f"  … waiting for Chromium DevTools ({int(now - started)}s; no expiration)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"  … waiting for Chromium DevTools "
+                        f"({int(now - started)}s / {expiration}s safety expiration)",
+                        flush=True,
+                    )
+                last_progress = now
+            time.sleep(0.25)
+    raise TimeoutError(
+        f"Chromium DevTools endpoint did not become ready within {expiration}s safety expiration"
+    )
 
 
 def chrome_target_websocket(
     port: int,
     proc: subprocess.Popen,
-    timeout: int,
+    timeout: int | None,
     *,
     fallback_url: str = "about:blank",
 ) -> str:
     base = f"http://127.0.0.1:{port}"
     wait_for_chrome_json(f"{base}/json/version", proc, timeout)
 
-    deadline = time.monotonic() + max(1, timeout)
-    while time.monotonic() < deadline:
-        targets = wait_for_chrome_json(f"{base}/json/list", proc, 1)
+    expiration = _expiration_or_none(timeout)
+    started = time.monotonic()
+    while expiration is None or time.monotonic() < started + expiration:
+        targets = wait_for_chrome_json(f"{base}/json/list", proc, 5 if expiration is None else 1)
         if isinstance(targets, list):
             for target in targets:
                 if (
@@ -549,11 +651,249 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
     return value
 
 
-def chromium_startup_timeout(total_timeout: int) -> int:
-    """Give slow VM/Xvfb/DBus startups enough time without hiding real hangs."""
-    total = max(1, int(total_timeout))
-    default = min(total, max(15, min(45, total // 2)))
-    return _env_int(STARTUP_TIMEOUT_ENV, default, minimum=1, maximum=total)
+def chromium_startup_timeout(total_timeout: int | None) -> int | None:
+    """Safety expiration for Chromium/Xvfb/DBus becoming ready. ``None`` = forever."""
+    expiration = _expiration_or_none(total_timeout)
+    if expiration is None:
+        env_raw = (os.environ.get(STARTUP_TIMEOUT_ENV) or "").strip()
+        if env_raw:
+            return _expiration_or_none(_env_int(STARTUP_TIMEOUT_ENV, 0, minimum=0))
+        return _expiration_or_none(DEFAULT_STARTUP_EXPIRATION)
+    default = max(expiration, DEFAULT_STARTUP_EXPIRATION or expiration)
+    return _env_int(STARTUP_TIMEOUT_ENV, default, minimum=1, maximum=max(expiration, 1))
+
+
+def shared_chromium_startup_timeout() -> int | None:
+    env_raw = (os.environ.get(SHARED_STARTUP_TIMEOUT_ENV) or "").strip()
+    if env_raw:
+        return _expiration_or_none(_env_int(SHARED_STARTUP_TIMEOUT_ENV, 0, minimum=0))
+    return _expiration_or_none(DEFAULT_SHARED_STARTUP_TIMEOUT)
+
+
+def _terminate_process_tree(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        try:
+            proc.terminate()
+        except OSError:
+            return
+    try:
+        proc.wait(timeout=3)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            return
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+@dataclass
+class SharedChromiumSession:
+    port: int
+    proc: subprocess.Popen
+    profile_dir: Path
+    _tmpdir: tempfile.TemporaryDirectory
+    _xvfb_proc: subprocess.Popen | None = None
+    _log_path: Path | None = None
+    _env: dict[str, str] = field(default_factory=dict)
+
+
+def start_shared_chromium(
+    *,
+    startup_timeout: int | None = None,
+) -> SharedChromiumSession:
+    """Launch one long-lived Chromium for the whole browser detection suite."""
+    chromium = chromium_binary()
+    if not chromium:
+        raise RuntimeError("Chromium/Chrome is unavailable.")
+
+    timeout = startup_timeout if startup_timeout is not None else shared_chromium_startup_timeout()
+    tmpdir = tempfile.TemporaryDirectory(
+        prefix="overdrive-shared-chrome-",
+        ignore_cleanup_errors=True,
+    )
+    tmp_path = Path(tmpdir.name)
+    failures: list[str] = []
+    try:
+        env, xvfb_proc, xvfb_log, use_headless = start_xvfb_if_needed(tmp_path)
+    except Exception as exc:
+        tmpdir.cleanup()
+        raise RuntimeError(
+            f"Shared Chromium display setup failed: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    port = pick_local_port(honor_env=False)
+    profile_dir = tmp_path / f"profile-{port}"
+    log_path = tmp_path / f"chromium-{port}.log"
+    proc: subprocess.Popen | None = None
+    first_no_sandbox = chromium_needs_no_sandbox()
+    no_sandbox_attempts = (True,) if first_no_sandbox else (False, True)
+    started: SharedChromiumSession | None = None
+
+    try:
+        for no_sandbox in no_sandbox_attempts:
+            if no_sandbox and (
+                not first_no_sandbox
+                and (not failures or not browser_startup_needs_no_sandbox(failures[-1]))
+            ):
+                break
+            mode = "Chromium --no-sandbox fallback" if no_sandbox else "Chromium"
+            log_handle = log_path.open("a", encoding="utf-8", errors="replace")
+            try:
+                proc = subprocess.Popen(
+                    browser_process_command(
+                        chrome_command(
+                            chromium,
+                            port,
+                            profile_dir,
+                            "about:blank",
+                            headless=use_headless,
+                            no_sandbox=no_sandbox,
+                            ignore_certificate_errors=True,
+                        )
+                    ),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    close_fds=True,
+                    env=env,
+                    start_new_session=True,
+                )
+                wait_for_chrome_json(
+                    f"http://127.0.0.1:{port}/json/version",
+                    proc,
+                    timeout,
+                )
+                started = SharedChromiumSession(
+                    port=port,
+                    proc=proc,
+                    profile_dir=profile_dir,
+                    _tmpdir=tmpdir,
+                    _xvfb_proc=xvfb_proc,
+                    _log_path=log_path,
+                    _env=env,
+                )
+                proc = None  # ownership transferred; do not tear down in finally
+                break
+            except TimeoutError as exc:
+                failures.append(f"{mode}: browser/devtools timed out: {exc}")
+            except Exception as exc:
+                failures.append(f"{mode}: {type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    log_handle.close()
+                except OSError:
+                    pass
+                if started is None:
+                    if proc is not None and proc.poll() is None:
+                        _terminate_process_tree(proc)
+                    terminate_profile_processes(profile_dir)
+                    proc = None
+                    log_tail = read_small(log_path)
+                    if failures and log_tail and "chromium log:" not in failures[-1]:
+                        failures[-1] = f"{failures[-1]} | chromium log: {log_tail}"
+    finally:
+        if started is None:
+            if xvfb_proc is not None and xvfb_proc.poll() is None:
+                _terminate_process_tree(xvfb_proc)
+            xvfb_tail = read_small(xvfb_log)
+            if failures and xvfb_tail and "xvfb log:" not in failures[-1]:
+                failures[-1] = f"{failures[-1]} | xvfb log: {xvfb_tail}"
+            try:
+                tmpdir.cleanup()
+            except OSError:
+                pass
+
+    if started is not None:
+        return started
+
+    raise RuntimeError("Shared Chromium failed to start: " + " | ".join(failures))
+
+
+def stop_shared_chromium(session: SharedChromiumSession | None) -> None:
+    if session is None:
+        return
+    _terminate_process_tree(session.proc)
+    terminate_profile_processes(session.profile_dir)
+    _terminate_process_tree(session._xvfb_proc)
+    try:
+        session._tmpdir.cleanup()
+    except OSError:
+        pass
+
+
+@contextmanager
+def shared_chromium_session(
+    *,
+    startup_timeout: int | None = None,
+) -> Iterator[SharedChromiumSession]:
+    """Own one Chromium process and publish its DevTools port to probe subprocesses."""
+    session = start_shared_chromium(startup_timeout=startup_timeout)
+    previous = os.environ.get(ATTACH_PORT_ENV)
+    os.environ[ATTACH_PORT_ENV] = str(session.port)
+    try:
+        yield session
+    finally:
+        if previous is None:
+            os.environ.pop(ATTACH_PORT_ENV, None)
+        else:
+            os.environ[ATTACH_PORT_ENV] = previous
+        stop_shared_chromium(session)
+
+
+def run_in_attached_chromium(
+    action,
+    *,
+    port: int,
+    timeout: int,
+    label: str = "direct Chromium probe",
+    initial_url: str = "about:blank",
+) -> tuple[Any | None, str | None]:
+    """Reuse a suite-owned Chromium instead of cold-starting a new process."""
+    chromium = chromium_binary()
+    if not chromium:
+        return None, "Chromium/Chrome is unavailable."
+
+    expiration = resolve_probe_expiration(timeout)
+    attach_wait = chromium_startup_timeout(expiration)
+    connect_timeout = expiration if expiration is not None else 600
+    try:
+        ws_url = chrome_target_websocket(
+            port,
+            _AliveProc(),
+            timeout=attach_wait,
+            fallback_url="about:blank",
+        )
+        with websocket_connect(ws_url, timeout=connect_timeout) as sock:
+            navigate_current_page(
+                sock,
+                initial_url,
+                chromium=chromium,
+                timeout=expiration if expiration is not None else connect_timeout,
+            )
+            result = action(sock, _AliveProc(), chromium)
+            try:
+                navigate_current_page(
+                    sock,
+                    "about:blank",
+                    chromium=chromium,
+                    timeout=60,
+                )
+            except Exception:
+                pass
+            return result, None
+    except Exception as exc:
+        return None, f"{label} failed (shared Chromium attach): {type(exc).__name__}: {exc}"
 
 
 def start_xvfb_if_needed(
@@ -667,13 +1007,14 @@ def navigate_current_page(
     url: str,
     *,
     chromium: str | None,
-    timeout: int,
+    timeout: int | None,
     first_message_id: int = 2,
 ) -> None:
     if not url or url == "about:blank":
         return
 
-    timeout_ms = max(3000, int(timeout) * 1000)
+    expiration = _expiration_or_none(timeout)
+    timeout_ms = 60000 if expiration is None else max(3000, int(expiration) * 1000)
     cdp_call(sock, first_message_id, "Network.enable")
     cdp_call(
         sock,
@@ -698,19 +1039,19 @@ def navigate_current_page(
     if error_text:
         raise RuntimeError(f"Chromium navigation to {url} failed: {error_text}")
 
-    deadline = time.monotonic() + max(3, int(timeout))
+    started = time.monotonic()
     expression = """
 (() => ({
   href: location.href,
   readyState: document.readyState
 }))()
 """
-    while time.monotonic() < deadline:
+    while expiration is None or time.monotonic() < started + expiration:
         value = runtime_evaluate(
             sock,
             expression,
             message_id=first_message_id + 5,
-            timeout_ms=min(timeout_ms, 5000),
+            timeout_ms=min(timeout_ms, 15000),
             await_promise=False,
         )
         if isinstance(value, dict):
@@ -718,9 +1059,11 @@ def navigate_current_page(
             ready_state = str(value.get("readyState") or "")
             if href != "about:blank" and ready_state in ("interactive", "complete"):
                 return
-        time.sleep(0.2)
+        time.sleep(0.25)
 
-    raise TimeoutError(f"Chromium did not finish navigating to {url} within {timeout}s")
+    raise TimeoutError(
+        f"Chromium did not finish navigating to {url} within {expiration}s safety expiration"
+    )
 
 
 def run_in_chromium(
@@ -735,7 +1078,17 @@ def run_in_chromium(
     if not chromium:
         return None, "Chromium/Chrome is unavailable."
 
-    deadline = max(10, int(timeout))
+    attached_port = attach_debug_port()
+    if attached_port is not None:
+        return run_in_attached_chromium(
+            action,
+            port=attached_port,
+            timeout=timeout,
+            label=label,
+            initial_url=initial_url,
+        )
+
+    deadline = resolve_probe_expiration(timeout)
     failures: list[str] = []
     with tempfile.TemporaryDirectory(
         prefix="overdrive-direct-chrome-",
@@ -760,6 +1113,7 @@ def run_in_chromium(
             first_no_sandbox = chromium_needs_no_sandbox()
             no_sandbox_attempts = (True,) if first_no_sandbox else (False, True)
             startup_timeout = chromium_startup_timeout(deadline)
+            connect_timeout = deadline if deadline is not None else 600
             for no_sandbox in no_sandbox_attempts:
                 if no_sandbox and (
                     not first_no_sandbox
@@ -793,12 +1147,12 @@ def run_in_chromium(
                         timeout=startup_timeout,
                         fallback_url="about:blank",
                     )
-                    with websocket_connect(ws_url, timeout=deadline) as sock:
+                    with websocket_connect(ws_url, timeout=connect_timeout) as sock:
                         navigate_current_page(
                             sock,
                             initial_url,
                             chromium=chromium,
-                            timeout=deadline,
+                            timeout=deadline if deadline is not None else connect_timeout,
                         )
                         return action(sock, proc, chromium), None
                 except TimeoutError as exc:
@@ -815,21 +1169,7 @@ def run_in_chromium(
                     except OSError:
                         pass
                     if proc is not None and proc.poll() is None:
-                        try:
-                            os.killpg(proc.pid, signal.SIGTERM)
-                        except OSError:
-                            proc.terminate()
-                        try:
-                            proc.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            try:
-                                os.killpg(proc.pid, signal.SIGKILL)
-                            except OSError:
-                                proc.kill()
-                            try:
-                                proc.wait(timeout=3)
-                            except subprocess.TimeoutExpired:
-                                pass
+                        _terminate_process_tree(proc)
                     terminate_profile_processes(profile_dir)
                     proc = None
                     log_tail = read_small(log_path)
@@ -837,15 +1177,7 @@ def run_in_chromium(
                         failures[-1] = f"{failures[-1]} | chromium log: {log_tail}"
         finally:
             if xvfb_proc is not None and xvfb_proc.poll() is None:
-                xvfb_proc.terminate()
-                try:
-                    xvfb_proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    xvfb_proc.kill()
-                    try:
-                        xvfb_proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
+                _terminate_process_tree(xvfb_proc)
             xvfb_tail = read_small(xvfb_log)
             if failures and xvfb_tail and "xvfb log:" not in failures[-1]:
                 failures[-1] = f"{failures[-1]} | xvfb log: {xvfb_tail}"
@@ -859,10 +1191,11 @@ def navigate_and_read_text(
     timeout: int,
     ignore_certificate_errors: bool = False,
 ) -> tuple[str | None, str | None]:
-    timeout_ms = max(3000, int(timeout) * 1000)
+    expiration = resolve_probe_expiration(timeout)
+    timeout_ms = 60000 if expiration is None else max(30000, expiration * 1000)
 
     def action(sock: socket.socket, _proc: subprocess.Popen, _chromium: str) -> str | None:
-        deadline = time.monotonic() + max(3, int(timeout))
+        started = time.monotonic()
         expression = """
 (() => {
   const body = document.body;
@@ -872,12 +1205,12 @@ def navigate_and_read_text(
   };
 })()
 """
-        while time.monotonic() < deadline:
+        while expiration is None or time.monotonic() < started + expiration:
             value = runtime_evaluate(
                 sock,
                 expression,
                 message_id=11,
-                timeout_ms=min(timeout_ms, 5000),
+                timeout_ms=min(timeout_ms, 15000),
                 await_promise=False,
             )
             if isinstance(value, dict):
@@ -889,7 +1222,7 @@ def navigate_and_read_text(
 
     value, error = run_in_chromium(
         action,
-        timeout=timeout,
+        timeout=0 if expiration is None else expiration,
         label="direct Chromium navigation",
         initial_url=url,
         ignore_certificate_errors=ignore_certificate_errors,
@@ -903,26 +1236,27 @@ def navigate_and_read_text(
 
 def navigate(url: str, *, timeout: int) -> str | None:
     """Open a URL in Chromium and return an error string if navigation fails."""
-    timeout_ms = max(3000, int(timeout) * 1000)
+    expiration = resolve_probe_expiration(timeout)
+    timeout_ms = 60000 if expiration is None else max(30000, expiration * 1000)
 
     def action(sock: socket.socket, _proc: subprocess.Popen, _chromium: str) -> None:
-        deadline = time.monotonic() + max(3, int(timeout))
-        while time.monotonic() < deadline:
+        started = time.monotonic()
+        while expiration is None or time.monotonic() < started + expiration:
             value = runtime_evaluate(
                 sock,
                 "document.readyState",
                 message_id=21,
-                timeout_ms=min(timeout_ms, 5000),
+                timeout_ms=min(timeout_ms, 15000),
                 await_promise=False,
             )
             if value in ("interactive", "complete"):
                 return None
-            time.sleep(0.2)
+            time.sleep(0.25)
         return None
 
     _value, error = run_in_chromium(
         action,
-        timeout=timeout,
+        timeout=0 if expiration is None else expiration,
         label="direct Chromium navigation",
         initial_url=url,
     )
@@ -936,9 +1270,25 @@ def run_async_script(
     url: str = "about:blank",
     ignore_certificate_errors: bool = False,
 ) -> tuple[Any | None, str | None]:
-    """Run callback-style async JavaScript in Chromium via DevTools."""
-    timeout_ms = max(3000, int(timeout) * 1000)
+    """Run callback-style async JavaScript in Chromium via DevTools.
+
+    Completion is driven by the probe calling ``finishOnce`` / ``callback``.
+    By default there is no wall-clock kill around that callback.
+    """
+    expiration = resolve_probe_expiration(timeout)
+    # CDP awaitPromise still needs a numeric timeout_ms; use a very large value when forever.
+    timeout_ms = 24 * 60 * 60 * 1000 if expiration is None else max(30000, expiration * 1000)
     script_source = json.dumps(script)
+    safety_js = (
+        ""
+        if expiration is None
+        else f"""
+  setTimeout(
+    () => finishOnce({{ok: false, error: "direct Chromium script safety expiration"}}),
+    {timeout_ms}
+  );
+"""
+    )
 
     def action(sock: socket.socket, _proc: subprocess.Popen, chromium: str) -> Any:
         expression = f"""
@@ -951,7 +1301,7 @@ new Promise((resolve) => {{
       resolve(value);
     }}
   }};
-  setTimeout(() => finishOnce({{ok: false, error: "direct Chromium script timed out"}}), {timeout_ms});
+  {safety_js}
   try {{
     const fn = new Function({script_source});
     fn.call(window, finishOnce);
@@ -964,13 +1314,13 @@ new Promise((resolve) => {{
             sock,
             expression,
             message_id=32,
-            timeout_ms=timeout_ms + 1000,
+            timeout_ms=timeout_ms + 5000,
             await_promise=True,
         )
 
     return run_in_chromium(
         action,
-        timeout=timeout,
+        timeout=0 if expiration is None else expiration,
         label="direct Chromium async script",
         initial_url=url,
         ignore_certificate_errors=ignore_certificate_errors,
@@ -980,7 +1330,7 @@ new Promise((resolve) => {{
 def fetch_browser_json(
     url: str,
     *,
-    timeout: int = 25,
+    timeout: int = 0,
     cache_bust: bool = False,
     ignore_certificate_errors: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:

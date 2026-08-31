@@ -22,9 +22,10 @@ Initial setup:
 python3 install.py
 ```
 
-`install.py` is non-interactive by default. It always uses `sudo -n` for system
-packages and `setcap`, so it exits instead of prompting if passwordless sudo is
-not already configured.
+`install.py` is non-interactive by default and uses `sudo -n` for system
+packages and `setcap`. If passwordless sudo is missing, it installs
+`/etc/sudoers.d/overdrive` (one password prompt when a TTY is available), then
+continues without further prompts.
 
 Open an activated shell after setup:
 

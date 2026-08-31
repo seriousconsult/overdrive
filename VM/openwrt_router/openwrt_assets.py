@@ -13,6 +13,7 @@ from VM.vm_config import (
 __all__ = [
     "APPLY_MULLVAD_DOT_SH",
     "OVERDRIVE_MULLVAD_INIT_D",
+    "SCRUB_OS_IDENTIFIERS_SH",
     "UCI_DEFAULTS_ENABLE_MULLVAD",
 ]
 
@@ -332,4 +333,34 @@ uci set network.lan.netmask='{OPENWRT_LAN_NETMASK}'
 uci commit network
 [ -x /etc/init.d/overdrive-mullvad-dot ] && /etc/init.d/overdrive-mullvad-dot enable
 exit 0
+"""
+
+SCRUB_OS_IDENTIFIERS_SH = """#!/bin/sh
+# Neutralize OpenWrt/Linux release banners so the guest does not advertise distro ID.
+set -eu
+for path in /etc/os-release /usr/lib/os-release; do
+  [ -e "$path" ] || continue
+  cat > "$path" <<'OSRELEASE'
+NAME="Generic"
+ID=generic
+PRETTY_NAME="Generic"
+VERSION_ID=
+VERSION=
+HOME_URL=
+SUPPORT_URL=
+BUG_REPORT_URL=
+OSRELEASE
+  chmod 0644 "$path" 2>/dev/null || true
+done
+rm -f \
+  /etc/openwrt_release \
+  /etc/openwrt_version \
+  /etc/device_info \
+  /etc/lsb-release \
+  2>/dev/null || true
+for path in /etc/banner /etc/banner.failsafe /etc/issue /etc/issue.net /etc/motd; do
+  [ -e "$path" ] || continue
+  : > "$path" 2>/dev/null || true
+  chmod 0644 "$path" 2>/dev/null || true
+done
 """

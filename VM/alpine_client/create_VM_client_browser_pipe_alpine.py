@@ -43,9 +43,10 @@ Serial console endpoint:
 Username: root
 Password: configured by ALPINE_CLIENT_ROOT_PASSWORD in VM/.env
 
-Tracking identifiers (hostname, custom NIC MAC, DHCP client identity, machine-id,
-egress User-Agent) are scrubbed at VDI prime / VM configure time. Rebuild the
-client after changing those settings. LAN silence is intentional and still looks
+Tracking identifiers (hostname, DHCP client identity, machine-id, egress
+User-Agent) are scrubbed at VDI prime / harden time. NIC MACs are regenerated
+on every VM launch (stable OUI, unique NIC suffix). Rebuild the client after
+changing scrub/harden settings. LAN silence is intentional and still looks
 lab-like to discovery probes.
 
 Detection Python libs (Scapy, httpx, zeroconf, …), WireGuard tools, and network
@@ -85,6 +86,7 @@ if REPO_ROOT not in sys.path:
 
 from detections.common.common_local import is_wsl_local
 from detections.common.common_vm import (
+    assign_fresh_lab_macs,
     find_vboxmanage,
     get_vm_state,
     get_system_paths,
@@ -138,11 +140,8 @@ from VM.alpine_client.guest_prime import (
     prime_client_identity_and_base_packages,
 )
 from VM.vm_config import (
-    CLIENT_NIC_OUI,
     OPENWRT_LAN_DNS,
     alpine_client_root_password,
-    format_mac_colon,
-    random_client_mac_vbox,
 )
 
 
@@ -1034,7 +1033,7 @@ def setup_client_vm(
                 "--name",
                 VM_NAME,
                 "--ostype",
-                "Linux_64",
+                "Other_64",
                 "--basefolder",
                 vms_root_for_vbox,
                 "--register",
@@ -1042,7 +1041,6 @@ def setup_client_vm(
         )
 
     def configure_vm_hardware() -> None:
-        client_mac = random_client_mac_vbox()
         run_vboxmanage(
             vboxmanage,
             [
@@ -1058,14 +1056,7 @@ def setup_client_vm(
                 "intnet",
                 "--intnet1",
                 LAN_INTNET_NAME,
-                "--macaddress1",
-                client_mac,
             ],
-        )
-        oui = CLIENT_NIC_OUI.lower().replace(":", "")
-        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
-        print(
-            f"[overdrive] Client NIC MAC (OUI {oui_colon}): {format_mac_colon(client_mac)}"
         )
         configure_serial_endpoint(vboxmanage, serial_endpoint)
 
@@ -1094,6 +1085,8 @@ def setup_client_vm(
 
     def start_and_connect() -> None:
         print(f"Starting {VM_NAME} ({options.start_type})...")
+        # Fresh MAC on every launch (VirtualBox only allows this while powered off).
+        assign_fresh_lab_macs(vboxmanage, VM_NAME)
         run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", options.start_type])
 
         # Unattended: don't leave the Syslinux menu waiting for a human Enter.

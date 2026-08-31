@@ -21,10 +21,8 @@ import json
 import ipaddress
 import os
 import re
-import shutil
 import socket
 import ssl
-import subprocess
 import tempfile
 import threading
 import time
@@ -48,7 +46,7 @@ from detections.common.direct_chromium import run_async_script
 
 DEFAULT_ENDPOINT = ""
 TIMEOUT = max(12, DEFAULT_TIMEOUT)
-LOCAL_QUIC_TIMEOUT = 20
+LOCAL_QUIC_TIMEOUT = 600
 
 
 def is_local_endpoint(url: str) -> bool:
@@ -72,37 +70,10 @@ def _pick_local_port(kind: int) -> int:
 
 
 def _make_localhost_cert(work_dir: str) -> tuple[str, str]:
-    openssl = shutil.which("openssl")
-    if not openssl:
-        raise RuntimeError("openssl is required to create the local HTTP/3 test certificate")
-    cert_path = os.path.join(work_dir, "localhost.crt")
-    key_path = os.path.join(work_dir, "localhost.key")
-    subprocess.run(
-        [
-            openssl,
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-sha256",
-            "-days",
-            "1",
-            "-nodes",
-            "-keyout",
-            key_path,
-            "-out",
-            cert_path,
-            "-subj",
-            "/CN=localhost",
-            "-addext",
-            "subjectAltName=DNS:localhost,IP:127.0.0.1",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-        timeout=15,
-    )
-    return cert_path, key_path
+    from detections.common.localhost_tls import make_localhost_probe_cert
+
+    cert_path, key_path = make_localhost_probe_cert(work_dir)
+    return str(cert_path), str(key_path)
 
 
 class LocalQuicAltSvcProbe:
@@ -122,7 +93,7 @@ class LocalQuicAltSvcProbe:
     def __enter__(self) -> "LocalQuicAltSvcProbe":
         self._udp_thread.start()
         self._tcp_thread.start()
-        if not self._ready.wait(timeout=min(10, self.timeout)):
+        if not self._ready.wait(timeout=max(30, self.timeout)):
             raise RuntimeError(self.error or "local HTTP/3 Alt-Svc observer did not start")
         return self
 
