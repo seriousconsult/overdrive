@@ -438,7 +438,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_BROWSER_TIMEOUT,
         help=(
             "Per-probe safety expiration passed to run_browser_detections.py "
-            "(0 = wait forever for completion callbacks)."
+            f"(default: {DEFAULT_BROWSER_TIMEOUT}; 0 = wait forever)."
         ),
     )
     parser.add_argument(
@@ -447,7 +447,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_BROWSER_RUN_TIMEOUT,
         help=(
             "Seconds to allow the full browser suite inside the client "
-            "(0 = wait forever)."
+            "(0 = wait forever; each probe still has --browser-timeout)."
         ),
     )
     parser.add_argument(

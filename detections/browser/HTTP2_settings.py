@@ -49,7 +49,7 @@ try:
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
-    DEFAULT_TIMEOUT = 0
+    DEFAULT_TIMEOUT = 500
     fetch_browser_json = None  # type: ignore[assignment]
     run_async_script = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc

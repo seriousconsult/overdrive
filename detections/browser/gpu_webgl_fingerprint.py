@@ -46,7 +46,7 @@ try:
     from detections.common.direct_chromium import run_async_script
     COMMON_BROWSER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
-    DEFAULT_TIMEOUT = 0
+    DEFAULT_TIMEOUT = 500
     COMMON_BROWSER_IMPORT_ERROR = exc
     run_async_script = None  # type: ignore[assignment]
 

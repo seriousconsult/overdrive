@@ -1330,7 +1330,7 @@ new Promise((resolve) => {{
 def fetch_browser_json(
     url: str,
     *,
-    timeout: int = 0,
+    timeout: int = DEFAULT_PROBE_EXPIRATION,
     cache_bust: bool = False,
     ignore_certificate_errors: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:

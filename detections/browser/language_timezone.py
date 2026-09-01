@@ -43,7 +43,7 @@ try:
 
     BROWSER_HELPER_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
-    DEFAULT_TIMEOUT = 0
+    DEFAULT_TIMEOUT = 500
     navigate = None  # type: ignore[assignment]
     BROWSER_HELPER_IMPORT_ERROR = exc
 
