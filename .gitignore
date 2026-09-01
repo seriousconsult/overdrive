@@ -104,6 +104,7 @@ TODO.md
 
 # --- Temporary scratch files ---
 _tmp*
+_temp*
 tmp_*
 *_tmp_*
 *_temp_*
