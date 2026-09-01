@@ -101,3 +101,10 @@ VM/apply_mullvad_dot.sh
 # --- Other ---
 *.png
 TODO.md
+
+# --- Temporary scratch files ---
+_tmp*
+tmp_*
+*_tmp_*
+*_temp_*
+temp_*

@@ -144,6 +144,55 @@ def dbus_machine_id_present() -> bool:
     return False
 
 
+def chromium_swiftshader_available(chromium: str) -> bool:
+    """True when Chromium's SwiftShader/Vulkan software stack is on disk."""
+    candidates: list[Path] = [
+        Path("/usr/lib/chromium/libvk_swiftshader.so"),
+        Path("/usr/lib/chromium/libswiftshader_libvulkan.so"),
+        Path("/usr/lib/chromium/libEGL.so"),
+    ]
+    try:
+        parent = Path(chromium).resolve().parent
+        candidates.extend(
+            [
+                parent / "libvk_swiftshader.so",
+                parent / "libswiftshader_libvulkan.so",
+                parent / "swiftshader" / "libvk_swiftshader.so",
+            ]
+        )
+    except OSError:
+        pass
+    return any(path.is_file() for path in candidates)
+
+
+def chromium_gl_args(chromium: str) -> list[str]:
+    """
+    GL / GPU flags for DevTools stability.
+
+    Alpine's Chromium package often lacks SwiftShader. ANGLE then fails Vulkan
+    init, the GPU process exits, and remote debugging never becomes ready.
+    """
+    common = [
+        "--disable-vulkan",
+        "--disable-gpu-vsync",
+        "--disable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,WebGPU",
+    ]
+    if chromium_swiftshader_available(chromium):
+        return [
+            *common,
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
+            "--enable-unsafe-swiftshader",
+        ]
+    return [
+        *common,
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--in-process-gpu",
+        "--use-gl=disabled",
+    ]
+
+
 def chrome_full_version(binary: str | None) -> str:
     version = "120.0.0.0"
     if binary:
@@ -597,12 +646,7 @@ def chrome_command(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
-        "--disable-vulkan",
-        "--disable-gpu-vsync",
-        "--disable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
-        "--use-gl=angle",
-        "--use-angle=swiftshader",
-        "--enable-unsafe-swiftshader",
+        *chromium_gl_args(chromium),
         "--lang=en-US",
         "--window-size=1920,1080",
         f"--user-agent={desktop_chrome_user_agent(chromium)}",
