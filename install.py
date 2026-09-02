@@ -2,22 +2,15 @@
 """
 Bootstrap a project-local Python virtual environment for Overdrive automation.
 
-- Creates ./virtual_env next to this script
-- Installs Python deps into the venv (requests, httpx, scapy, zeroconf)
-- Installs OS deps via apt (Ubuntu/Debian), dnf (Fedora/RHEL), or apk (Alpine) —
-  including curl/iproute/iptables/ping/WireGuard tools (distro package names vary;
-  Debian uses ``iputils-ping``), network diagnostics (nmap, dig, tcpdump), and a
-  Chromium for browser probes
-- Applies file capabilities to the venv interpreter (so Scapy can use raw sockets without sudo)
-- Runs non-interactively by default; use ``--interactive`` to drop into an
-  activated shell after install. Privileged commands use ``sudo -n``. If
-  passwordless sudo is missing, the installer installs
-  ``/etc/sudoers.d/overdrive`` (one interactive password when a TTY is
-  available) so the rest of the run stays non-interactive.
+- Creates ``virtual_env`` next to this script (``/root/virtual_env`` on lab guests)
+- Installs **all Python libraries only into that venv** via pip (never system-wide)
+- Installs OS binaries separately via apt/dnf/apk (Chromium, nmap, iptables, …)
+- Applies file capabilities to the venv interpreter (raw network capture without sudo)
+- Runs inside the project venv after creating it (re-execs automatically)
+- Runs non-interactively by default; use ``--interactive`` for an activated shell
 
 The test client primes by copying this script to ``/root`` and running it
-with ``--non-interactive`` (do not apk-add those checker packages in
-``package_assets.py``).
+with ``--non-interactive``. All apt/apk/dnf package installs happen here.
 """
 
 import argparse
@@ -35,18 +28,28 @@ import venv
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-VENV_DIR = REPO_ROOT / "virtual_env"
+VENV_DIR = Path(os.environ.get("OVERDRIVE_VENV_DIR", str(REPO_ROOT / "virtual_env")))
 SUDOERS_DROP_IN = Path("/etc/sudoers.d/overdrive")
 
-PY_DEPS = [
+# Every third-party Python dependency used by detections/ and local_host/.
+# Installed exclusively into the venv — never via apt/apk/dnf python-* packages.
+PYTHON_VENV_PACKAGES: tuple[str, ...] = (
     "requests",
-    "httpx[http2]",
+    "httpx[http2]",  # VPN TLS probe + h2/hpack for HTTP/2 helpers
     "scapy",
-    "zeroconf",
-]
+    "zeroconf",  # mDNS mesh/consumer probes
+)
 
 PIP_INSTALL_TIMEOUT_SECONDS = "20"
 PIP_INSTALL_RETRIES = "2"
+USING_VENV_ENV = "OVERDRIVE_INSTALL_IN_VENV"
+
+# Minimal OS packages needed before the rest of install_system_deps (and for lab guests).
+BOOTSTRAP_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
+    "apt": ("bash", "python3", "tzdata", "ca-certificates"),
+    "apk": ("bash", "python3", "tzdata", "iptables"),
+    "dnf": ("python3",),
+}
 
 # OS packages that provide the ``dig`` CLI (name differs by distro).
 DIG_PACKAGE_BY_MGR = {
@@ -56,13 +59,27 @@ DIG_PACKAGE_BY_MGR = {
 }
 
 # Core networking packages used by the test client (and useful on hosts).
-# Installed here — not by VM/alpine_client/package_assets.py.
+# Installed here — not by VM client package_assets stubs.
 # Package names differ by distro (Debian has iputils-ping, not iputils).
 NET_BASE_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
-    "apt": ("curl", "iproute2", "iptables", "iputils-ping", "wireguard-tools", "openssl"),
+    "apt": (
+        "curl",
+        "iproute2",
+        "iptables",
+        "iputils-ping",
+        "wireguard-tools",
+        "openssl",
+        "isc-dhcp-client",
+        "ca-certificates",
+    ),
     "dnf": ("curl", "iproute", "iptables", "iputils", "wireguard-tools", "openssl"),
     "apk": ("curl", "iproute2", "iptables", "iputils", "wireguard-tools", "openssl"),
 }
+
+APT_PYTHON_PACKAGES: tuple[str, ...] = (
+    "python3-venv",
+    "python3-dev",
+)
 
 ALPINE_REQUIRED_BROWSER_PACKAGES: tuple[str, ...] = (
     "xvfb",
@@ -70,10 +87,36 @@ ALPINE_REQUIRED_BROWSER_PACKAGES: tuple[str, ...] = (
 )
 
 BROWSER_DISPLAY_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
-    "apt": ("xvfb",),
+    "apt": ("xvfb", "dbus", "dbus-x11"),
     "dnf": ("xorg-x11-server-Xvfb",),
     "apk": ALPINE_REQUIRED_BROWSER_PACKAGES,
 }
+
+# Debian/Kali browser fidelity packages (fonts, GL, audio). Optional misses are tolerated.
+APT_BROWSER_SUPPORT_PACKAGES: tuple[str, ...] = (
+    "fontconfig",
+    "fonts-dejavu-core",
+    "fonts-liberation",
+    "fonts-noto-color-emoji",
+    "libfontconfig1",
+    "libfreetype6",
+    "libharfbuzz0b",
+    "libasound2",
+    "libegl1",
+    "libgl1",
+    "libgbm1",
+    "libnss3",
+    "libxss1",
+    "libatk-bridge2.0-0",
+    "libgtk-3-0",
+    "libx11-xcb1",
+    "libxcomposite1",
+    "libxdamage1",
+    "libxrandr2",
+    "libxi6",
+    "libdrm2",
+    "mesa-utils",
+)
 
 # Runtime assets used by the Test client's normal Chromium DevTools probes.
 # Optional font/media packages improve fidelity, but a miss should not stop VM creation.
@@ -175,8 +218,8 @@ def get_linux_info():
             "7zip_sets": [["p7zip-full"], ["p7zip"], ["7zip"]],
             "guestfs_sets": [["libguestfs-tools"], ["guestfs-tools"]],
             "cap_provider_sets": [["libcap2-bin"], ["libcap-bin"]],
-            "chrome_cmd": "google-chrome",
-            "chrome_packages": [],
+            "chrome_cmd": "chromium",
+            "chrome_packages": ["chromium"],
             "socat": "socat",
             "minicom": "minicom",
             "nmap": "nmap",
@@ -706,10 +749,16 @@ def install_system_deps(*, non_interactive: bool = False):
     mgr = info["mgr"]
     print(f"Detected {mgr} package manager. Installing system deps...")
 
-    if mgr == "apk":
-        enable_alpine_community_repo()
-        print("[*] apk update...")
-        run_cmd(["apk", "update"], non_interactive=non_interactive)
+    install_bootstrap_os_packages(non_interactive=non_interactive)
+
+    if mgr == "apt":
+        py_needed = [pkg for pkg in APT_PYTHON_PACKAGES if not package_installed(info, pkg)]
+        if py_needed:
+            print(
+                f"[*] Installing Python venv bootstrap packages (not Python libs): "
+                f"{' '.join(py_needed)}..."
+            )
+            install_packages(info, py_needed, non_interactive=non_interactive)
 
     # 1) libpcap
     if not package_installed(info, info["pcap"]):
@@ -790,6 +839,27 @@ def install_system_deps(*, non_interactive: bool = False):
             + " ".join(display_missing)
         )
         install_packages(info, display_missing, non_interactive=non_interactive)
+
+    if mgr == "apt":
+        missing_browser_bits = []
+        if not browser_binary_for_info(info):
+            missing_browser_bits.append("chromium")
+        if not have_cmd("Xvfb"):
+            missing_browser_bits.append("Xvfb")
+        if not (have_cmd("dbus-run-session") or have_cmd("dbus-daemon")):
+            missing_browser_bits.append("dbus")
+        if missing_browser_bits:
+            raise RuntimeError(
+                "Debian/Kali browser runtime is incomplete after package install: missing "
+                + ", ".join(missing_browser_bits)
+                + ". Browser detections need Chromium, Xvfb, and D-Bus."
+            )
+        install_optional_packages(
+            info,
+            list(APT_BROWSER_SUPPORT_PACKAGES),
+            non_interactive=non_interactive,
+        )
+        refresh_font_cache_if_available()
 
     if mgr == "apk":
         missing_browser_commands = []
@@ -913,10 +983,10 @@ def apply_network_capabilities(interpreter_path: Path, *, non_interactive: bool 
             use_sudo=True,
             non_interactive=non_interactive,
         )
-        print("[+] Success! Run Scapy with this venv Python (or after activate).")
+        print("[+] Network capabilities applied to venv Python (raw capture without sudo).")
     except subprocess.CalledProcessError:
         print(
-            "[-] Failed to apply setcap. Install completed, but Scapy capture "
+            "[-] Failed to apply setcap. Install completed, but raw network capture "
             "probes may require root or passwordless sudo."
         )
     except FileNotFoundError:
@@ -956,7 +1026,7 @@ def ensure_venv_support(*, non_interactive: bool = False):
     elif mgr == "apk":
         enable_alpine_community_repo()
         run_cmd(["apk", "update"], non_interactive=non_interactive)
-        candidates = ["py3-pip", "python3"]
+        candidates = ["python3"]
     else:  # dnf
         candidates = [f"python{pyver}-venv", "python3-venv"]
 
@@ -1016,6 +1086,59 @@ def venv_python_path(venv_dir: Path) -> Path:
     return venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / (
         "python.exe" if sys.platform == "win32" else "python"
     )
+
+
+def in_project_venv() -> bool:
+    if os.environ.get(USING_VENV_ENV) == "1":
+        return True
+    try:
+        return Path(sys.executable).resolve() == venv_python_path(VENV_DIR).resolve()
+    except OSError:
+        return False
+
+
+def venv_activation_env(python_exe: str) -> dict[str, str]:
+    env = os.environ.copy()
+    venv_dir = VENV_DIR.resolve()
+    env["VIRTUAL_ENV"] = str(venv_dir)
+    env[USING_VENV_ENV] = "1"
+    bin_dir = str((venv_dir / ("Scripts" if sys.platform == "win32" else "bin")).resolve())
+    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def apply_venv_activation(python_exe: str) -> None:
+    for key, value in venv_activation_env(python_exe).items():
+        os.environ[key] = value
+
+
+def reexec_in_project_venv(python_exe: str) -> None:
+    """Continue install.py inside the project venv (never returns)."""
+    script = str(Path(__file__).resolve())
+    os.execve(python_exe, [python_exe, script, *sys.argv[1:]], venv_activation_env(python_exe))
+
+
+def install_bootstrap_os_packages(*, non_interactive: bool = False) -> None:
+    """Install the smallest OS set required before the full dependency pass."""
+    info = get_linux_info()
+    if not info:
+        return
+    mgr = info["mgr"]
+    if mgr == "apk":
+        enable_alpine_community_repo()
+        run_cmd(["apk", "update"], non_interactive=non_interactive)
+
+    packages = list(BOOTSTRAP_PACKAGES_BY_MGR.get(mgr, ()))
+    needed = [pkg for pkg in packages if not package_installed(info, pkg)]
+    if mgr == "apk" and not have_cmd("python3") and "python3" not in needed:
+        needed.append("python3")
+    if mgr == "apt" and not have_cmd("python3") and "python3" not in needed:
+        needed.append("python3")
+    if not needed:
+        print("[*] Bootstrap OS packages already present.")
+        return
+    print(f"[*] Installing bootstrap OS packages: {' '.join(needed)}...")
+    install_packages(info, needed, non_interactive=non_interactive)
 
 
 def remove_tree_best_effort(path: Path) -> None:
@@ -1111,33 +1234,84 @@ def ensure_venv_pip(python_exe: str) -> None:
         subprocess.check_call([python_exe, str(get_pip)])
 
 
+def pip_env_for_venv() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PIP_DEFAULT_TIMEOUT", PIP_INSTALL_TIMEOUT_SECONDS)
+    env.setdefault("PIP_RETRIES", PIP_INSTALL_RETRIES)
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PIP_NO_INPUT"] = "1"
+    return env
+
+
+def verify_venv_imports(python_exe: str) -> None:
+    """Fail fast if any required Python package is missing from the venv."""
+    modules = tuple(pkg.split("[", 1)[0] for pkg in PYTHON_VENV_PACKAGES)
+    probe = (
+        "import importlib.util, sys\n"
+        f"mods = {modules!r}\n"
+        "missing = [m for m in mods if importlib.util.find_spec(m) is None]\n"
+        "missing and sys.exit('missing: ' + ', '.join(missing))\n"
+    )
+    subprocess.run([python_exe, "-c", probe], check=True)
+
+
+def install_python_packages_in_venv(python_exe: str) -> None:
+    """Install every Python dependency into the project venv via pip."""
+    pip_env = pip_env_for_venv()
+    print(f"[*] Upgrading pip/setuptools/wheel in {VENV_DIR}...")
+    subprocess.check_call(
+        [
+            python_exe,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--prefer-binary",
+            "--timeout",
+            PIP_INSTALL_TIMEOUT_SECONDS,
+            "--retries",
+            PIP_INSTALL_RETRIES,
+            "--upgrade",
+            "pip",
+            "setuptools",
+            "wheel",
+        ],
+        env=pip_env,
+    )
+    print(
+        "[*] Installing Python packages into venv only: "
+        + ", ".join(PYTHON_VENV_PACKAGES)
+    )
+    subprocess.check_call(
+        [
+            python_exe,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--prefer-binary",
+            "--timeout",
+            PIP_INSTALL_TIMEOUT_SECONDS,
+            "--retries",
+            PIP_INSTALL_RETRIES,
+            *PYTHON_VENV_PACKAGES,
+        ],
+        env=pip_env,
+    )
+    print("[*] Verifying venv imports...")
+    verify_venv_imports(python_exe)
+    print(f"[+] Python libraries installed in {VENV_DIR}")
+
+
 def build_python_venv() -> str:
     remove_existing_venv()
     try:
         python_exe = create_fresh_venv()
         ensure_venv_pip(python_exe)
-        print("Installing Python packages into venv...")
-        pip_env = os.environ.copy()
-        pip_env.setdefault("PYTHONUNBUFFERED", "1")
-        pip_env.setdefault("PIP_DEFAULT_TIMEOUT", PIP_INSTALL_TIMEOUT_SECONDS)
-        pip_env.setdefault("PIP_RETRIES", PIP_INSTALL_RETRIES)
-        subprocess.check_call(
-            [
-                python_exe,
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-input",
-                "--prefer-binary",
-                "--timeout",
-                PIP_INSTALL_TIMEOUT_SECONDS,
-                "--retries",
-                PIP_INSTALL_RETRIES,
-                *PY_DEPS,
-            ],
-            env=pip_env,
-        )
+        install_python_packages_in_venv(python_exe)
     except BaseException:
         remove_tree_best_effort(VENV_DIR)
         raise
@@ -1155,33 +1329,34 @@ def main():
     global APT_LOCK_WAIT_SECONDS
     APT_LOCK_WAIT_SECONDS = max(0, args.apt_lock_wait)
 
-    # 0) Ensure sudo -n works for apt/setcap (may prompt once to install sudoers).
-    if sys.platform != "win32":
-        ensure_passwordless_sudo()
+    if not in_project_venv():
+        # Phase 1 — system Python creates the venv, then re-exec inside it.
+        if sys.platform != "win32":
+            ensure_passwordless_sudo()
+        ensure_venv_support(non_interactive=args.non_interactive)
+        python_exe = build_python_venv()
+        if sys.platform == "win32":
+            apply_venv_activation(python_exe)
+        else:
+            reexec_in_project_venv(python_exe)
 
-    # 1) Ensure host python can create venvs with pip
-    ensure_venv_support(non_interactive=args.non_interactive)
+    python_exe = str(venv_python_path(VENV_DIR))
+    print(f"[*] Install running inside virtualenv: {VENV_DIR}")
 
-    # 1-2) Always delete and recreate the venv, then install Python libs.
-    # If the old venv is locked, fail instead of reusing it.
-    python_exe = build_python_venv()
-
-    # 3) Install system deps (apt/dnf/apk)
+    # Phase 2 — all apt/apk/dnf installs and setcap, still inside the venv process.
     install_system_deps(non_interactive=args.non_interactive)
 
     print(f"\nSuccess! Virtual environment is ready on {distro_success_label()}.")
+    print(f"  Python libs: {VENV_DIR}")
 
-    # 4) Apply capabilities only when bootstrapping from system Python.
-    if sys.platform != "win32" and sys.prefix == sys.base_prefix:
-        print("[*] Running from system Python; applying capabilities to venv interpreter.")
+    if sys.platform != "win32":
+        print("[*] Applying network capabilities to venv interpreter.")
         apply_network_capabilities(
             Path(python_exe),
             non_interactive=args.non_interactive,
         )
 
-    # 5) Enter shell with venv activated
     if args.non_interactive:
-        print(f"Activate it later with: source {VENV_DIR / 'bin' / 'activate'}")
         return 0
 
     print("Entering virtual environment... (Type 'exit' to leave)")

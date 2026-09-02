@@ -43,6 +43,14 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from detections.common.common_runner import file_matches_pattern
+from detections.common.browser_logging import (
+    blog_debug,
+    blog_error,
+    blog_info,
+    blog_probe_end,
+    blog_probe_start,
+    init_browser_log_session,
+)
 
 # Longer capture + scapy startup
 SUDO_SCRIPT_TIMEOUT_SEC = 180
@@ -324,11 +332,12 @@ def _wait_for_process_callback(
         except subprocess.TimeoutExpired:
             elapsed = int(time.monotonic() - started)
             if progress_label:
-                print(
-                    f"  … waiting on {progress_label} "
-                    f"({elapsed}s elapsed; safety expiration {expiration_sec}s)",
-                    flush=True,
+                msg = (
+                    f"waiting on {progress_label} "
+                    f"({elapsed}s elapsed; safety expiration {expiration_sec}s)"
                 )
+                blog_debug(msg, label=progress_label, elapsed_sec=elapsed, expiration_sec=expiration_sec)
+                print(f"  … {msg}", flush=True)
 
     if os.name != "nt":
         try:
@@ -808,6 +817,9 @@ def _run_detection_script(
         print("  (running with sudo -n — needs NOPASSWD for capture scripts; see README)")
 
     timeout_for_script = _timeout_for_script(folder, script_name, script_timeout)
+    probe_started = None
+    if folder == "browser":
+        probe_started = blog_probe_start(script_name, timeout_sec=timeout_for_script)
 
     output, error, returncode = run_script(
         script_path,
@@ -824,6 +836,8 @@ def _run_detection_script(
                 "(not a valid 1-5 score)"
             )
         print(f"  ❌ {detail}")
+        if folder == "browser" and probe_started is not None:
+            blog_probe_end(script_name, started_at=probe_started, score="Error", error=detail)
         return script_name, "Error", detail[:500]
 
     if error or returncode != 0:
@@ -833,6 +847,8 @@ def _run_detection_script(
         if scored == "Error":
             detail = comment or error or "Non-zero exit"
             print(f"  ❌ {detail[:200]}")
+            if folder == "browser" and probe_started is not None:
+                blog_probe_end(script_name, started_at=probe_started, score="Error", error=detail)
             return script_name, "Error", detail[:500]
         detail = error or "Non-zero exit"
         tail = (output or "").strip().splitlines()
@@ -840,17 +856,23 @@ def _run_detection_script(
         if tail:
             hint = " | " + tail[-1][-200:]
         print(f"  ❌ {detail}{hint}")
+        if folder == "browser" and probe_started is not None:
+            blog_probe_end(script_name, started_at=probe_started, score="Error", error=detail)
         return script_name, "Error", (detail + (hint or ""))[:500]
 
     score, comment = extract_score(output)
     score, comment = _invalidate_timeout_score(score, comment, output, "")
     if score == "Error":
         print(f"  ❌ {comment[:200] if comment else 'Error'}")
+        if folder == "browser" and probe_started is not None:
+            blog_probe_end(script_name, started_at=probe_started, score="Error", error=comment or "Error")
         return script_name, "Error", (comment or "Error")[:500]
 
     print(f"  ✓ Score: {score}")
     if comment:
         print(f"    → {comment[:100]}")
+    if folder == "browser" and probe_started is not None:
+        blog_probe_end(script_name, started_at=probe_started, score=str(score), comment=comment or "")
     return script_name, score, comment
 
 
@@ -905,6 +927,9 @@ def collect_browser_detection_results(
         print(f"\n{'=' * 40}")
         print(f"FOLDER: {folder.upper()}")
         print(f"{'=' * 40}")
+        log_path = init_browser_log_session(label="browser-detections")
+        if log_path:
+            blog_info("browser detection batch", log_path=str(log_path), scripts=len(script_names))
         if os.environ.get("OVERDRIVE_DIRECT_CHROME_ATTACH_PORT"):
             print("Browser probes attach to the shared Chromium session.")
         else:

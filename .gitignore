@@ -102,7 +102,7 @@ VM/apply_mullvad_dot.sh
 *.png
 TODO.md
 
-# --- Temporary scratch files ---
+# --- Temporary files ---
 _tmp*
 _temp*
 tmp_*

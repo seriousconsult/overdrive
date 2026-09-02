@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import uuid
 from pathlib import Path
 
 
@@ -19,6 +20,9 @@ G3100_MAC_OUI = "3cbdc5"
 # Dell Inc. PC NIC OUI for the test client - not VirtualBox 080027,
 # and not the router G3100 OUI, so router vs client stay distinct on the wire.
 CLIENT_NIC_OUI = "001422"
+
+# Intel Corp. OUI for the Kali test clientk — distinct from Alpine client and router.
+CLIENTK_NIC_OUI = "001b21"
 
 
 def _load_vm_env(path: Path = VM_ENV_PATH) -> None:
@@ -70,12 +74,17 @@ OPENWRT_LAN_DNS = OPENWRT_LAN_IP
 OPENWRT_STUBBY_LISTEN = "127.0.0.1#5453"
 
 ALPINE_CLIENT_ROOT_PASSWORD_ENV = "ALPINE_CLIENT_ROOT_PASSWORD"
+KALI_CLIENT_ROOT_PASSWORD_ENV = "KALI_CLIENT_ROOT_PASSWORD"
 OPENWRT_ROOT_PASSWORD_ENV = "OPENWRT_ROOT_PASSWORD"
 OSBOXES_LOGIN_PASSWORD_ENV = "OSBOXES_LOGIN_PASSWORD"
 
 
 def alpine_client_root_password() -> str:
     return vm_secret(ALPINE_CLIENT_ROOT_PASSWORD_ENV, min_len=1)
+
+
+def kali_client_root_password() -> str:
+    return vm_secret(KALI_CLIENT_ROOT_PASSWORD_ENV, min_len=1)
 
 
 def openwrt_root_password() -> str:
@@ -94,6 +103,16 @@ def random_g3100_mac_vbox(*, oui: str = G3100_MAC_OUI) -> str:
 def random_client_mac_vbox(*, oui: str = CLIENT_NIC_OUI) -> str:
     """Return a random Dell-style client MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
     return _random_mac_vbox(oui)
+
+
+def random_clientk_mac_vbox(*, oui: str = CLIENTK_NIC_OUI) -> str:
+    """Return a random clientk MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
+    return _random_mac_vbox(oui)
+
+
+def random_vbox_hardware_uuid() -> str:
+    """Return a fresh SMBIOS/hardware UUID for ``VBoxManage modifyvm --hardwareuuid``."""
+    return str(uuid.uuid4())
 
 
 def _random_mac_vbox(oui: str) -> str:

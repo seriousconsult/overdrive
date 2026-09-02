@@ -33,11 +33,11 @@ Serial console endpoint:
       disconnects with Ctrl-].
 
   * Native Linux host / Linux VirtualBox:
-      VirtualBox exposes the Unix socket ``/tmp/Test_Client_serial.sock``. After the VM
+      VirtualBox exposes the Unix socket ``/tmp/Test_Clienta_serial.sock``. After the VM
       starts, run ``socat`` in one terminal to create a PTY, then attach ``screen`` in another:
-        rm -f /tmp/Test_Client_serial.pty
-        socat -d -d UNIX-CONNECT:/tmp/Test_Client_serial.sock PTY,link=/tmp/Test_Client_serial.pty,raw,echo=0
-        screen /tmp/Test_Client_serial.pty 115200
+        rm -f /tmp/Test_Clienta_serial.pty
+        socat -d -d UNIX-CONNECT:/tmp/Test_Clienta_serial.sock PTY,link=/tmp/Test_Clienta_serial.pty,raw,echo=0
+        screen /tmp/Test_Clienta_serial.pty 115200
 
 
 Username: root
@@ -129,6 +129,7 @@ from VM.alpine_client.pipeline import (
     AlpineClientBuildOptions,
     BuildStep,
     run_alpine_client_pipeline,
+    validate_client_pipeline_order,
 )
 from VM.alpine_client.guest_prime import (
     ClientPrimeAssets,
@@ -162,16 +163,6 @@ CLIENT_PIPELINE_ORDER = (
     "vbox.storage",
     "vbox.start",
 )
-
-
-def validate_client_pipeline_order(steps: list[BuildStep]) -> None:
-    actual = tuple(step.id for step in steps)
-    if actual != CLIENT_PIPELINE_ORDER:
-        raise RuntimeError(
-            "Alpine client pipeline order changed unexpectedly.\n"
-            f"Expected: {', '.join(CLIENT_PIPELINE_ORDER)}\n"
-            f"Actual:   {', '.join(actual)}"
-        )
 
 
 def _find_existing_fixed_appliance_dir() -> str | None:
@@ -893,8 +884,8 @@ def setup_client_vm(
             vm_base,
             medium_path_for_vbox=wsl_to_windows_path(vdi_wsl) if paths["is_wsl"] else vdi_wsl,
         )
-        # Drop pre-rename lab VM if it is still registered.
-        for legacy_name in ("OpenWrt_LAN_Client_Alpine", "OpenWrt_LAN_Client"):
+        # Drop pre-rename lab VMs if they are still registered.
+        for legacy_name in ("Test_Client", "OpenWrt_LAN_Client_Alpine", "OpenWrt_LAN_Client"):
             if legacy_name == VM_NAME or not vm_is_registered(vboxmanage, legacy_name):
                 continue
             legacy_base = os.path.join(vms_root, legacy_name)
@@ -1101,7 +1092,7 @@ def setup_client_vm(
             extra_args = ["--force-interactive-serial", "--serial-port", str(ALPINE_SERIAL_TCP_PORT)]
             spawned = spawn_serial_console_window(
                 Path(__file__).resolve(),
-                title=f"Test client serial ({ALPINE_SERIAL_TCP_PORT})",
+                title=f"Test clienta serial ({ALPINE_SERIAL_TCP_PORT})",
                 extra_args=extra_args,
                 cwd=Path(SCRIPT_DIR),
             )
@@ -1165,14 +1156,14 @@ def setup_client_vm(
         ),
     ]
 
-    validate_client_pipeline_order(steps)
+    validate_client_pipeline_order(steps, CLIENT_PIPELINE_ORDER)
     run_alpine_client_pipeline(steps)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Create / configure Alpine Linux router-lab client VM.")
     ap.add_argument("--no-start", action="store_true", help="Configure the VM but do not start it.")
-    ap.add_argument("--serial-only", action="store_true", help="Open serial console for already running test client.")
+    ap.add_argument("--serial-only", action="store_true", help="Open serial console for already running test clienta.")
     ap.add_argument("--serial-here", action="store_true", help="Attach to serial directly in this console window.")
     ap.add_argument("--force-interactive-serial", action="store_true", help="Forces interactive socket bridge on startup.")
     ap.add_argument("--serial-port", type=int, default=ALPINE_SERIAL_TCP_PORT, help="TCP port for serial console.")
@@ -1193,7 +1184,7 @@ if __name__ == "__main__":
         if ns.serial_only and not ns.serial_here:
             extra_args=["--force-interactive-serial"] if ns.force_interactive_serial else []
             extra_args.extend(["--serial-port", str(ns.serial_port)])
-            spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"Test client serial ({ns.serial_port})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
+            spawned = spawn_serial_console_window(Path(__file__).resolve(), title=f"Test clienta serial ({ns.serial_port})", extra_args=extra_args, cwd=Path(SCRIPT_DIR))
             if spawned:
                 raise SystemExit(0)
         connect_serial_console(vboxmanage, serial_endpoint, force_interactive=ns.force_interactive_serial or ns.serial_here)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from detections.common.common_vm import TEST_CLIENT_VM_NAME, TEST_LAN_INTNET_NAME
+from detections.common.common_vm import TEST_CLIENTA_VM_NAME, TEST_LAN_INTNET_NAME
 
 __all__ = [
     "ALPINE_CLIENT_DIR",
@@ -28,10 +28,10 @@ REPO_ROOT = str(ALPINE_CLIENT_DIR.parents[1])
 CREATE_SCRIPT_NAME = "create_VM_client_browser_pipe_alpine.py"
 
 LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
-VM_NAME = TEST_CLIENT_VM_NAME
+VM_NAME = TEST_CLIENTA_VM_NAME
 CLIENT_VDI_NAME = "client_browser_alpine.vdi"
 CLIENT_VM_CPUS = 1
-CLIENT_GUEST_HOSTNAME = "client"
+CLIENT_GUEST_HOSTNAME = "clienta"
 # Chromium + detection Python libs need more than the tiny cloud image default.
 CLIENT_VDI_SIZE_MIB = 8192
 CLIENT_MEMORY_MIB = 2048

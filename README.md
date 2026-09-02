@@ -102,7 +102,7 @@ python3 local_host/wsl_config.py
 - **LAN checks:** run from the client VM on `test-lan`; target the router LAN IP, usually `192.168.50.1`.
 - The WSL/Linux host cannot directly reach VirtualBox `intnet` LANs.
 - The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
-- The test client uses hostname `client`, a fresh Dell NIC MAC, tame DHCP client identity, cleared `machine-id`, and a generic timezone User-Agent at build time. Rebuild the Alpine VM after changing those settings. LAN silence is still expected and discovery probes may still score it as lab-like.
+- The test clienta uses hostname `clienta`, a fresh Dell NIC MAC, tame DHCP client identity, cleared `machine-id`, and a generic timezone User-Agent at build time. Rebuild the Alpine VM after changing those settings. LAN silence is still expected and discovery probes may still score it as lab-like.
 - Test client checker/network deps are installed by guest `install.py` during VDI prime (Python libs into `/root/virtual_env`; curl, iproute2, iputils, wireguard-tools, nmap, dig, tcpdump, Chromium via apk). Bootstrap image install keeps `bash` / `python3` / `tzdata` / `iptables` (so `client-firewall` works without `install.py`). Rebuild the client after changing bootstrap packages or `install.py`.
 
 Verify wiring:

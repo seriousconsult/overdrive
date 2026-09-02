@@ -1,52 +1,29 @@
-"""Guest shell/OpenRC assets and virt-customize command strings."""
+"""Guest shell/systemd assets and virt-customize command strings."""
 
 from __future__ import annotations
 
-from VM.alpine_client.client_config import CLIENT_GUEST_HOSTNAME
-from VM.guest_launch_identity import LAUNCH_IDENTITY_INIT_ALPINE, LAUNCH_IDENTITY_SCRIPT
+from VM.kali_client.client_config import CLIENT_GUEST_HOSTNAME
+from VM.guest_launch_identity import LAUNCH_IDENTITY_SCRIPT, LAUNCH_IDENTITY_SERVICE_SYSTEMD
 from VM.vm_config import OPENWRT_LAN_DNS
 
 __all__ = [
     "ASSERT_NO_REMOTE_BOOT_HOOKS_COMMAND",
     "CLEAN_CLIENT_PRIME_HELPERS_COMMAND",
     "CLIENT_IDENTITY_COMMAND",
-    "CLIENT_IP_TIMEZONE_INIT_ALPINE",
     "CLIENT_IP_TIMEZONE_SCRIPT",
+    "CLIENT_IP_TIMEZONE_SERVICE",
     "CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND",
     "INSTALL_DETECTION_LIBRARIES_COMMAND",
-    "LAUNCH_IDENTITY_INIT_ALPINE",
     "LAUNCH_IDENTITY_SCRIPT",
-    "REMOVE_CLIENT_INSTALL_PY_COMMAND",
-    "LAB_INTERFACES_ALPINE",
+    "LAUNCH_IDENTITY_SERVICE",
     "LAB_NET_TROUBLESHOOT_SCRIPT",
-    "LAB_NET_UP_INIT_ALPINE",
     "LAB_NET_UP_SCRIPT",
+    "LAB_NET_UP_SERVICE",
     "REMOTE_BOOT_SERVICE_CLEANUP_COMMAND",
+    "REMOVE_CLIENT_INSTALL_PY_COMMAND",
 ]
 
-LAB_INTERFACES_ALPINE = """auto lo
-iface lo inet loopback
-
-auto eth0
-iface eth0 inet dhcp
-"""
-
-LAB_NET_UP_INIT_ALPINE = """#!/sbin/openrc-run
-description="Lab LAN: link up + DHCP"
-
-depend() {
-    need localmount client-firewall
-    after bootmisc
-}
-
-start() {
-    ebegin "Starting lab-net-up"
-    /usr/local/sbin/lab-net-up
-    eend $?
-}
-"""
-
-LAB_NET_UP_SCRIPT = f"""#!/bin/sh
+LAB_NET_UP_SCRIPT = f"""#!/bin/bash
 # Bring up Ethernet NICs and request DHCP from OpenWrt when still unaddressed.
 set -u
 ok=0
@@ -59,8 +36,9 @@ for path in /sys/class/net/*; do
     ok=1
     continue
   fi
-  # Neutral DHCP identity: send generic hostname, empty vendor class (no alpine/overdrive).
-  if udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V ""; then
+  # Neutral DHCP identity: generic hostname, no vendor class (no kali/overdrive).
+  if dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
+      -H {CLIENT_GUEST_HOSTNAME} "$IFACE"; then
     ok=1
   fi
 done
@@ -68,11 +46,25 @@ ip -4 route show default 2>/dev/null | grep -q . && exit 0
 [ "$ok" -eq 1 ]
 """
 
-LAB_NET_TROUBLESHOOT_SCRIPT = f"""#!/bin/sh
-# Installed by create_VM_client_browser_pipe_alpine.py
+LAB_NET_UP_SERVICE = """[Unit]
+Description=Lab LAN: link up + DHCP
+After=local-fs.target client-firewall.service
+Before=network-online.target overdrive-ip-timezone.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/lab-net-up
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+LAB_NET_TROUBLESHOOT_SCRIPT = f"""#!/bin/bash
+# Installed by create_VM_client_kali.py
 set -u
 echo "================================================================"
-echo " Lab network troubleshoot (test client on test-lan)"
+echo " Lab network troubleshoot (test clientk on test-lan)"
 echo "================================================================"
 echo ""
 echo "=== IPv4 addresses ==="
@@ -103,13 +95,15 @@ for IFACE in /sys/class/net/*; do
   IFACE=$(basename "$IFACE")
   [ "$IFACE" = lo ] && continue
   [ ! -e "/sys/class/net/$IFACE/device" ] && continue
-  echo "--- link up + udhcpc $IFACE ---"
+  echo "--- link up + dhclient $IFACE ---"
   if [ "$(id -u)" -eq 0 ]; then
     ip link set "$IFACE" up 2>&1 || true
-    udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V "" 2>&1 || true
+    dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
+      -H {CLIENT_GUEST_HOSTNAME} "$IFACE" 2>&1 || true
   else
     sudo ip link set "$IFACE" up 2>&1 || true
-    sudo udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V "" 2>&1 || true
+    sudo dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
+      -H {CLIENT_GUEST_HOSTNAME} "$IFACE" 2>&1 || true
   fi
 done
 echo ""
@@ -132,7 +126,7 @@ if command -v dig >/dev/null 2>&1; then
 fi
 """
 
-CLIENT_IP_TIMEZONE_SCRIPT = r"""#!/bin/sh
+CLIENT_IP_TIMEZONE_SCRIPT = r"""#!/bin/bash
 # Set the test client's timezone to the timezone reported for its current egress IP.
 #
 # This intentionally changes only the local timezone presentation
@@ -201,7 +195,7 @@ sync_timezone() {
   while [ "$i" -le "$attempts" ]; do
     tz="$(fetch_timezone 2>>"$LOG" || true)"
     if valid_tz "$tz"; then
-      cp "$TZDIR/$tz" /etc/localtime
+      ln -sf "$TZDIR/$tz" /etc/localtime
       echo "$tz" > /etc/timezone
       log "timezone set to $tz from current egress IP"
       date >> "$LOG" 2>&1 || true
@@ -223,30 +217,30 @@ case "${1:-sync}" in
 esac
 """
 
-CLIENT_IP_TIMEZONE_INIT_ALPINE = """#!/sbin/openrc-run
-description="Set client timezone from current egress IP"
+CLIENT_IP_TIMEZONE_SERVICE = """[Unit]
+Description=Set client timezone from current egress IP
+After=lab-net-up.service network-online.target
+Wants=network-online.target
 
-depend() {
-    need net
-    after lab-net-up networking
-}
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/overdrive-ip-timezone sync 18
 
-start() {
-    ebegin "Syncing timezone to egress IP"
-    /usr/local/sbin/overdrive-ip-timezone sync 18
-    eend $?
-}
+[Install]
+WantedBy=multi-user.target
 """
+
+LAUNCH_IDENTITY_SERVICE = LAUNCH_IDENTITY_SERVICE_SYSTEMD
 
 CLIENT_IDENTITY_COMMAND = (
     "mkdir -p /usr/local/sbin /root && "
-    f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname"
+    f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname && "
+    f"hostnamectl set-hostname {CLIENT_GUEST_HOSTNAME} 2>/dev/null || true"
 )
 
 INSTALL_DETECTION_LIBRARIES_COMMAND = (
-    "timeout 900 sh -lc "
-    "'cd /root && (command -v python3 >/dev/null || apk add --no-cache python3) && "
-    "env PYTHONUNBUFFERED=1 PIP_DEFAULT_TIMEOUT=20 PIP_RETRIES=2 "
+    "timeout 900 bash -lc "
+    "'cd /root && env PYTHONUNBUFFERED=1 PIP_DEFAULT_TIMEOUT=20 PIP_RETRIES=2 "
     "python3 /root/install.py --non-interactive'"
 )
 
@@ -263,82 +257,55 @@ CLEAN_CLIENT_PRIME_HELPERS_COMMAND = (
 )
 
 REMOTE_BOOT_SERVICE_CLEANUP_COMMAND = (
-    "for svc in sshd ssh dropbear tiny-cloud-boot tiny-cloud-early tiny-cloud-main "
-    "tiny-cloud-final cloud-init cloud-final; do "
-    "rm -f \"/etc/init.d/$svc\" \"/etc/conf.d/$svc\" 2>/dev/null || true; "
-    "for level in default boot sysinit shutdown nonetwork; do "
-    "rc-update del \"$svc\" \"$level\" >/dev/null 2>&1 || true; "
-    "rm -f \"/etc/runlevels/$level/$svc\" 2>/dev/null || true; "
+    "for svc in ssh sshd ssh.service sshd.service dropbear "
+    "cloud-init cloud-init-local cloud-config cloud-final "
+    "NetworkManager NetworkManager-wait-online; do "
+    "systemctl stop \"$svc\" >/dev/null 2>&1 || true; "
+    "systemctl disable \"$svc\" >/dev/null 2>&1 || true; "
+    "systemctl mask \"$svc\" >/dev/null 2>&1 || true; "
     "done; "
-    "done && "
-    "rm -f /etc/tiny-cloud.conf 2>/dev/null || true"
+    "touch /etc/cloud/cloud-init.disabled 2>/dev/null || true; "
+    "rm -rf /etc/systemd/system/multi-user.target.wants/ssh.service "
+    "/etc/systemd/system/multi-user.target.wants/sshd.service "
+    "/etc/systemd/system/multi-user.target.wants/NetworkManager.service "
+    "/etc/systemd/system/multi-user.target.wants/cloud-init*.service 2>/dev/null || true"
 )
 
 CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND = (
     "mv /usr/local/sbin/lab_net_troubleshoot.sh /usr/local/sbin/lab-net-troubleshoot && "
-    "mv /etc/init.d/lab-net-up.init /etc/init.d/lab-net-up && "
-    "mv /etc/init.d/client-firewall.init /etc/init.d/client-firewall && "
-    "mv /etc/init.d/overdrive-ip-timezone.init /etc/init.d/overdrive-ip-timezone && "
-    "mv /etc/init.d/overdrive-launch-identity.init /etc/init.d/overdrive-launch-identity && "
+    "mv /etc/systemd/system/lab-net-up.service.tmp /etc/systemd/system/lab-net-up.service && "
+    "mv /etc/systemd/system/client-firewall.service.tmp /etc/systemd/system/client-firewall.service && "
+    "mv /etc/systemd/system/overdrive-ip-timezone.service.tmp /etc/systemd/system/overdrive-ip-timezone.service && "
+    "mv /etc/systemd/system/overdrive-launch-identity.service.tmp /etc/systemd/system/overdrive-launch-identity.service && "
     "chmod 0755 /usr/local/sbin/lab-net-troubleshoot && "
     "chmod 0755 /usr/local/sbin/lab-net-up && "
     "chmod 0755 /usr/local/sbin/client-firewall && "
     "chmod 0755 /usr/local/sbin/overdrive-ip-timezone && "
     "chmod 0755 /usr/local/sbin/overdrive-launch-identity && "
-    "chmod 0755 /etc/init.d/lab-net-up && "
-    "chmod 0755 /etc/init.d/client-firewall && "
-    "chmod 0755 /etc/init.d/overdrive-ip-timezone && "
-    "chmod 0755 /etc/init.d/overdrive-launch-identity && "
     "find /root/local_host -type f -name '*.py' -exec chmod 0755 {} \\; && "
     f"{REMOTE_BOOT_SERVICE_CLEANUP_COMMAND} && "
-    "rc-update add overdrive-launch-identity boot && "
-    "rc-update add lab-net-up default && "
-    "rc-update add overdrive-ip-timezone default && "
-    "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
-    "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
-    # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox
-    # serial noise cancels TIMEOUT so the menu waits forever for Enter.
-    # Boot the MENU DEFAULT / first LABEL directly + TOTALTIMEOUT.
-    "for f in /boot/extlinux.conf /boot/syslinux/syslinux.cfg /boot/syslinux.cfg "
-    "/media/*/boot/syslinux/syslinux.cfg; do "
-    "[ -f \"$f\" ] || continue; "
-    "DEF=$(awk 'BEGIN{l=\"\"} "
-    "tolower($1)==\"label\"{l=$2; next} "
-    "tolower($1)==\"menu\" && tolower($2)==\"default\"{print l; exit}' \"$f\"); "
-    "[ -n \"$DEF\" ] || DEF=$(awk 'tolower($1)==\"label\"{print $2; exit}' \"$f\"); "
-    "tmp=$(mktemp); "
-    "awk 'BEGIN{ignore=0} "
-    "tolower($1)==\"serial\"{next} "
-    "tolower($1)==\"timeout\"{next} "
-    "tolower($1)==\"totaltimeout\"{next} "
-    "tolower($1)==\"prompt\"{next} "
-    "tolower($1)==\"default\"{next} "
-    "tolower($1)==\"noescape\"{next} "
-    "tolower($1)==\"ui\"{next} "
-    "tolower($1)==\"menu\" && (tolower($2)==\"title\"||tolower($2)==\"hidden\"||tolower($2)==\"autoboot\"||tolower($2)==\"separator\"){next} "
-    "{print}' \"$f\" > \"$tmp\"; "
-    "{ "
-    "echo 'SERIAL 0 115200'; "
-    "echo 'PROMPT 0'; "
-    "echo 'NOESCAPE 1'; "
-    "echo 'TIMEOUT 5'; "
-    "echo 'TOTALTIMEOUT 20'; "
-    "[ -n \"$DEF\" ] && echo \"DEFAULT $DEF\"; "
-    "echo; "
-    "cat \"$tmp\"; "
-    "} > \"$f.new\"; "
-    "mv \"$f.new\" \"$f\"; rm -f \"$tmp\"; "
-    "grep -q 'console=ttyS0' \"$f\" || "
-    "sed -i -E 's/^([[:space:]]*(APPEND|append)[[:space:]].*)$/\\1 console=ttyS0,115200/' \"$f\"; "
-    "echo \"[overdrive] unattended bootloader: $f default=${DEF:-none}\"; "
-    "done"
+    "systemctl daemon-reload && "
+    "systemctl enable overdrive-launch-identity.service client-firewall.service lab-net-up.service overdrive-ip-timezone.service && "
+    "systemctl enable serial-getty@ttyS0.service 2>/dev/null || "
+    "ln -sf /lib/systemd/system/serial-getty@.service /etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service 2>/dev/null || true && "
+    "if [ -f /etc/default/grub ]; then "
+    "grep -q 'console=ttyS0' /etc/default/grub || "
+    "sed -i -E 's/^(GRUB_CMDLINE_LINUX=\"[^\"]*)(\".*)$/\\1 console=ttyS0,115200n8\\2/' /etc/default/grub || "
+    "sed -i -E 's/^(GRUB_CMDLINE_LINUX=)(\"[^\"]*\")$/\\1\"console=ttyS0,115200n8 \\2\"/' /etc/default/grub || true; "
+    "grep -q '^GRUB_TERMINAL=' /etc/default/grub || echo 'GRUB_TERMINAL=\"serial console\"' >> /etc/default/grub; "
+    "grep -q '^GRUB_SERIAL_COMMAND=' /etc/default/grub || "
+    "echo 'GRUB_SERIAL_COMMAND=\"serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1\"' >> /etc/default/grub; "
+    "update-grub 2>/dev/null || true; "
+    "fi"
 )
 
 ASSERT_NO_REMOTE_BOOT_HOOKS_COMMAND = (
-    "! find /etc/init.d /etc/runlevels /etc/conf.d "
-    "\\( -name 'sshd' -o -name 'ssh' -o -name 'dropbear' "
-    "-o -name 'tiny-cloud-*' -o -name 'cloud-init' -o -name 'cloud-final' \\) "
-    "-print -quit | grep -q . && "
+    "! systemctl list-unit-files 'ssh*.service' 'dropbear*.service' 'cloud-init*.service' "
+    "2>/dev/null | awk '{print $1, $2}' "
+    "| grep -E '^(ssh|sshd|dropbear|cloud-init|cloud-config|cloud-final)\\.service' "
+    "| awk '$2==\"enabled\"' | grep -q . && "
+    "[ ! -x /usr/sbin/sshd ] && "
+    "[ ! -x /usr/sbin/dropbear ] && "
     "[ ! -e /etc/ssh ] && "
-    "[ ! -e /etc/tiny-cloud.conf ]"
+    "[ -f /etc/cloud/cloud-init.disabled ]"
 )

@@ -27,6 +27,8 @@ __all__ = [
     "OPENWRT_IMAGE_NAME",
     "OPENWRT_LAN_INTNET_NAME",
     "OPENWRT_ROUTER_VM_NAME",
+    "TEST_CLIENTA_VM_NAME",
+    "TEST_CLIENTK_VM_NAME",
     "TEST_CLIENT_VM_NAME",
     "TEST_LAN_INTNET_NAME",
     "TEST_ROUTER_VM_NAME",
@@ -43,6 +45,9 @@ __all__ = [
     "SERIAL_TCP_HOST",
     "SERIAL_TCP_PORT",
     "SERIAL_UNIX_SOCKET_PATH",
+    "CLIENTK_SERIAL_PTY_LINK_PATH",
+    "CLIENTK_SERIAL_TCP_PORT",
+    "CLIENTK_SERIAL_UNIX_SOCKET_PATH",
     "ROUTER_SERIAL_PTY_LINK_PATH",
     "ROUTER_SERIAL_TCP_PORT",
     "ROUTER_SERIAL_UNIX_SOCKET_PATH",
@@ -58,6 +63,7 @@ __all__ = [
     "parse_machinereadable",
     "probe_tcp_serial",
     "remove_existing_vm",
+    "remove_lab_vms",
     "resolve_vbox_settings_path",
     "run_vboxmanage",
     "serial_endpoint_for_vbox",
@@ -66,6 +72,7 @@ __all__ = [
     "spawn_wsl_interactive_terminal",
     "spawn_serial_console_window",
     "assign_fresh_lab_macs",
+    "assign_fresh_lab_hardware_uuid",
     "start_vm_headless_safe",
     "ensure_vm_ready_to_start",
     "close_medium_best_effort",
@@ -79,7 +86,10 @@ __all__ = [
 ]
 
 TEST_ROUTER_VM_NAME = "Test_Router"
-TEST_CLIENT_VM_NAME = "Test_Client"
+TEST_CLIENTA_VM_NAME = "Test_Clienta"
+TEST_CLIENTK_VM_NAME = "Test_Clientk"
+# Back-compat alias for older imports.
+TEST_CLIENT_VM_NAME = TEST_CLIENTA_VM_NAME
 TEST_LAN_INTNET_NAME = "test-lan"
 # Pre-Alpine Ubuntu client (verify_lab still recognizes a registered leftover).
 LEGACY_CLIENT_VM_NAME = "Test_Client_Legacy"
@@ -91,9 +101,14 @@ OPENWRT_LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
 
 SERIAL_TCP_HOST = "127.0.0.1"
 SERIAL_TCP_PORT = 2323  # legacy client COM1
-SERIAL_UNIX_SOCKET_PATH = "/tmp/Test_Client_serial.sock"
-SERIAL_PTY_LINK_PATH = "/tmp/Test_Client_serial.pty"
+SERIAL_UNIX_SOCKET_PATH = "/tmp/Test_Clienta_serial.sock"
+SERIAL_PTY_LINK_PATH = "/tmp/Test_Clienta_serial.pty"
 SERIAL_BAUD = "115200"
+
+# Test clientk (Kali) serial on a dedicated host TCP port.
+CLIENTK_SERIAL_TCP_PORT = 2326
+CLIENTK_SERIAL_UNIX_SOCKET_PATH = "/tmp/Test_Clientk_serial.sock"
+CLIENTK_SERIAL_PTY_LINK_PATH = "/tmp/Test_Clientk_serial.pty"
 
 # Test router uses a different host TCP port so both VMs can expose COM1 at once.
 ROUTER_SERIAL_TCP_PORT = 2324
@@ -571,6 +586,8 @@ def remove_existing_vm(
                     [vboxmanage, "controlvm", vm_name, "poweroff"],
                     check=False,
                     timeout=30,
+                    capture_output=True,
+                    text=True,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(
@@ -601,6 +618,60 @@ def remove_existing_vm(
     if os.path.isdir(vm_base):
         print(f"Removing leftover VM directory {vm_base!r}...")
         shutil.rmtree(vm_base, ignore_errors=True)
+
+
+# Current lab VMs plus legacy names still seen in older trees.
+_LAB_VM_REMOVAL_SPECS: tuple[tuple[str, str], ...] = (
+    (TEST_CLIENTA_VM_NAME, "client_browser_alpine.vdi"),
+    ("Test_Client", "client_browser_alpine.vdi"),
+    (TEST_CLIENTK_VM_NAME, "client_browser_kali.vdi"),
+    (LEGACY_CLIENT_VM_NAME, CLIENT_VDI_NAME),
+    ("OpenWrt_LAN_Client_Alpine", "client_browser_alpine.vdi"),
+    ("OpenWrt_LAN_Client", CLIENT_VDI_NAME),
+    (TEST_ROUTER_VM_NAME, OPENWRT_VDI_NAME),
+    ("OpenWrt_2026_Router", OPENWRT_VDI_NAME),
+)
+
+
+def remove_lab_vms(*, dry_run: bool = False) -> None:
+    """Power off and delete all known Overdrive lab VMs before a fresh rebuild."""
+    paths = get_system_paths(TEST_ROUTER_VM_NAME)
+    vboxmanage = find_vboxmanage(paths)
+    if not vboxmanage:
+        raise RuntimeError(get_vboxmanage_install_hint())
+
+    vms_root = str(paths["vms_root"])
+    is_wsl = bool(paths["is_wsl"])
+    terminate_stale_vboxmanage_processes()
+
+    found_any = False
+    for vm_name, vdi_name in _LAB_VM_REMOVAL_SPECS:
+        vm_base = os.path.join(vms_root, vm_name)
+        vdi_path = os.path.join(vm_base, vdi_name)
+        medium_for_vbox = wsl_to_windows_path(vdi_path) if is_wsl else vdi_path
+        registered = vm_is_registered(vboxmanage, vm_name)
+        has_dir = os.path.isdir(vm_base)
+        if not registered and not has_dir:
+            continue
+
+        found_any = True
+        if dry_run:
+            state = "registered" if registered else "folder only"
+            print(f"  [dry-run] Would remove {vm_name!r} ({state})")
+            continue
+
+        print(f"Removing lab VM {vm_name!r}...")
+        remove_existing_vm(
+            vboxmanage,
+            vm_name,
+            vm_base,
+            medium_path_for_vbox=medium_for_vbox,
+        )
+
+    if not found_any:
+        print("[*] No existing lab VMs to remove.")
+    elif not dry_run:
+        print("[+] Old lab VMs removed.")
 
 
 def vm_is_registered(vboxmanage: str, vm_name: str) -> bool:
@@ -716,21 +787,43 @@ def ensure_vm_ready_to_start(vboxmanage: str, vm_name: str, *, wait_s: int = 60)
                 break
 
 
-def assign_fresh_lab_macs(vboxmanage: str, vm_name: str) -> dict[str, str]:
-    """Assign unique lab NIC MACs. Must run while the VM is powered off.
+def assign_fresh_lab_hardware_uuid(vboxmanage: str, vm_name: str) -> str | None:
+    """Assign a fresh SMBIOS hardware UUID. Must run while the VM is powered off."""
+    if vm_name not in (TEST_CLIENTA_VM_NAME, TEST_CLIENTK_VM_NAME, TEST_ROUTER_VM_NAME):
+        return None
+    from VM.vm_config import random_vbox_hardware_uuid
 
-    Called before every ``startvm`` so each launch gets a new address while
-    keeping the stable OUI (client Dell / router G3100).
+    hw_uuid = random_vbox_hardware_uuid()
+    run_vboxmanage(
+        vboxmanage,
+        ["modifyvm", vm_name, "--hardwareuuid", hw_uuid],
+    )
+    print(f"[overdrive] {vm_name} hardware UUID: {hw_uuid}")
+    return hw_uuid
+
+
+def assign_fresh_lab_macs(vboxmanage: str, vm_name: str) -> dict[str, str]:
+    """Assign unique lab launch identifiers (hardware UUID + NIC MACs).
+
+    Must run while the VM is powered off. Called before every ``startvm`` so each
+    launch gets fresh pseudo-random host identity while keeping stable OUIs.
     """
     from VM.vm_config import (
+        CLIENTK_NIC_OUI,
         CLIENT_NIC_OUI,
         G3100_MAC_OUI,
         format_mac_colon,
         random_client_mac_vbox,
+        random_clientk_mac_vbox,
         random_g3100_mac_vbox,
     )
 
-    if vm_name == TEST_CLIENT_VM_NAME:
+    result: dict[str, str] = {}
+    hw_uuid = assign_fresh_lab_hardware_uuid(vboxmanage, vm_name)
+    if hw_uuid:
+        result["hardware_uuid"] = hw_uuid
+
+    if vm_name == TEST_CLIENTA_VM_NAME:
         mac = random_client_mac_vbox()
         run_vboxmanage(
             vboxmanage,
@@ -741,7 +834,22 @@ def assign_fresh_lab_macs(vboxmanage: str, vm_name: str) -> dict[str, str]:
         print(
             f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {format_mac_colon(mac)}"
         )
-        return {"nic1": mac}
+        result["nic1"] = mac
+        return result
+
+    if vm_name == TEST_CLIENTK_VM_NAME:
+        mac = random_clientk_mac_vbox()
+        run_vboxmanage(
+            vboxmanage,
+            ["modifyvm", vm_name, "--macaddress1", mac],
+        )
+        oui = CLIENTK_NIC_OUI.lower().replace(":", "")
+        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
+        print(
+            f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {format_mac_colon(mac)}"
+        )
+        result["nic1"] = mac
+        return result
 
     if vm_name == TEST_ROUTER_VM_NAME:
         lan = random_g3100_mac_vbox()
@@ -765,9 +873,11 @@ def assign_fresh_lab_macs(vboxmanage: str, vm_name: str) -> dict[str, str]:
             f"[overdrive] {vm_name} G3100 MACs (OUI {oui_colon}): "
             f"LAN={format_mac_colon(lan)}  WAN={format_mac_colon(wan)}"
         )
-        return {"nic1": lan, "nic2": wan}
+        result["nic1"] = lan
+        result["nic2"] = wan
+        return result
 
-    return {}
+    return result
 
 
 def start_vm_headless_safe(vboxmanage: str, vm_name: str) -> None:

@@ -23,6 +23,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+from detections.common.browser_logging import (
+    blog_chromium_event,
+    blog_debug,
+    blog_error,
+    blog_file_tail,
+    blog_info,
+    blog_warning,
+)
 
 DEBUG_PORT_ENV = "OVERDRIVE_DIRECT_CHROME_DEBUG_PORT"
 ATTACH_PORT_ENV = "OVERDRIVE_DIRECT_CHROME_ATTACH_PORT"
@@ -785,6 +793,14 @@ def start_shared_chromium(
     no_sandbox_attempts = (True,) if first_no_sandbox else (False, True)
     started: SharedChromiumSession | None = None
 
+    blog_chromium_event(
+        "startup begin",
+        chromium=chromium,
+        port=port,
+        headless=use_headless,
+        timeout_sec=timeout,
+        gl_args=chromium_gl_args(chromium),
+    )
     try:
         for no_sandbox in no_sandbox_attempts:
             if no_sandbox and (
@@ -827,12 +843,15 @@ def start_shared_chromium(
                     _log_path=log_path,
                     _env=env,
                 )
+                blog_chromium_event("startup ready", port=port, log_path=str(log_path))
                 proc = None  # ownership transferred; do not tear down in finally
                 break
             except TimeoutError as exc:
                 failures.append(f"{mode}: browser/devtools timed out: {exc}")
+                blog_warning("startup attempt timed out", mode=mode, port=port, error=str(exc))
             except Exception as exc:
                 failures.append(f"{mode}: {type(exc).__name__}: {exc}")
+                blog_error("startup attempt failed", mode=mode, port=port, exc=exc)
             finally:
                 try:
                     log_handle.close()
@@ -844,6 +863,7 @@ def start_shared_chromium(
                     terminate_profile_processes(profile_dir)
                     proc = None
                     log_tail = read_small(log_path)
+                    blog_file_tail("chromium", log_path)
                     if failures and log_tail and "chromium log:" not in failures[-1]:
                         failures[-1] = f"{failures[-1]} | chromium log: {log_tail}"
     finally:
@@ -861,6 +881,7 @@ def start_shared_chromium(
     if started is not None:
         return started
 
+    blog_error("shared chromium failed", failures=failures)
     raise RuntimeError("Shared Chromium failed to start: " + " | ".join(failures))
 
 

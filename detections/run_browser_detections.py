@@ -16,6 +16,17 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from detections.common.browser_logging import (  # noqa: E402
+    blog_chromium_event,
+    blog_debug,
+    blog_error,
+    blog_file_tail,
+    blog_info,
+    blog_probe_end,
+    blog_probe_start,
+    current_log_path,
+    init_browser_log_session,
+)
 from detections.common.common_browser import prompt_suite_external_browser_access  # noqa: E402
 from detections.common.direct_chromium import shared_chromium_session  # noqa: E402
 from detections.run_detections import (  # noqa: E402
@@ -103,15 +114,21 @@ def _run_browser_suite(
     allow_external: bool | None,
 ) -> int:
     start = time.time()
+    log_path = init_browser_log_session(label="browser-suite")
+    if log_path:
+        print(f"[*] Browser debug log: {log_path}")
+
     from detections.common.common_browser import browser_runtime_diagnostics
 
     runtime = browser_runtime_diagnostics()
+    blog_info("browser runtime", **runtime)
 
     print("[*] Browser runtime:")
     print(f"    Chromium:     {runtime['chromium']}")
     print(f"    Chromium version:     {runtime['chromium_version']}")
     print()
     if runtime["chromium"] == "(missing)":
+        blog_error("browser runtime incomplete", runtime=runtime)
         print(
             "[!] Browser runtime is incomplete. Rebuild/provision the Alpine client image "
             "so build-time install.py can stage Chromium before the VM boots."
@@ -159,12 +176,15 @@ def _run_browser_suite(
 
     if use_shared_browser:
         print("[*] Starting shared Chromium session for browser probes...")
+        blog_chromium_event("shared session starting")
         try:
             with shared_chromium_session():
                 print("[*] Shared Chromium is ready; probes will attach via DevTools.")
+                blog_chromium_event("shared session ready")
                 _with_title()
                 return _collect_and_report()
         except Exception as exc:
+            blog_error("shared chromium failed", exc=exc)
             print(f"[!] Shared Chromium failed to start: {exc}", file=sys.stderr)
             print("[*] Falling back to isolated Chromium launches per probe.")
             use_shared_browser = False

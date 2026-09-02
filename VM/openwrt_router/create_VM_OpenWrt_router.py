@@ -79,6 +79,7 @@ from VM.openwrt_router.pipeline import (
     BuildStep,
     OpenWrtRouterBuildOptions,
     run_openwrt_router_pipeline,
+    validate_router_pipeline_order,
 )
 from VM.vm_config import (
     MULLVAD_DOT_PORT,
@@ -91,6 +92,11 @@ try:
     from VM.alpine_client.create_VM_client_browser_pipe_alpine import setup_client_vm as setup_alpine_client_vm
 except ImportError:
     setup_alpine_client_vm = None
+
+try:
+    from VM.kali_client.create_VM_client_kali import setup_client_vm as setup_clientk_vm
+except ImportError:
+    setup_clientk_vm = None
 
 VM_NAME = TEST_ROUTER_VM_NAME
 # Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 test-lan``
@@ -1764,6 +1770,8 @@ def setup_openwrt_vm(
         BuildStep("instructions.print", "print router access instructions", print_router_access_instructions),
         BuildStep("serial.attach", "open router serial console", attach_router_serial, enabled=lambda: router_started and options.connect_serial),
     ]
+    ROUTER_PIPELINE_ORDER = tuple(step.id for step in steps)
+    validate_router_pipeline_order(steps, ROUTER_PIPELINE_ORDER)
     run_openwrt_router_pipeline(steps)
 
 
@@ -1841,7 +1849,12 @@ def main() -> None:
     parser.add_argument(
         "--start-alpine-client",
         action="store_true",
-        help="Start the test client VM after the router is ready.",
+        help="Start the Alpine test clienta VM after the router is ready.",
+    )
+    parser.add_argument(
+        "--start-clientk",
+        action="store_true",
+        help="Start the Kali test clientk VM after the router is ready.",
     )
     args = parser.parse_args()
     if args.serial_here:
@@ -1878,7 +1891,7 @@ def main() -> None:
 
     if args.start_alpine_client:
         if setup_alpine_client_vm:
-            print("\n--- Starting Test client VM ---")
+            print("\n--- Starting Test clienta VM ---")
             try:
                 setup_alpine_client_vm(
                     start_vm=args.start_type != "none",
@@ -1886,14 +1899,33 @@ def main() -> None:
                     start_type=args.start_type,
                 )
                 if args.start_type == "none":
-                    print("[+] Test client VM configured. Skipped start because --start-type none was selected.")
+                    print("[+] Test clienta VM configured. Skipped start because --start-type none was selected.")
                 else:
-                    print("[+] Test client VM started successfully.")
+                    print("[+] Test clienta VM started successfully.")
             except Exception as e:
-                print(f"[!] Failed to start test client VM: {e}")
+                print(f"[!] Failed to start test clienta VM: {e}")
                 raise
         else:
-            raise RuntimeError("Test client setup script not found, cannot start test client VM.")
+            raise RuntimeError("Test clienta setup script not found, cannot start test clienta VM.")
+
+    if args.start_clientk:
+        if setup_clientk_vm:
+            print("\n--- Starting Test clientk VM ---")
+            try:
+                setup_clientk_vm(
+                    start_vm=args.start_type != "none",
+                    connect_serial=args.start_type != "none" and not args.no_connect_serial,
+                    start_type=args.start_type,
+                )
+                if args.start_type == "none":
+                    print("[+] Test clientk VM configured. Skipped start because --start-type none was selected.")
+                else:
+                    print("[+] Test clientk VM started successfully.")
+            except Exception as e:
+                print(f"[!] Failed to start test clientk VM: {e}")
+                raise
+        else:
+            raise RuntimeError("Test clientk setup script not found, cannot start test clientk VM.")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,8 @@ from detections.common.common_vm import (
     LEGACY_CLIENT_VM_NAME,
     SERIAL_TCP_HOST,
     SERIAL_TCP_PORT,
-    TEST_CLIENT_VM_NAME,
+    TEST_CLIENTA_VM_NAME,
+    TEST_CLIENTK_VM_NAME,
     TEST_LAN_INTNET_NAME,
     TEST_ROUTER_VM_NAME,
     find_vboxmanage_with_windows_fallback,
@@ -115,7 +116,7 @@ def check_client_serial_pipe(
             print(f"  [+] {vm_name} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{port}")
             print(
                 "      Socket-level check only; this does not prove guest ttyS0 output. "
-                f"Run: python VM/{'alpine_client/create_VM_client_browser_pipe_alpine.py' if vm_name == TEST_CLIENT_VM_NAME else 'create_VM_client_browser_pipe.py'} --serial-only"
+                f"Run: python VM/{'kali_client/create_VM_client_kali.py' if vm_name == TEST_CLIENTK_VM_NAME else 'alpine_client/create_VM_client_browser_pipe_alpine.py' if vm_name == TEST_CLIENTA_VM_NAME else 'create_VM_client_browser_pipe.py'} --serial-only"
             )
         else:
             errs.append(
@@ -135,12 +136,14 @@ def check_client_serial_pipe(
 
 
 def resolve_lab_client_vm(vbox: str) -> tuple[str, int]:
-    """Prefer the test client; fall back to the legacy Ubuntu client name."""
-    if vm_registered(vbox, TEST_CLIENT_VM_NAME):
-        return TEST_CLIENT_VM_NAME, 2325
+    """Prefer the Kali test clientk; fall back to Alpine or legacy Ubuntu client names."""
+    if vm_registered(vbox, TEST_CLIENTK_VM_NAME):
+        return TEST_CLIENTK_VM_NAME, 2326
+    if vm_registered(vbox, TEST_CLIENTA_VM_NAME):
+        return TEST_CLIENTA_VM_NAME, 2325
     if vm_registered(vbox, CLIENT_VM):
         return CLIENT_VM, SERIAL_TCP_PORT
-    return TEST_CLIENT_VM_NAME, 2325
+    return TEST_CLIENTK_VM_NAME, 2326
 
 
 def nic_promisc_policy(vbox: str, vm_name: str, info: dict[str, str], nic_index: int) -> str | None:
@@ -258,7 +261,11 @@ def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
 
     client_vm, client_port = resolve_lab_client_vm(vbox)
     print(f"Lab client VM:         {client_vm} (serial TCP {client_port})")
-    if client_vm == TEST_CLIENT_VM_NAME and vm_registered(vbox, CLIENT_VM):
+    if client_vm == TEST_CLIENTK_VM_NAME and vm_registered(vbox, TEST_CLIENTA_VM_NAME):
+        print(
+            f"  [i] Ignoring Alpine {TEST_CLIENTA_VM_NAME!r} (still registered but not the active test client)."
+        )
+    if client_vm == TEST_CLIENTA_VM_NAME and vm_registered(vbox, CLIENT_VM):
         print(
             f"  [i] Ignoring legacy {CLIENT_VM!r} (still registered but not the test client)."
         )

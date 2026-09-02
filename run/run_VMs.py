@@ -28,7 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from detections.common.common_runner import file_contains_token
-from detections.common.common_vm import ensure_kvm_accessible
+from detections.common.common_vm import ensure_kvm_accessible, remove_lab_vms
 
 
 RUN_DIR = Path(__file__).resolve().parent
@@ -42,12 +42,13 @@ PREFERRED_CREATE_ORDER = (
 DEFAULT_SKIP_CREATE_SCRIPTS = frozenset(
     {
         "alpine_client/create_VM_client_browser_pipe_alpine.py",
+        "kali_client/create_VM_client_kali.py",
     }
 )
 VERIFY_SCRIPT = "verify_lab_from_host.py"
 
 STEP_LABELS = {
-    "create_VM_OpenWrt_router.py": "Test router + test client",
+    "create_VM_OpenWrt_router.py": "Test router + test clients",
     VERIFY_SCRIPT: "Verify lab wiring",
 }
 
@@ -94,15 +95,25 @@ def _shorten_status(text: str, width: int = LIVE_STATUS_WIDTH) -> str:
     return text[: max(0, width - 1)].rstrip() + "…"
 
 
+def _is_progress_percentage_line(text: str) -> bool:
+    """Skip qemu-img/VBox progress spam from the single-line status display."""
+    stripped = text.strip()
+    if re.search(r"\(\s*\d+(?:\.\d+)?/\d+%\)", stripped):
+        return True
+    if re.search(r"\[\s*\d+(?:\.\d+)?%\]", stripped):
+        return True
+    return False
+
+
 def _child_status_from_line(line: str) -> str | None:
     text = line.strip()
     if not text:
         return None
+    if _is_progress_percentage_line(text):
+        return None
     if text.startswith("[overdrive]"):
         return _shorten_status(text.removeprefix("[overdrive]").strip())
     if text.startswith("[libguestfs]"):
-        return _shorten_status(text)
-    if re.match(r"^\[\s*\d+(?:\.\d+)?\]", text):
         return _shorten_status(text)
     if text.startswith(
         (
@@ -301,7 +312,7 @@ def print_tmux_host_help() -> None:
     session_name = os.environ.get(TMUX_SESSION_ENV, TMUX_SESSION_BASE)
     print("tmux layout")
     print("  top:    host runner, logs, verification")
-    print("  bottom: left test client serial, right test router serial")
+    print("  bottom: clienta serial :2325 | clientk serial :2326 | router serial :2324")
     print()
     print("Move between panes (prefix is Ctrl-b: press it, release, then the next key)")
     print("  mouse click         focus a pane")
@@ -420,8 +431,8 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     except FileNotFoundError:
         pass
     host_command = _tmux_host_command(session_name, argv, ready_file=ready_file)
-    client_command = _tmux_serial_loop(
-        "Test client serial :2325",
+    alpine_command = _tmux_serial_loop(
+        "Test clienta serial :2325",
         [
             sys.executable,
             str(SCRIPT_DIR / "alpine_client" / "create_VM_client_browser_pipe_alpine.py"),
@@ -429,6 +440,18 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             "--force-interactive-serial",
             "--serial-port",
             "2325",
+        ],
+        ready_file=ready_file,
+    )
+    clientk_command = _tmux_serial_loop(
+        "Test clientk serial :2326",
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "kali_client" / "create_VM_client_kali.py"),
+            "--serial-here",
+            "--force-interactive-serial",
+            "--serial-port",
+            "2326",
         ],
         ready_file=ready_file,
     )
@@ -475,8 +498,10 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         )
         .strip()
     )
+    # Bottom row = 1/3 of window height; three serial panes each get 1/3 of that row's width:
+    # split -h 33% → 67% + 33%; split the 67% pane -h 50% → ~33.5% + ~33.5% + 33%.
     try:
-        client_pane = (
+        alpine_pane = (
             subprocess.check_output(
                 [
                     "tmux",
@@ -488,10 +513,10 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
                     host_pane,
                     "-v",
                     "-l",
-                    "35%",
+                    "33%",
                     "-c",
                     str(REPO_ROOT),
-                    client_command,
+                    alpine_command,
                 ],
                 text=True,
             )
@@ -506,13 +531,34 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
                     "-F",
                     "#{pane_id}",
                     "-t",
-                    client_pane,
+                    alpine_pane,
+                    "-h",
+                    "-l",
+                    "33%",
+                    "-c",
+                    str(REPO_ROOT),
+                    router_command,
+                ],
+                text=True,
+            )
+            .strip()
+        )
+        clientk_pane = (
+            subprocess.check_output(
+                [
+                    "tmux",
+                    "split-window",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-t",
+                    alpine_pane,
                     "-h",
                     "-l",
                     "50%",
                     "-c",
                     str(REPO_ROOT),
-                    router_command,
+                    clientk_command,
                 ],
                 text=True,
             )
@@ -523,7 +569,8 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         raise
     for pane, title in (
         (host_pane, "host"),
-        (client_pane, "client serial"),
+        (alpine_pane, "clienta serial"),
+        (clientk_pane, "clientk serial"),
         (router_pane, "router serial"),
     ):
         subprocess.run(["tmux", "select-pane", "-t", pane, "-T", title], check=True)
@@ -767,6 +814,13 @@ def main() -> int:
     )
     args = parser.parse_args()
     ensure_kvm_accessible()
+    try:
+        print("Removing previous lab VMs...")
+        remove_lab_vms(dry_run=args.dry_run)
+        print()
+    except RuntimeError as exc:
+        print(f"[-] {exc}", file=sys.stderr)
+        return 1
     if args.tmux:
         tmux_rc = launch_tmux_layout(sys.argv[1:])
         if tmux_rc is not None:
@@ -806,6 +860,7 @@ def main() -> int:
                         "--start-type",
                         start_type,
                         "--start-alpine-client",
+                        "--start-clientk",
                     ]
                 )
                 if not connect_serial:
