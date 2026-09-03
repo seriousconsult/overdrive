@@ -8,16 +8,16 @@
 ** Written by VirtualBox 7.2.4 (r170995)
 -->
 <VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">
-  <Machine uuid="{92d1887a-f093-425b-89da-2aeb355e5ff1}" name="Test_Clientk" OSType="Other_64" snapshotFolder="Snapshots" lastStateChange="2026-09-02T02:43:27Z">
+  <Machine uuid="{45993520-873f-4807-b33b-78f7a82fccfe}" name="Test_Clientk" OSType="Other_64" snapshotFolder="Snapshots" lastStateChange="2026-09-02T23:35:02Z">
     <MediaRegistry>
       <HardDisks>
-        <HardDisk uuid="{264215c9-3e00-4a9d-a396-d3face69ece2}" location="client_browser_kali.vdi" format="VDI" type="Normal"/>
+        <HardDisk uuid="{87c6fb06-1f15-4118-87bd-cf5d03a2f855}" location="client_browser_kali.vdi" format="VDI" type="Normal"/>
       </HardDisks>
     </MediaRegistry>
     <ExtraData>
       <ExtraDataItem name="GUI/LastNormalWindowPosition" value="641,323,426,374"/>
     </ExtraData>
-    <Hardware uuid="{9036dfef-3fc8-4c16-b524-aa57777f67fb}">
+    <Hardware uuid="{088811d6-5689-4834-a7d4-8541ff05b856}">
       <Memory RAMSize="4096"/>
       <Firmware/>
       <BIOS>
@@ -26,7 +26,7 @@
         <AutoSerialNumGen enabled="true"/>
       </BIOS>
       <Network>
-        <Adapter slot="0" enabled="true" MACAddress="001B21DC1BE5">
+        <Adapter slot="0" enabled="true" MACAddress="001B21A891F1">
           <DisabledModes>
             <NATNetwork name="NatNetwork"/>
           </DisabledModes>
@@ -39,16 +39,16 @@
       <AudioAdapter useDefault="true" driver="WAS" enabled="true"/>
       <Clipboard/>
       <GuestProperties>
-        <GuestProperty name="/VirtualBox/GuestAdd/GuiOnFocus" value="1" timestamp="1788317007258805100" flags="TRANSIENT, RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/GUI/LanguageID" value="en_US" timestamp="1788317012364130200" flags="RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/VBoxRev" value="170995" timestamp="1788317007245945602" flags="TRANSIENT, RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/VBoxVer" value="7.2.4" timestamp="1788317007245945600" flags="TRANSIENT, RDONLYGUEST"/>
-        <GuestProperty name="/VirtualBox/HostInfo/VBoxVerExt" value="7.2.4" timestamp="1788317007245945601" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/GuestAdd/GuiOnFocus" value="1" timestamp="1788392102237507900" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/GUI/LanguageID" value="en_US" timestamp="1788392107409773100" flags="RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/VBoxRev" value="170995" timestamp="1788392102221131602" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/VBoxVer" value="7.2.4" timestamp="1788392102221131600" flags="TRANSIENT, RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/VBoxVerExt" value="7.2.4" timestamp="1788392102221131601" flags="TRANSIENT, RDONLYGUEST"/>
       </GuestProperties>
       <StorageControllers>
         <StorageController name="SATA" type="AHCI" PortCount="30" useHostIOCache="false" Bootable="true" IDE0MasterEmulationPort="0" IDE0SlaveEmulationPort="1" IDE1MasterEmulationPort="2" IDE1SlaveEmulationPort="3">
           <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
-            <Image uuid="{264215c9-3e00-4a9d-a396-d3face69ece2}"/>
+            <Image uuid="{87c6fb06-1f15-4118-87bd-cf5d03a2f855}"/>
           </AttachedDevice>
         </StorageController>
       </StorageControllers>
