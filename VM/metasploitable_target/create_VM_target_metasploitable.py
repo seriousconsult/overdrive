@@ -138,7 +138,7 @@ def setup_target_vm(
     qemu, _ = require_qemu_tools()
     paths = get_system_paths(VM_NAME, image_name=TARGET_QCOW_NAME)
     vm_base = str(paths["vm_base"])
-    download_dir = str(paths["download_dir"])
+    download_dir = str(paths["downloads"])
     qcow_path = os.path.join(vm_base, TARGET_QCOW_NAME)
 
     def remove_previous_vm() -> None:

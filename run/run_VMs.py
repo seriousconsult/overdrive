@@ -314,7 +314,8 @@ def print_tmux_host_help() -> None:
     session_name = os.environ.get(TMUX_SESSION_ENV, TMUX_SESSION_BASE)
     print("tmux layout")
     print("  top:    Kali serial :2326  (main pane — focused on attach)")
-    print("  bottom: host | clienta :2325 | target :2327 | router :2324")
+    print("  bottom: host (wider) | clienta :2325 | target :2327 | router :2324")
+    print("          (target/router/clienta are the smaller serial panes)")
     print()
     print("Move between panes (prefix is Ctrl-b: press it, release, then the next key)")
     print("  mouse click         focus a pane")
@@ -514,7 +515,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         .strip()
     )
     try:
-        # Bottom row ~40% height; Kali keeps the larger top region.
+        # Bottom row ~35% height; Kali keeps the larger top (main) region.
         host_pane = (
             subprocess.check_output(
                 [
@@ -527,7 +528,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
                     clientk_pane,
                     "-v",
                     "-l",
-                    "40%",
+                    "35%",
                     "-c",
                     str(REPO_ROOT),
                     host_command,
@@ -536,7 +537,8 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             )
             .strip()
         )
-        # Bottom: host | alpine | target | router  (~25% each of the bottom row)
+        # Bottom: host (wider for logs) | three equal small serials (alpine, target, router).
+        # Carve the right 60% for serials, then split that into thirds.
         alpine_pane = (
             subprocess.check_output(
                 [
@@ -549,7 +551,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
                     host_pane,
                     "-h",
                     "-l",
-                    "75%",
+                    "60%",
                     "-c",
                     str(REPO_ROOT),
                     alpine_command,
@@ -558,6 +560,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             )
             .strip()
         )
+        # alpine currently owns the right 60%. Split into alpine | (target+router).
         target_pane = (
             subprocess.check_output(
                 [
@@ -579,6 +582,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             )
             .strip()
         )
+        # target owns ~40% of bottom; split in half → target + router (~20% each).
         router_pane = (
             subprocess.check_output(
                 [

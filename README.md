@@ -131,7 +131,8 @@ tmux layout from `run/run_VMs.py` (interactive TTY):
 
 ```
 top:    Kali serial :2326   (main / focused)
-bottom: host | Alpine :2325 | target :2327 | router :2324
+bottom: host (wider) | Alpine :2325 | target :2327 | router :2324
+        ↑ smaller serial panes: alpine, target, router
 ```
 
 - **WAN checks:** run from the host or the router WAN segment; target the router WAN IP.
