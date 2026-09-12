@@ -7,7 +7,7 @@ __all__ = ["client_package_install_script"]
 
 def client_package_install_script() -> str:
     return """#!/bin/bash
-# OS packages are installed by /root/install.py during guest prime.
+# OS packages (including kali-linux-default) are installed by /root/install.py during guest prime.
 echo "[overdrive] package bootstrap deferred to install.py"
 exit 0
 """

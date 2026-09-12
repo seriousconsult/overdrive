@@ -746,6 +746,70 @@ def is_lab_guest_install() -> bool:
     return Path(__file__).resolve().parent == Path("/root")
 
 
+def is_kali_os() -> bool:
+    """True on Kali (lab clientk or a Kali host)."""
+    if Path("/etc/kali-release").is_file():
+        return True
+    os_release = Path("/etc/os-release")
+    if not os_release.is_file():
+        return False
+    try:
+        text = os_release.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("ID=") and line.split("=", 1)[1].strip().strip('"') == "kali":
+            return True
+        if line.startswith("ID_LIKE=") and "kali" in line.split("=", 1)[1].lower():
+            return True
+    return False
+
+
+# Official default tools set (includes kali-tools-top10 → wireshark, metasploit, …).
+# Only installed inside the Kali lab guest — not on Alpine or WSL hosts.
+KALI_TOOLS_METAPACKAGE = "kali-linux-default"
+
+
+def preseed_kali_tools_debconf(*, non_interactive: bool) -> None:
+    """Avoid interactive prompts when pulling in wireshark / similar packages."""
+    selections = (
+        "wireshark-common wireshark-common/install-setuid boolean true\n"
+        "kismet-common kismet-common/install-setuid boolean false\n"
+        "kismet-common kismet-common/install-users string \n"
+    )
+    cmd = ["debconf-set-selections"]
+    if not is_root():
+        cmd = add_sudo(cmd, non_interactive=non_interactive)
+    proc = subprocess.run(cmd, input=selections, text=True, capture_output=True)
+    if proc.returncode != 0:
+        detail = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        print(f"[-] debconf preseed for Kali tools failed (continuing): {detail[-500:]}")
+
+
+def install_kali_tools_metapackage(info: dict, *, non_interactive: bool = False) -> None:
+    """Install the full default Kali tools metapackage on the Kali lab guest only."""
+    if info.get("mgr") != "apt":
+        return
+    if not is_lab_guest_install() or not is_kali_os():
+        return
+    if package_installed(info, KALI_TOOLS_METAPACKAGE):
+        print(f"[*] Kali tools metapackage already installed: {KALI_TOOLS_METAPACKAGE}")
+        return
+    print(
+        f"[*] Installing Kali tools metapackage {KALI_TOOLS_METAPACKAGE} "
+        "(wireshark, metasploit, top10, … — this can take a long time)..."
+    )
+    preseed_kali_tools_debconf(non_interactive=non_interactive)
+    install_packages(info, [KALI_TOOLS_METAPACKAGE], non_interactive=non_interactive)
+    if package_installed(info, KALI_TOOLS_METAPACKAGE) or have_cmd("wireshark") or have_cmd("tshark"):
+        print(f"[*] Kali tools metapackage ready: {KALI_TOOLS_METAPACKAGE}")
+    else:
+        print(
+            f"[-] {KALI_TOOLS_METAPACKAGE} install finished but package/wireshark not detected; "
+            "check apt logs inside the guest."
+        )
+
+
 # Host-only packages to build/run the QEMU/KVM lab (not installed inside guests).
 LAB_HYPERVISOR_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
     "apt": (
@@ -957,6 +1021,9 @@ def install_system_deps(*, non_interactive: bool = False):
         install_packages(info, net_needed, non_interactive=non_interactive)
     else:
         print(f"[*] Network base packages already present: {' '.join(net_pkgs)}.")
+
+    # 5b) Kali lab guest only: default tools metapackage (wireshark, metasploit, …)
+    install_kali_tools_metapackage(info, non_interactive=non_interactive)
 
     # 6) Network diagnostics + helpers: nmap, dig, tcpdump, socat [, minicom]
     diag_cmds = [

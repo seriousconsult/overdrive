@@ -37,7 +37,8 @@ VM_NAME = TEST_CLIENTK_VM_NAME
 CLIENT_QCOW_NAME = "client_browser_kali.qcow2"
 CLIENT_VM_CPUS = 2
 CLIENT_GUEST_HOSTNAME = "clientk"
-CLIENT_DISK_SIZE_MIB = 16384
+# Room for kali-linux-default (wireshark/metasploit/top10 + deps) on the cloud image.
+CLIENT_DISK_SIZE_MIB = 40960
 CLIENT_MEMORY_MIB = 4096
 CLIENT_ROOT_DEVICE = "/dev/sda1"
 
