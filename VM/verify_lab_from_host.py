@@ -27,6 +27,7 @@ from detections.common.common_qemu import (
     TAP_CLIENTA,
     TAP_CLIENTK,
     TAP_ROUTER_LAN,
+    TAP_TARGET,
     find_qemu_system,
     is_qemu_vm_running,
     lab_vms_root,
@@ -36,10 +37,12 @@ from detections.common.common_vm import (
     CLIENTK_SERIAL_TCP_PORT,
     ROUTER_SERIAL_TCP_PORT,
     SERIAL_TCP_HOST,
+    TARGET_SERIAL_TCP_PORT,
     TEST_CLIENTA_VM_NAME,
     TEST_CLIENTK_VM_NAME,
     TEST_LAN_INTNET_NAME,
     TEST_ROUTER_VM_NAME,
+    TEST_TARGET_VM_NAME,
     probe_tcp_serial,
 )
 
@@ -97,7 +100,11 @@ def check_bridge_and_taps(verbose: bool, client_tap: str) -> list[str]:
         if verbose:
             print(f"  [i] expected taps: {TAP_ROUTER_LAN}, {client_tap}")
 
-    for tap, label in ((TAP_ROUTER_LAN, "router LAN"), (client_tap, "client LAN")):
+    for tap, label in (
+        (TAP_ROUTER_LAN, "router LAN"),
+        (client_tap, "client LAN"),
+        (TAP_TARGET, "target LAN"),
+    ):
         if _iface_exists(tap):
             print(f"[+] tap {tap!r} ({label}) exists")
         else:
@@ -148,12 +155,13 @@ def verify_all_vms(verbose: bool) -> list[str]:
     for vm, port, role in (
         (ROUTER_VM, ROUTER_SERIAL_TCP_PORT, "router"),
         (client_vm, client_port, "client"),
+        (TEST_TARGET_VM_NAME, TARGET_SERIAL_TCP_PORT, "target"),
     ):
         running = is_qemu_vm_running(vm)
         mark = "+" if running else "·"
         print(f"[{mark}] {vm}: {'running' if running else 'not running'} ({role})")
         if not running:
-            # Missing router or preferred client is a failure; both should be up after run_VMs.
+            # Missing router/client/target is a failure after a full run_VMs.
             all_errs.append(f"VM {vm!r} is not running.")
             continue
         all_errs.extend(check_serial(vm, port, running=True))

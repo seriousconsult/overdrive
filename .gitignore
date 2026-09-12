@@ -97,10 +97,12 @@ VM/apply_mullvad_dot.sh
 *.deb
 *.sock
 *.pty
+*.log
 
 # --- Other ---
 *.png
 TODO.md
+*.txt
 
 # --- Temporary files ---
 _tmp*

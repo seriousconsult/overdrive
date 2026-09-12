@@ -99,6 +99,11 @@ try:
 except ImportError:
     setup_clientk_vm = None
 
+try:
+    from VM.metasploitable_target.create_VM_target_metasploitable import setup_target_vm
+except ImportError:
+    setup_target_vm = None
+
 VM_NAME = TEST_ROUTER_VM_NAME
 # Downstream VMs: tap + virtio-net on Linux bridge ``test-lan``
 LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
@@ -1540,6 +1545,11 @@ def main() -> None:
         action="store_true",
         help="Start the Kali test clientk VM after the router is ready.",
     )
+    parser.add_argument(
+        "--start-target",
+        action="store_true",
+        help="Start the Metasploitable 2 target VM on the lab LAN (not hardened).",
+    )
     args = parser.parse_args()
     if args.serial_here:
         serial_only_attach(here=True, force_interactive=True)
@@ -1607,6 +1617,25 @@ def main() -> None:
                 raise
         else:
             raise RuntimeError("Test clientk setup script not found, cannot start test clientk VM.")
+
+    if args.start_target:
+        if setup_target_vm:
+            print("\n--- Starting Metasploitable 2 target VM ---")
+            try:
+                setup_target_vm(
+                    start_vm=args.start_type != "none",
+                    connect_serial=args.start_type != "none" and not args.no_connect_serial,
+                    start_type=args.start_type,
+                )
+                if args.start_type == "none":
+                    print("[+] Target VM configured. Skipped start because --start-type none was selected.")
+                else:
+                    print("[+] Target VM started successfully.")
+            except Exception as e:
+                print(f"[!] Failed to start target VM: {e}")
+                raise
+        else:
+            raise RuntimeError("Target setup script not found, cannot start Metasploitable 2 VM.")
 
 
 if __name__ == "__main__":

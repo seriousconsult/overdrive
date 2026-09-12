@@ -32,6 +32,8 @@ __all__ = [
     "TEST_CLIENT_VM_NAME",
     "TEST_LAN_INTNET_NAME",
     "TEST_ROUTER_VM_NAME",
+    "TEST_TARGET_VM_NAME",
+    "TARGET_SERIAL_TCP_PORT",
     "LEGACY_CLIENT_VM_NAME",
     "OPENWRT_URL",
     "OPENWRT_QCOW_NAME",
@@ -68,6 +70,7 @@ __all__ = [
 TEST_ROUTER_VM_NAME = "Test_Router"
 TEST_CLIENTA_VM_NAME = "Test_Clienta"
 TEST_CLIENTK_VM_NAME = "Test_Clientk"
+TEST_TARGET_VM_NAME = "target"
 # Back-compat alias for older imports.
 TEST_CLIENT_VM_NAME = TEST_CLIENTA_VM_NAME
 TEST_LAN_INTNET_NAME = "test-lan"
@@ -94,6 +97,11 @@ CLIENTK_SERIAL_PTY_LINK_PATH = "/tmp/Test_Clientk_serial.pty"
 ROUTER_SERIAL_TCP_PORT = 2324
 ROUTER_SERIAL_UNIX_SOCKET_PATH = "/tmp/Test_Router_serial.sock"
 ROUTER_SERIAL_PTY_LINK_PATH = "/tmp/Test_Router_serial.pty"
+
+# Metasploitable 2 intentional target on the lab LAN.
+TARGET_SERIAL_TCP_PORT = 2327
+TARGET_SERIAL_UNIX_SOCKET_PATH = "/tmp/target_serial.sock"
+TARGET_SERIAL_PTY_LINK_PATH = "/tmp/target_serial.pty"
 
 OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
 OPENWRT_IMAGE_NAME = "openwrt_2026.img"

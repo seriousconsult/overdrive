@@ -24,6 +24,9 @@ CLIENT_NIC_OUI = "001422"
 # Intel Corp. OUI for the Kali test clientk — distinct from Alpine client and router.
 CLIENTK_NIC_OUI = "001b21"
 
+# VMware OUI for the intentional Metasploitable target (distinct from lab clients/router).
+TARGET_NIC_OUI = "005056"
+
 
 def _load_vm_env(path: Path = VM_ENV_PATH) -> None:
     """Load VM secrets from VM/.env without overriding explicit environment variables."""
@@ -107,6 +110,11 @@ def random_client_mac(*, oui: str = CLIENT_NIC_OUI) -> str:
 
 def random_clientk_mac(*, oui: str = CLIENTK_NIC_OUI) -> str:
     """Return a random clientk MAC as 12 hex digits (no separators)."""
+    return _random_mac_hex(oui)
+
+
+def random_target_mac(*, oui: str = TARGET_NIC_OUI) -> str:
+    """Return a random target-VM MAC as 12 hex digits (no separators)."""
     return _random_mac_hex(oui)
 
 

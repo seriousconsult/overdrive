@@ -20,10 +20,12 @@ from detections.common.common_vm import (
     DEFAULT_VM_STORAGE_ROOT,
     ROUTER_SERIAL_TCP_PORT,
     SERIAL_TCP_HOST,
+    TARGET_SERIAL_TCP_PORT,
     TEST_CLIENTA_VM_NAME,
     TEST_CLIENTK_VM_NAME,
     TEST_LAN_INTNET_NAME,
     TEST_ROUTER_VM_NAME,
+    TEST_TARGET_VM_NAME,
     LEGACY_CLIENT_VM_NAME,
     ensure_kvm_accessible,
 )
@@ -37,9 +39,11 @@ __all__ = [
     "LAB_BRIDGE_NAME",
     "LAB_VMS_DIRNAME",
     "OPENWRT_QCOW_NAME",
+    "TARGET_QCOW_NAME",
     "TAP_CLIENTA",
     "TAP_CLIENTK",
     "TAP_ROUTER_LAN",
+    "TAP_TARGET",
     "build_client_qemu_argv",
     "build_router_qemu_argv",
     "convert_disk_to_qcow2",
@@ -63,6 +67,7 @@ __all__ = [
     "stop_qemu_vm",
     "tap_name_for_vm",
     "delete_tap",
+    "default_serial_port_for_vm",
 ]
 
 LAB_VMS_DIRNAME = "lab_vms"
@@ -73,10 +78,12 @@ LAB_BRIDGE_NAME = TEST_LAN_INTNET_NAME
 OPENWRT_QCOW_NAME = "openwrt.qcow2"
 CLIENTA_QCOW_NAME = "client_browser_alpine.qcow2"
 CLIENTK_QCOW_NAME = "client_browser_kali.qcow2"
+TARGET_QCOW_NAME = "metasploitable2.qcow2"
 
 TAP_ROUTER_LAN = "tap-router-lan"
 TAP_CLIENTA = "tap-clienta"
 TAP_CLIENTK = "tap-clientk"
+TAP_TARGET = "tap-target"
 
 _IP = "/usr/sbin/ip"
 _IP_FALLBACK = "ip"
@@ -211,6 +218,7 @@ def tap_name_for_vm(vm_name: str) -> str | None:
         TEST_ROUTER_VM_NAME: TAP_ROUTER_LAN,
         TEST_CLIENTA_VM_NAME: TAP_CLIENTA,
         TEST_CLIENTK_VM_NAME: TAP_CLIENTK,
+        TEST_TARGET_VM_NAME: TAP_TARGET,
         "Test_Client": TAP_CLIENTA,
     }.get(vm_name)
 
@@ -323,6 +331,7 @@ def remove_lab_vms_qemu(*, dry_run: bool = False) -> None:
         (TEST_CLIENTA_VM_NAME, TAP_CLIENTA),
         ("Test_Client", TAP_CLIENTA),
         (TEST_CLIENTK_VM_NAME, TAP_CLIENTK),
+        (TEST_TARGET_VM_NAME, TAP_TARGET),
         (LEGACY_CLIENT_VM_NAME, None),
         ("OpenWrt_LAN_Client_Alpine", None),
         ("OpenWrt_LAN_Client", None),
@@ -349,6 +358,7 @@ def remove_lab_vms_qemu(*, dry_run: bool = False) -> None:
         "lab_vms",
         "alpine_client",
         "kali_client",
+        "metasploitable_target",
         "openwrt_router",
         ".cache",
         ".env",
@@ -391,11 +401,13 @@ def fresh_lab_identity(vm_name: str) -> dict[str, str]:
         CLIENTK_NIC_OUI,
         CLIENT_NIC_OUI,
         G3100_MAC_OUI,
+        TARGET_NIC_OUI,
         format_mac_colon,
         random_client_mac,
         random_clientk_mac,
         random_g3100_mac,
         random_lab_hardware_uuid,
+        random_target_mac,
     )
 
     result: dict[str, str] = {"hardware_uuid": random_lab_hardware_uuid()}
@@ -413,6 +425,15 @@ def fresh_lab_identity(vm_name: str) -> dict[str, str]:
         result["nic1"] = mac
         result["nic1_colon"] = format_mac_colon(mac)
         oui = CLIENTK_NIC_OUI.lower().replace(":", "")
+        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
+        print(f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {result['nic1_colon']}")
+        print(f"[overdrive] {vm_name} hardware UUID: {result['hardware_uuid']}")
+        return result
+    if vm_name == TEST_TARGET_VM_NAME:
+        mac = random_target_mac()
+        result["nic1"] = mac
+        result["nic1_colon"] = format_mac_colon(mac)
+        oui = TARGET_NIC_OUI.lower().replace(":", "")
         oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
         print(f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {result['nic1_colon']}")
         print(f"[overdrive] {vm_name} hardware UUID: {result['hardware_uuid']}")
@@ -480,6 +501,7 @@ def build_client_qemu_argv(
     serial_port: int,
     start_type: str,
     pid_path: Path,
+    nic_model: str = "virtio-net-pci",
 ) -> list[str]:
     ensure_tap_on_bridge(tap_name)
     argv = [
@@ -499,7 +521,7 @@ def build_client_qemu_argv(
         "-netdev",
         f"tap,id=lan,ifname={tap_name},script=no,downscript=no",
         "-device",
-        f"virtio-net-pci,netdev=lan,mac={mac_colon}",
+        f"{nic_model},netdev=lan,mac={mac_colon}",
         "-smbios",
         f"type=1,uuid={hardware_uuid}",
         *qemu_serial_tcp_args(serial_port),
@@ -605,6 +627,8 @@ def default_serial_port_for_vm(vm_name: str) -> int:
         return ROUTER_SERIAL_TCP_PORT
     if vm_name == TEST_CLIENTK_VM_NAME:
         return CLIENTK_SERIAL_TCP_PORT
+    if vm_name == TEST_TARGET_VM_NAME:
+        return TARGET_SERIAL_TCP_PORT
     if vm_name in (TEST_CLIENTA_VM_NAME, "Test_Client"):
         return CLIENTA_SERIAL_TCP_PORT
     return CLIENTA_SERIAL_TCP_PORT

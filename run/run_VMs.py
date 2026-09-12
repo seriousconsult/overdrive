@@ -43,12 +43,13 @@ DEFAULT_SKIP_CREATE_SCRIPTS = frozenset(
     {
         "alpine_client/create_VM_client_browser_pipe_alpine.py",
         "kali_client/create_VM_client_kali.py",
+        "metasploitable_target/create_VM_target_metasploitable.py",
     }
 )
 VERIFY_SCRIPT = "verify_lab_from_host.py"
 
 STEP_LABELS = {
-    "create_VM_OpenWrt_router.py": "Test router + test clients",
+    "create_VM_OpenWrt_router.py": "Test router + lab clients/target",
     VERIFY_SCRIPT: "Verify lab wiring",
 }
 
@@ -312,8 +313,8 @@ def _tmux_host_command(session_name: str, argv: list[str], *, ready_file: Path) 
 def print_tmux_host_help() -> None:
     session_name = os.environ.get(TMUX_SESSION_ENV, TMUX_SESSION_BASE)
     print("tmux layout")
-    print("  top:    host runner, logs, verification")
-    print("  bottom: clienta serial :2325 | clientk serial :2326 | router serial :2324")
+    print("  top:    Kali serial :2326  (main pane — focused on attach)")
+    print("  bottom: host | clienta :2325 | target :2327 | router :2324")
     print()
     print("Move between panes (prefix is Ctrl-b: press it, release, then the next key)")
     print("  mouse click         focus a pane")
@@ -445,7 +446,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         ready_file=ready_file,
     )
     clientk_command = _tmux_serial_loop(
-        "Test clientk serial :2326",
+        "Test clientk serial :2326 (main)",
         [
             sys.executable,
             str(SCRIPT_DIR / "kali_client" / "create_VM_client_kali.py"),
@@ -453,6 +454,18 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             "--force-interactive-serial",
             "--serial-port",
             "2326",
+        ],
+        ready_file=ready_file,
+    )
+    target_command = _tmux_serial_loop(
+        "target serial :2327",
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "metasploitable_target" / "create_VM_target_metasploitable.py"),
+            "--serial-here",
+            "--force-interactive-serial",
+            "--serial-port",
+            "2327",
         ],
         ready_file=ready_file,
     )
@@ -470,9 +483,10 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
     # Detached sessions need an explicit size; tmux 3.4 also dropped split -p
     # (use -l with a % suffix). Without both, split-window fails with "size missing".
     cols, rows = shutil.get_terminal_size(fallback=(120, 40))
-    cols = max(cols, 100)
+    cols = max(cols, 120)
     rows = max(rows, 30)
 
+    # Main pane = Kali serial (top). Bottom row = host + other serials.
     subprocess.run(
         [
             "tmux",
@@ -488,20 +502,41 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
             str(rows),
             "-c",
             str(REPO_ROOT),
-            host_command,
+            clientk_command,
         ],
         check=True,
     )
-    host_pane = (
+    clientk_pane = (
         subprocess.check_output(
             ["tmux", "display-message", "-p", "-t", f"{session_name}:lab", "#{pane_id}"],
             text=True,
         )
         .strip()
     )
-    # Bottom row = 1/3 of window height; three serial panes each get 1/3 of that row's width:
-    # split -h 33% → 67% + 33%; split the 67% pane -h 50% → ~33.5% + ~33.5% + 33%.
     try:
+        # Bottom row ~40% height; Kali keeps the larger top region.
+        host_pane = (
+            subprocess.check_output(
+                [
+                    "tmux",
+                    "split-window",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-t",
+                    clientk_pane,
+                    "-v",
+                    "-l",
+                    "40%",
+                    "-c",
+                    str(REPO_ROOT),
+                    host_command,
+                ],
+                text=True,
+            )
+            .strip()
+        )
+        # Bottom: host | alpine | target | router  (~25% each of the bottom row)
         alpine_pane = (
             subprocess.check_output(
                 [
@@ -512,12 +547,33 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
                     "#{pane_id}",
                     "-t",
                     host_pane,
-                    "-v",
+                    "-h",
                     "-l",
-                    "33%",
+                    "75%",
                     "-c",
                     str(REPO_ROOT),
                     alpine_command,
+                ],
+                text=True,
+            )
+            .strip()
+        )
+        target_pane = (
+            subprocess.check_output(
+                [
+                    "tmux",
+                    "split-window",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-t",
+                    alpine_pane,
+                    "-h",
+                    "-l",
+                    "66%",
+                    "-c",
+                    str(REPO_ROOT),
+                    target_command,
                 ],
                 text=True,
             )
@@ -532,34 +588,13 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
                     "-F",
                     "#{pane_id}",
                     "-t",
-                    alpine_pane,
-                    "-h",
-                    "-l",
-                    "33%",
-                    "-c",
-                    str(REPO_ROOT),
-                    router_command,
-                ],
-                text=True,
-            )
-            .strip()
-        )
-        clientk_pane = (
-            subprocess.check_output(
-                [
-                    "tmux",
-                    "split-window",
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    "-t",
-                    alpine_pane,
+                    target_pane,
                     "-h",
                     "-l",
                     "50%",
                     "-c",
                     str(REPO_ROOT),
-                    clientk_command,
+                    router_command,
                 ],
                 text=True,
             )
@@ -569,13 +604,15 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
         subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
         raise
     for pane, title in (
+        (clientk_pane, "clientk serial (main)"),
         (host_pane, "host"),
         (alpine_pane, "clienta serial"),
-        (clientk_pane, "clientk serial"),
+        (target_pane, "target serial"),
         (router_pane, "router serial"),
     ):
         subprocess.run(["tmux", "select-pane", "-t", pane, "-T", title], check=True)
-    subprocess.run(["tmux", "select-pane", "-t", host_pane], check=True)
+    # Focus Kali as the main pane on attach.
+    subprocess.run(["tmux", "select-pane", "-t", clientk_pane], check=True)
     _configure_tmux_session(session_name)
 
     if os.environ.get("TMUX"):
@@ -586,10 +623,16 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
 
 
 def _resolve_start_type(args: argparse.Namespace) -> str:
-    """Resolve the QEMU display/start mode for create/rebuild runs."""
+    """Resolve the QEMU display/start mode for create/rebuild runs.
+
+    Default is headless. ``--gui`` forces GTK; ``--headless`` is kept as an
+    explicit alias for the default.
+    """
+    if getattr(args, "gui", False):
+        return "gui"
     if getattr(args, "headless", False):
         return "headless"
-    return str(getattr(args, "start_type", "gui") or "gui")
+    return str(getattr(args, "start_type", "headless") or "headless")
 
 
 def discover_create_scripts(
@@ -795,13 +838,18 @@ def main() -> int:
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Start lab VMs headless instead of opening QEMU GTK windows.",
+        help="Start lab VMs headless (default). Kept for compatibility.",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Start lab VMs with QEMU GTK display windows instead of headless.",
     )
     parser.add_argument(
         "--start-type",
         choices=("gui", "headless", "separate", "none"),
-        default="gui",
-        help="QEMU display mode passed to VM creation scripts (gui=GTK, else headless). Default: gui.",
+        default="headless",
+        help="QEMU display mode passed to VM creation scripts. Default: headless.",
     )
     parser.add_argument(
         "--skip-verify",
@@ -862,6 +910,7 @@ def main() -> int:
                         start_type,
                         "--start-alpine-client",
                         "--start-clientk",
+                        "--start-target",
                     ]
                 )
                 if not connect_serial:
