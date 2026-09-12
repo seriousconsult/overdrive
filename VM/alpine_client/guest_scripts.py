@@ -60,9 +60,16 @@ for path in /sys/class/net/*; do
     continue
   fi
   # Neutral DHCP identity: send generic hostname, empty vendor class (no alpine/overdrive).
-  if udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V ""; then
-    ok=1
-  fi
+  # Retry: OpenWrt dnsmasq may still be starting when this oneshot first runs.
+  attempt=1
+  while [ "$attempt" -le 8 ]; do
+    if udhcpc -i "$IFACE" -n -q -x hostname:{CLIENT_GUEST_HOSTNAME} -V ""; then
+      ok=1
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
 done
 ip -4 route show default 2>/dev/null | grep -q . && exit 0
 [ "$ok" -eq 1 ]
@@ -296,7 +303,7 @@ CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND = (
     "rc-update add overdrive-ip-timezone default && "
     "grep -q '^ttyS0' /etc/inittab || echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab && "
     "grep -qx 'ttyS0' /etc/securetty 2>/dev/null || echo ttyS0 >> /etc/securetty || true && "
-    # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but VBox
+    # Unattended boot: stock nocloud uses DEFAULT menu.c32 + TIMEOUT, but serial
     # serial noise cancels TIMEOUT so the menu waits forever for Enter.
     # Boot the MENU DEFAULT / first LABEL directly + TOTALTIMEOUT.
     "for f in /boot/extlinux.conf /boot/syslinux/syslinux.cfg /boot/syslinux.cfg "

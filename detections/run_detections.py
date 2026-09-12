@@ -84,7 +84,7 @@ EXCLUDE_SCRIPT_NAMES = frozenset(
 )
 
 # Filename prefixes to skip globally. VM creation scripts provision or mutate
-# VirtualBox state and should be run manually, not as score-producing checks.
+# QEMU/KVM lab state and should be run manually, not as score-producing checks.
 EXCLUDE_SCRIPT_PREFIXES = ("create_VM_",)
 
 # Subdirectories under DETECTIONS_DIR to skip when auto-discovering.

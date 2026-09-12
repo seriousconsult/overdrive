@@ -1,4 +1,4 @@
-"""Download Alpine images and grow the client VDI with libguestfs."""
+"""Download Alpine images and grow the client disk with libguestfs."""
 
 from __future__ import annotations
 
@@ -13,21 +13,17 @@ import urllib.request
 from pathlib import Path
 
 from detections.common.common_local import is_wsl_local
+from detections.common.common_qemu import expand_qcow2_size
 from detections.common.common_vm import (
-    close_medium_best_effort,
     ensure_kvm_accessible,
-    run_vboxmanage,
-    vboxmanage_targets_windows,
-    wait_after_disk_operation,
-    wsl_to_windows_path,
 )
-from VM.alpine_client.client_config import CLIENT_ROOT_DEVICE, CLIENT_VDI_SIZE_MIB
+from VM.alpine_client.client_config import CLIENT_ROOT_DEVICE, CLIENT_DISK_SIZE_MIB
 
 __all__ = [
     "download_alpine_image",
-    "expand_client_vdi_for_packages",
+    "expand_client_disk",
     "libguestfs_env",
-    "require_vdi_prime_tools",
+    "require_disk_prime_tools",
 ]
 
 
@@ -130,13 +126,13 @@ def download_alpine_image(url: str, dest_path: str) -> None:
     print("Download complete.")
 
 
-def require_vdi_prime_tools(*, skip_prime: bool) -> str:
+def require_disk_prime_tools(*, skip_prime: bool) -> str:
     if skip_prime:
-        raise RuntimeError("VDI priming is required for client network and serial features.")
+        raise RuntimeError("Disk priming is required for client network and serial features.")
     vc = shutil.which("virt-customize")
     if not vc:
         raise RuntimeError(
-            "virt-customize is required to prime the Alpine VDI.\n"
+            "virt-customize is required to prime the Alpine disk image.\n"
             "Install it in WSL with:\n"
             "  sudo apt install -y libguestfs-tools"
         )
@@ -168,13 +164,13 @@ def libguestfs_env() -> dict[str, str]:
     return virt_env
 
 
-def _vdi_virtual_size_bytes(vdi_linux: str) -> int | None:
+def _disk_virtual_size_bytes(disk_path: str) -> int | None:
     qemu_img = shutil.which("qemu-img")
     if not qemu_img:
         return None
     try:
         result = subprocess.run(
-            [qemu_img, "info", "-U", "--output=json", vdi_linux],
+            [qemu_img, "info", "-U", "--output=json", disk_path],
             capture_output=True,
             text=True,
             check=True,
@@ -186,23 +182,9 @@ def _vdi_virtual_size_bytes(vdi_linux: str) -> int | None:
         return None
 
 
-def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mib: int = CLIENT_VDI_SIZE_MIB) -> None:
-    """Grow the tiny whole-disk Alpine ext4 VDI before installing packages."""
-    target_bytes = target_mib * 1024 * 1024
-    current_bytes = _vdi_virtual_size_bytes(vdi_linux)
-    if current_bytes is None:
-        print(f"Could not determine VDI virtual size; requesting resize to {target_mib} MiB.")
-    elif current_bytes >= target_bytes:
-        print(f"Test client VDI virtual size is already at least {target_mib} MiB.")
-    else:
-        current_mib = current_bytes // (1024 * 1024)
-        print(f"Growing test client VDI from {current_mib} MiB to {target_mib} MiB...")
-
-    if current_bytes is None or current_bytes < target_bytes:
-        vdi_for_vbox = wsl_to_windows_path(vdi_linux) if vboxmanage_targets_windows(vboxmanage) else vdi_linux
-        run_vboxmanage(vboxmanage, ["modifymedium", "disk", vdi_for_vbox, "--resize", str(target_mib)])
-        close_medium_best_effort(vboxmanage, vdi_linux)
-        wait_after_disk_operation(vboxmanage, seconds=2.0)
+def expand_client_disk(disk_linux: str, *, target_mib: int = CLIENT_DISK_SIZE_MIB) -> None:
+    """Grow the Alpine root disk (qcow2) and filesystem before installing packages."""
+    expand_qcow2_size(disk_linux, target_mib)
 
     guestfish = shutil.which("guestfish")
     if not guestfish:
@@ -214,7 +196,7 @@ def expand_client_vdi_for_packages(vboxmanage: str, vdi_linux: str, *, target_mi
 
     print(f"Expanding test client filesystem on {CLIENT_ROOT_DEVICE}...")
     subprocess.run(
-        [guestfish, "-a", vdi_linux, "run", ":", "resize2fs", CLIENT_ROOT_DEVICE],
+        [guestfish, "-a", disk_linux, "run", ":", "resize2fs", CLIENT_ROOT_DEVICE],
         check=True,
         env=libguestfs_env(),
     )

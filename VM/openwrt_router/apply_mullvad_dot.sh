@@ -37,7 +37,7 @@ verify_mullvad_upstream() {
       return 1
       ;;
     71.*|96.*)
-      echo "[!!] Upstream whoami=$ip — ISP/VBox DNS, not Mullvad."
+      echo "[!!] Upstream whoami=$ip — ISP/upstream DNS, not Mullvad."
       return 1
       ;;
   esac
@@ -169,7 +169,7 @@ uci -q delete stubby.global.listen_address
 uci add_list stubby.global.listen_address='127.0.0.1@5453'
 uci commit stubby
 
-echo "[overdrive] dnsmasq → stubby ONLY; ignore WAN/VBox resolv (noresolv)..."
+echo "[overdrive] dnsmasq → stubby ONLY; ignore WAN/upstream resolv (noresolv)..."
 uci -q delete dhcp.@dnsmasq[0].server
 uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5453'
 uci set dhcp.@dnsmasq[0].noresolv='1'
@@ -227,7 +227,7 @@ if ! nslookup google.com 127.0.0.1; then
   exit 1
 fi
 
-# Prove stubby is answering on 5453 (DoT path), not just VBox/WAN DNS.
+# Prove stubby is answering on 5453 (DoT path), not just WAN DNS.
 echo "--- [debug] stubby :5453 ---"
 if command -v dig >/dev/null 2>&1; then
   dig +time=3 +tries=1 @127.0.0.1 -p 5453 google.com +short || {

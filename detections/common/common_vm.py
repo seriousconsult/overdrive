@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared VirtualBox and WSL helpers used by VM setup scripts."""
+"""Shared lab VM constants and WSL/serial helpers for QEMU/KVM setup scripts."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_VM_STORAGE_ROOT = REPO_ROOT / "VM"
 
 __all__ = [
-    "CLIENT_VDI_NAME",
+    "CLIENT_DISK_NAME",
     "OPENWRT_CLIENT_VM_NAME",
     "OPENWRT_IMAGE_NAME",
     "OPENWRT_LAN_INTNET_NAME",
@@ -34,8 +34,7 @@ __all__ = [
     "TEST_ROUTER_VM_NAME",
     "LEGACY_CLIENT_VM_NAME",
     "OPENWRT_URL",
-    "OPENWRT_VDI_NAME",
-
+    "OPENWRT_QCOW_NAME",
     "OSBOXES_ARCHIVE_NAME",
     "OSBOXES_LOGIN_PASSWORD_HINT",
     "OSBOXES_LOGIN_USER",
@@ -51,38 +50,19 @@ __all__ = [
     "ROUTER_SERIAL_PTY_LINK_PATH",
     "ROUTER_SERIAL_TCP_PORT",
     "ROUTER_SERIAL_UNIX_SOCKET_PATH",
-    "find_vboxmanage",
-    "find_vboxmanage_with_windows_fallback",
-    "vboxmanage_targets_windows",
-    "get_active_bridged_interface",
     "get_half_cpus",
     "get_linux_distro_id",
     "get_system_paths",
-    "get_vboxmanage_install_hint",
-    "get_vm_state",
-    "parse_machinereadable",
     "probe_tcp_serial",
-    "remove_existing_vm",
     "remove_lab_vms",
-    "resolve_vbox_settings_path",
-    "run_vboxmanage",
-    "serial_endpoint_for_vbox",
     "serial_tcp_host_candidates",
-    "serial_uart_mode_and_endpoint",
     "spawn_wsl_interactive_terminal",
     "spawn_serial_console_window",
-    "assign_fresh_lab_macs",
-    "assign_fresh_lab_hardware_uuid",
-    "start_vm_headless_safe",
-    "ensure_vm_ready_to_start",
-    "close_medium_best_effort",
     "wait_after_disk_operation",
     "ensure_kvm_accessible",
-    "try_unregistervm_delete",
-    "vbox_closemedium_disk_delete_best_effort",
-    "vm_is_registered",
     "wsl_to_windows_path",
     "windows_temp_dir_linux",
+    "windows_to_wsl_path",
 ]
 
 TEST_ROUTER_VM_NAME = "Test_Router"
@@ -117,7 +97,7 @@ ROUTER_SERIAL_PTY_LINK_PATH = "/tmp/Test_Router_serial.pty"
 
 OPENWRT_URL = "https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/openwrt-25.12.2-x86-64-generic-ext4-combined.img.gz"
 OPENWRT_IMAGE_NAME = "openwrt_2026.img"
-OPENWRT_VDI_NAME = "openwrt.vdi"
+OPENWRT_QCOW_NAME = "openwrt.qcow2"
 
 
 
@@ -125,10 +105,11 @@ OSBOXES_URL = "https://sourceforge.net/projects/osboxes/files/v/vm/59-Uu--svr/24
 OSBOXES_ARCHIVE_NAME = "ubuntu_osboxes_2404.7z"
 OSBOXES_LOGIN_USER = "osboxes"
 OSBOXES_LOGIN_PASSWORD_HINT = "configured by OSBOXES_LOGIN_PASSWORD in VM/.env"
-CLIENT_VDI_NAME = "client_browser.vdi"
+CLIENT_DISK_NAME = "client_browser.qcow2"
 
 
 @functools.lru_cache(maxsize=1)
+
 def ensure_kvm_accessible() -> bool:
     """Make ``/dev/kvm`` usable so libguestfs/qemu use KVM instead of slow TCG emulation."""
     if platform.system().lower() != "linux":
@@ -196,8 +177,6 @@ def ensure_kvm_accessible() -> bool:
     print("[overdrive] /dev/kvm still not accessible; libguestfs will run without KVM (slow).")
     return False
 
-
-@functools.lru_cache(maxsize=1)
 def _windows_cmd_available() -> bool:
     """True when ``cmd.exe`` interop works (optional Windows helper, not required for VM setup)."""
     if os.name == "nt":
@@ -216,7 +195,6 @@ def _windows_cmd_available() -> bool:
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return False
 
-
 def get_linux_distro_id() -> str | None:
     """Return the lowercase /etc/os-release distro ID on native Linux hosts."""
     if _is_wsl_local() or platform.system().lower() != "linux":
@@ -229,7 +207,6 @@ def get_linux_distro_id() -> str | None:
     except OSError:
         return None
     return None
-
 
 def windows_to_wsl_path(path: str | Path) -> str:
     """Convert a Windows path to a WSL path when possible."""
@@ -244,7 +221,6 @@ def windows_to_wsl_path(path: str | Path) -> str:
         return proc.stdout.strip()
     except Exception:
         return path_str
-
 
 def wsl_to_windows_path(path: str | Path) -> str:
     """Convert a WSL-style POSIX path to a Windows path when possible."""
@@ -262,7 +238,6 @@ def wsl_to_windows_path(path: str | Path) -> str:
             _, drive, rest = path_str.split("/", 2)
             return f"{drive.upper()}:\\{rest.replace('/', '\\')}"
         return path_str
-
 
 def windows_temp_dir_linux() -> Path | None:
     """Return Windows %TEMP% as a WSL path when cmd.exe interop is available."""
@@ -290,14 +265,6 @@ def windows_temp_dir_linux() -> Path | None:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
 
-
-def vboxmanage_targets_windows(vboxmanage: str) -> bool:
-    """True when this shell is controlling Windows VirtualBox through VBoxManage.exe."""
-    return Path(vboxmanage).name.lower().endswith(".exe")
-
-
-
-
 def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, str | bool | None]:
     storage_root = Path(os.environ.get("OVERDRIVE_VM_STORAGE_DIR", str(DEFAULT_VM_STORAGE_ROOT))).expanduser()
     linux_home = str(storage_root)
@@ -317,11 +284,10 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
         except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             win_profile = None
 
-    # Keep VM build outputs repo-owned. If the repo lives under /mnt/c, the
-    # existing wsl_to_windows_path conversion still gives VBoxManage.exe C:\...
-    # paths without using the user's Windows Downloads directory.
+    # Keep VM build outputs repo-owned under the Overdrive VM/ tree.
     downloads = os.path.join(linux_home, "downloads")
-    vms_root = os.path.join(linux_home, "VirtualBox VMs")
+    # QEMU/KVM lab VMs live under lab_vms/.
+    vms_root = os.path.join(linux_home, "lab_vms")
     vm_base = os.path.join(vms_root, vm_name)
 
     paths: dict[str, str | bool | None] = {
@@ -337,591 +303,26 @@ def get_system_paths(vm_name: str, image_name: str | None = None) -> dict[str, s
         paths["img_path"] = os.path.join(downloads, image_name)
     return paths
 
-
-def find_vboxmanage(paths: dict[str, str | bool | None]) -> str | None:
-    """Return the best available VBoxManage executable path."""
-    env_path = os.environ.get("VBOXMANAGE")
-    if env_path and os.path.exists(env_path):
-        return env_path
-    if paths.get("is_wsl"):
-        windows_path = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
-        if os.path.exists(windows_path):
-            return windows_path
-        return shutil.which("VBoxManage.exe") or shutil.which("VBoxManage")
-    for candidate in (
-        shutil.which("VBoxManage"),
-        shutil.which("vboxmanage"),
-        shutil.which("VBoxManage.exe"),
-        "/usr/bin/VBoxManage",
-        "/usr/lib/virtualbox/VBoxManage",
-        "/opt/VirtualBox/VBoxManage",
-    ):
-        if candidate and os.path.exists(candidate):
-            return candidate
-    return None
-
-
-def find_vboxmanage_with_windows_fallback(paths: dict[str, str | bool | None]) -> str | None:
-    """Find VBoxManage, including common Windows install paths when running from PowerShell."""
-    found = find_vboxmanage(paths)
-    if found:
-        return found
-    for candidate in (
-        r"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe",
-        r"C:\Program Files\VirtualBox\VBoxManage.exe",
-    ):
-        if os.path.exists(candidate):
-            return candidate
-    return None
-
-
-def get_vboxmanage_install_hint() -> str:
-    """Return a host-specific hint for installing or exposing VBoxManage."""
-    if _is_wsl_local():
-        return (
-            "VBoxManage not found. Install VirtualBox on Windows or add it to PATH. "
-            "Expected Windows install path from WSL: "
-            "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
-        )
-
-    distro_id = get_linux_distro_id()
-    if distro_id == "fedora":
-        return (
-            "VBoxManage not found. On Fedora, install VirtualBox from RPM Fusion "
-            "(package: VirtualBox), rebuild/load the kernel modules if prompted, "
-            "then open a new shell so /usr/bin/VBoxManage is on PATH."
-        )
-    if distro_id in {"ubuntu", "debian", "linuxmint", "pop"}:
-        return (
-            "VBoxManage not found. On Ubuntu/Debian, install VirtualBox "
-            "(for example: sudo apt install virtualbox) or add VBoxManage to PATH."
-        )
-    return "VBoxManage not found. Install VirtualBox or add VBoxManage to PATH."
-
-
-def _vboxmanage_error_hint(output: str) -> str | None:
-    lower = output.lower()
-    distro_id = get_linux_distro_id()
-    if distro_id == "fedora" and (
-        "kernel driver not installed" in lower
-        or "vboxdrv" in lower
-        or "vboxnetflt" in lower
-    ):
-        return (
-            "Fedora hint: VirtualBox is installed, but its kernel modules appear "
-            "unavailable. Rebuild/load them for the running kernel (for RPM Fusion "
-            "installs this is usually handled by akmods after kernel-devel is present), "
-            "then retry."
-        )
-    if "permission denied" in lower:
-        return "Permission hint: run from a user allowed to manage VirtualBox VMs."
-    return None
-
-
 def get_half_cpus() -> int:
     total = os.cpu_count() or 2
     return max(1, total // 2)
 
-
-def run_vboxmanage(vboxmanage: str, args: list[str], **kwargs) -> None:
-    """Run VBoxManage with the provided arguments."""
-    print(f"Executing: {vboxmanage} {' '.join(args)}")
-    stream = kwargs.pop("stream", False)
-    capture_output = kwargs.pop("capture_output", not stream)
-    text = kwargs.pop("text", True)
-    lock_retries = int(kwargs.pop("lock_retries", 12))
-    lock_retry_s = float(kwargs.pop("lock_retry_s", 1.0))
-
-    for attempt in range(lock_retries + 1):
-        result = subprocess.run(
-            [vboxmanage] + args,
-            capture_output=capture_output,
-            text=text,
-            **kwargs,
-        )
-        if result.returncode == 0:
-            if stream:
-                print()
-            return
-
-        output = ""
-        if capture_output:
-            output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-        lower = output.lower()
-        locked = (
-            "already locked for a session" in lower
-            or "being unlocked" in lower
-            or "locking of attached media" in lower
-            or "vbox_e_invalid_object_state" in lower
-            or "0x80bb0007" in lower
-        )
-        if locked and attempt < lock_retries:
-            if attempt == 0:
-                print("VirtualBox still has a machine lock; waiting and retrying...")
-            if attempt == 5 and (_is_wsl_local() or os.name == "nt"):
-                print("Clearing stale VBoxManage.exe processes that may hold disk locks...")
-                terminate_stale_vboxmanage_processes()
-            time.sleep(lock_retry_s)
-            continue
-
-        hint = _vboxmanage_error_hint(output)
-        if hint:
-            raise RuntimeError(f"VBoxManage failed: {output}\n\n{hint}") from None
-        detail = output or f"exit status {result.returncode}"
-        raise RuntimeError(f"VBoxManage failed: {detail}") from None
-
-
-def resolve_vbox_settings_path(vm_dir: str, vm_name: str) -> str | None:
-    """Find an existing .vbox file in either flat or nested VirtualBox folder layouts."""
-    flat = os.path.join(vm_dir, f"{vm_name}.vbox")
-    if os.path.isfile(flat):
-        return flat
-    nested = os.path.join(vm_dir, vm_name, f"{vm_name}.vbox")
-    if os.path.isfile(nested):
-        return nested
-    try:
-        for p in Path(vm_dir).rglob(f"{vm_name}.vbox"):
-            if p.is_file():
-                return str(p)
-    except OSError:
-        pass
-    return None
-
-
-def parse_machinereadable(vboxmanage: str, name: str) -> dict[str, str]:
-    """Parse ``VBoxManage showvminfo --machinereadable`` output into a dictionary."""
-    r = subprocess.run(
-        [vboxmanage, "showvminfo", name, "--machinereadable"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        return {}
-    out: dict[str, str] = {}
-    for line in r.stdout.splitlines():
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        out[key.strip()] = value.strip().strip('"')
-    return out
-
-
-def vbox_closemedium_disk_delete_best_effort(vboxmanage: str, medium_path: str) -> None:
-    """Remove a disk from VirtualBox media registry and delete the file when possible."""
-    r = subprocess.run(
-        [vboxmanage, "closemedium", "disk", medium_path, "--delete"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        combined = ((r.stderr or "") + (r.stdout or "")).lower()
-        if (
-            "vbox_e_object_not_found" in combined
-            or "could not find" in combined
-            or "does not exist" in combined
-        ):
-            return
-
-
-def try_unregistervm_delete(
-    vboxmanage: str,
-    vm_name: str,
-    *,
-    max_wait_s: int = 120,
-    poll_s: float = 3.0,
-) -> bool:
-    """Retry unregistering and deleting a VirtualBox VM while it is locked."""
-    deadline = time.monotonic() + max_wait_s
-    warned = False
-    while time.monotonic() < deadline:
-        ur = subprocess.run(
-            [vboxmanage, "unregistervm", vm_name, "--delete"],
-            capture_output=True,
-            text=True,
-        )
-        if ur.returncode == 0:
-            return True
-        err = ((ur.stderr or "") + (ur.stdout or "")).lower()
-        if "locked" in err or "invalid_object_state" in err or "0x80bb0007" in err:
-            if not warned:
-                print(
-                    "Waiting for VirtualBox to release the VM lock "
-                    "(close the guest window or Manager details tab if open)…"
-                )
-                warned = True
-            time.sleep(poll_s)
-            continue
-        msg = (ur.stderr or ur.stdout or "").strip()
-        if msg:
-            print(f"[!] unregistervm --delete: {msg}")
-        return False
-    print(
-        f"[!] Timed out after {max_wait_s}s; VM {vm_name!r} is still locked. "
-        "Close VirtualBox UI for that VM, then re-run this script."
-    )
-    return False
-
-
-def remove_existing_vm(
-    vboxmanage: str,
-    vm_name: str,
-    vm_base: str,
-    *,
-    medium_path_for_vbox: str,
-) -> None:
-    """Drop any prior VM registration, registered disk, and leftover VM folder."""
-    if vm_is_registered(vboxmanage, vm_name):
-        state = get_vm_state(vboxmanage, vm_name)
-        if state == "saved":
-            print(f"Discarding saved state for {vm_name!r}...")
-            subprocess.run(
-                [vboxmanage, "discardstate", vm_name], capture_output=True, text=True
-            )
-            state = get_vm_state(vboxmanage, vm_name)
-        if state in ("running", "paused", "stopping", "starting"):
-            print(f"Powering off existing VM {vm_name!r} ({state})...")
-            try:
-                subprocess.run(
-                    [vboxmanage, "controlvm", vm_name, "poweroff"],
-                    check=False,
-                    timeout=30,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(
-                    f"Timed out asking VirtualBox to power off {vm_name!r}. "
-                    "Close the VM window or VirtualBox Manager session that is holding it, then rerun."
-                ) from exc
-            for _ in range(45):
-                time.sleep(1)
-                st = get_vm_state(vboxmanage, vm_name)
-                if st in (None, "poweroff", "aborted"):
-                    break
-            else:
-                print(
-                    f"[!] VM {vm_name!r} did not reach poweroff in time; "
-                    "unregister may fail - close the VM window or run ``VBoxManage controlvm ... poweroff``."
-                )
-        time.sleep(3)
-
-        print(f"Unregistering and deleting VirtualBox VM {vm_name!r} (all media)...")
-        if not try_unregistervm_delete(vboxmanage, vm_name):
-            raise RuntimeError(
-                f"Could not unregister {vm_name!r} (VirtualBox still has it locked). "
-                "Close any window showing that VM, exit stray VBoxManage sessions, then re-run."
-            )
-
-    vbox_closemedium_disk_delete_best_effort(vboxmanage, medium_path_for_vbox)
-
-    if os.path.isdir(vm_base):
-        print(f"Removing leftover VM directory {vm_base!r}...")
-        shutil.rmtree(vm_base, ignore_errors=True)
-
-
-# Current lab VMs plus legacy names still seen in older trees.
-_LAB_VM_REMOVAL_SPECS: tuple[tuple[str, str], ...] = (
-    (TEST_CLIENTA_VM_NAME, "client_browser_alpine.vdi"),
-    ("Test_Client", "client_browser_alpine.vdi"),
-    (TEST_CLIENTK_VM_NAME, "client_browser_kali.vdi"),
-    (LEGACY_CLIENT_VM_NAME, CLIENT_VDI_NAME),
-    ("OpenWrt_LAN_Client_Alpine", "client_browser_alpine.vdi"),
-    ("OpenWrt_LAN_Client", CLIENT_VDI_NAME),
-    (TEST_ROUTER_VM_NAME, OPENWRT_VDI_NAME),
-    ("OpenWrt_2026_Router", OPENWRT_VDI_NAME),
-)
-
-
 def remove_lab_vms(*, dry_run: bool = False) -> None:
-    """Power off and delete all known Overdrive lab VMs before a fresh rebuild."""
-    paths = get_system_paths(TEST_ROUTER_VM_NAME)
-    vboxmanage = find_vboxmanage(paths)
-    if not vboxmanage:
-        raise RuntimeError(get_vboxmanage_install_hint())
+    """Stop and delete all known Overdrive lab QEMU VMs before a fresh rebuild."""
+    from detections.common.common_qemu import remove_lab_vms_qemu
 
-    vms_root = str(paths["vms_root"])
-    is_wsl = bool(paths["is_wsl"])
-    terminate_stale_vboxmanage_processes()
-
-    found_any = False
-    for vm_name, vdi_name in _LAB_VM_REMOVAL_SPECS:
-        vm_base = os.path.join(vms_root, vm_name)
-        vdi_path = os.path.join(vm_base, vdi_name)
-        medium_for_vbox = wsl_to_windows_path(vdi_path) if is_wsl else vdi_path
-        registered = vm_is_registered(vboxmanage, vm_name)
-        has_dir = os.path.isdir(vm_base)
-        if not registered and not has_dir:
-            continue
-
-        found_any = True
-        if dry_run:
-            state = "registered" if registered else "folder only"
-            print(f"  [dry-run] Would remove {vm_name!r} ({state})")
-            continue
-
-        print(f"Removing lab VM {vm_name!r}...")
-        remove_existing_vm(
-            vboxmanage,
-            vm_name,
-            vm_base,
-            medium_path_for_vbox=medium_for_vbox,
-        )
-
-    if not found_any:
-        print("[*] No existing lab VMs to remove.")
-    elif not dry_run:
-        print("[+] Old lab VMs removed.")
+    remove_lab_vms_qemu(dry_run=dry_run)
 
 
-def vm_is_registered(vboxmanage: str, vm_name: str) -> bool:
-    last_timeout: subprocess.TimeoutExpired | None = None
-    last_error_output = ""
-    for attempt in range(2):
-        try:
-            r = subprocess.run(
-                [vboxmanage, "list", "vms"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-            if r.returncode == 0:
-                return f'"{vm_name}"' in r.stdout
-            last_error_output = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-            if attempt == 0:
-                terminate_stale_vboxmanage_processes()
-                continue
-            detail = last_error_output or f"exit status {r.returncode} with no output"
-            raise RuntimeError(
-                "VirtualBox failed to list registered VMs after clearing stale VBoxManage.exe "
-                f"processes: {detail}"
-            )
-        except subprocess.TimeoutExpired as exc:
-            last_timeout = exc
-            if attempt == 0:
-                terminate_stale_vboxmanage_processes()
-                continue
-            raise RuntimeError(
-                "Timed out listing VirtualBox VMs after clearing stale VBoxManage.exe processes. "
-                "Close VirtualBox Manager/VM windows, then rerun."
-            ) from last_timeout
-    raise RuntimeError("unreachable VirtualBox registration check state")
 
-
-def get_vm_state(vboxmanage: str, vm_name: str) -> str | None:
-    if not vm_is_registered(vboxmanage, vm_name):
-        return None
-    try:
-        r = subprocess.run(
-            [vboxmanage, "showvminfo", vm_name, "--machinereadable"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Timed out reading VirtualBox VM state for {vm_name!r}. "
-            "Close VirtualBox Manager/VM windows, then rerun."
-        ) from exc
-    if r.returncode != 0:
-        return None
-    for line in r.stdout.splitlines():
-        if line.startswith("VMState="):
-            return line.split("=", 1)[1].strip().strip('"')
-    return None
-
-
-def terminate_stale_vboxmanage_processes() -> None:
-    """Kill orphan Windows VBoxManage.exe processes that hold disk locks after failed runs."""
-    if not _windows_cmd_available():
-        return
-    subprocess.run(
-        ["cmd.exe", "/c", "taskkill", "/F", "/IM", "VBoxManage.exe"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    time.sleep(1)
-
-
-def close_medium_best_effort(vboxmanage: str, medium_linux: str) -> None:
-    """Close a disk medium in VirtualBox if it is still open (e.g. after clonemedium)."""
-    medium = (
-        wsl_to_windows_path(medium_linux)
-        if vboxmanage_targets_windows(vboxmanage)
-        else medium_linux
-    )
-    subprocess.run(
-        [vboxmanage, "closemedium", "disk", medium],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def wait_after_disk_operation(vboxmanage: str, *, seconds: float = 5.0) -> None:
-    """Pause after VDI clone/edit so Windows VirtualBox can release media locks."""
-    print(f"Waiting {seconds:.0f}s for VirtualBox to release disk locks...")
+def wait_after_disk_operation(*_args, seconds: float = 2.0, **_kwargs) -> None:
+    """Brief pause after disk image mutations."""
     time.sleep(seconds)
 
 
-def ensure_vm_ready_to_start(vboxmanage: str, vm_name: str, *, wait_s: int = 60) -> None:
-    """Power off and discard saved state so startvm can attach media."""
-    state = get_vm_state(vboxmanage, vm_name)
-    if state is None:
-        return
-    if state == "saved":
-        run_vboxmanage(vboxmanage, ["discardstate", vm_name])
-        state = get_vm_state(vboxmanage, vm_name)
-    if state in ("running", "paused", "stopping", "starting"):
-        run_vboxmanage(
-            vboxmanage,
-            ["controlvm", vm_name, "poweroff"],
-            lock_retries=20,
-            lock_retry_s=2.0,
-        )
-        for _ in range(wait_s):
-            time.sleep(1)
-            st = get_vm_state(vboxmanage, vm_name)
-            if st in (None, "poweroff", "aborted"):
-                break
-
-
-def assign_fresh_lab_hardware_uuid(vboxmanage: str, vm_name: str) -> str | None:
-    """Assign a fresh SMBIOS hardware UUID. Must run while the VM is powered off."""
-    if vm_name not in (TEST_CLIENTA_VM_NAME, TEST_CLIENTK_VM_NAME, TEST_ROUTER_VM_NAME):
-        return None
-    from VM.vm_config import random_vbox_hardware_uuid
-
-    hw_uuid = random_vbox_hardware_uuid()
-    run_vboxmanage(
-        vboxmanage,
-        ["modifyvm", vm_name, "--hardwareuuid", hw_uuid],
-    )
-    print(f"[overdrive] {vm_name} hardware UUID: {hw_uuid}")
-    return hw_uuid
-
-
-def assign_fresh_lab_macs(vboxmanage: str, vm_name: str) -> dict[str, str]:
-    """Assign unique lab launch identifiers (hardware UUID + NIC MACs).
-
-    Must run while the VM is powered off. Called before every ``startvm`` so each
-    launch gets fresh pseudo-random host identity while keeping stable OUIs.
-    """
-    from VM.vm_config import (
-        CLIENTK_NIC_OUI,
-        CLIENT_NIC_OUI,
-        G3100_MAC_OUI,
-        format_mac_colon,
-        random_client_mac_vbox,
-        random_clientk_mac_vbox,
-        random_g3100_mac_vbox,
-    )
-
-    result: dict[str, str] = {}
-    hw_uuid = assign_fresh_lab_hardware_uuid(vboxmanage, vm_name)
-    if hw_uuid:
-        result["hardware_uuid"] = hw_uuid
-
-    if vm_name == TEST_CLIENTA_VM_NAME:
-        mac = random_client_mac_vbox()
-        run_vboxmanage(
-            vboxmanage,
-            ["modifyvm", vm_name, "--macaddress1", mac],
-        )
-        oui = CLIENT_NIC_OUI.lower().replace(":", "")
-        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
-        print(
-            f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {format_mac_colon(mac)}"
-        )
-        result["nic1"] = mac
-        return result
-
-    if vm_name == TEST_CLIENTK_VM_NAME:
-        mac = random_clientk_mac_vbox()
-        run_vboxmanage(
-            vboxmanage,
-            ["modifyvm", vm_name, "--macaddress1", mac],
-        )
-        oui = CLIENTK_NIC_OUI.lower().replace(":", "")
-        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
-        print(
-            f"[overdrive] {vm_name} NIC MAC (OUI {oui_colon}): {format_mac_colon(mac)}"
-        )
-        result["nic1"] = mac
-        return result
-
-    if vm_name == TEST_ROUTER_VM_NAME:
-        lan = random_g3100_mac_vbox()
-        wan = random_g3100_mac_vbox()
-        while wan == lan:
-            wan = random_g3100_mac_vbox()
-        run_vboxmanage(
-            vboxmanage,
-            [
-                "modifyvm",
-                vm_name,
-                "--macaddress1",
-                lan,
-                "--macaddress2",
-                wan,
-            ],
-        )
-        oui = G3100_MAC_OUI.lower().replace(":", "")
-        oui_colon = ":".join(oui[i : i + 2] for i in range(0, 6, 2))
-        print(
-            f"[overdrive] {vm_name} G3100 MACs (OUI {oui_colon}): "
-            f"LAN={format_mac_colon(lan)}  WAN={format_mac_colon(wan)}"
-        )
-        result["nic1"] = lan
-        result["nic2"] = wan
-        return result
-
-    return result
-
-
-def start_vm_headless_safe(vboxmanage: str, vm_name: str) -> None:
-    """Start a VM headless after clearing stale locks from recent disk operations."""
-    if get_vm_state(vboxmanage, vm_name) == "running":
-        return
-    terminate_stale_vboxmanage_processes()
-    ensure_vm_ready_to_start(vboxmanage, vm_name)
-    assign_fresh_lab_macs(vboxmanage, vm_name)
-    wait_after_disk_operation(vboxmanage)
-    run_vboxmanage(
-        vboxmanage,
-        ["startvm", vm_name, "--type", "separate"],
-        lock_retries=30,
-        lock_retry_s=2.0,
-    )
-
-
-def serial_endpoint_for_vbox(
-    vboxmanage: str,
-    *,
-    tcp_port: int | None = None,
-    unix_path: str | None = None,
-) -> str:
-    """Return the host-side serial endpoint VirtualBox should expose."""
-    if vboxmanage_targets_windows(vboxmanage):
-        return str(tcp_port if tcp_port is not None else SERIAL_TCP_PORT)
-    return unix_path or SERIAL_UNIX_SOCKET_PATH
-
-
-def serial_uart_mode_and_endpoint(
-    vboxmanage: str,
-    *,
-    tcp_port: int | None = None,
-    unix_path: str | None = None,
-) -> tuple[str, str]:
-    """Return the ``VBoxManage --uartmode1`` mode and endpoint."""
-    if vboxmanage_targets_windows(vboxmanage):
-        return "tcpserver", str(tcp_port if tcp_port is not None else SERIAL_TCP_PORT)
-    return "server", unix_path or SERIAL_UNIX_SOCKET_PATH
-
 
 def serial_tcp_host_candidates(base_host: str | None = None) -> list[str]:
-    """Hosts to try when reaching VirtualBox's Windows TCP serial server from WSL."""
+    """Hosts to try when reaching a TCP serial endpoint from WSL."""
     host = base_host or SERIAL_TCP_HOST
     candidates: list[str] = []
     if _is_wsl_local():
@@ -933,7 +334,6 @@ def serial_tcp_host_candidates(base_host: str | None = None) -> list[str]:
     if _is_wsl_local() and "127.0.0.1" not in candidates:
         candidates.append("127.0.0.1")
     return candidates
-
 
 def spawn_wsl_interactive_terminal(
     command: list[str],
@@ -981,7 +381,6 @@ def spawn_wsl_interactive_terminal(
             continue
     return False
 
-
 def _windows_path_from_wsl(path: Path) -> str | None:
     """Convert ``/mnt/c/...`` to ``C:\\...`` when possible."""
     posix = path.resolve().as_posix()
@@ -992,7 +391,6 @@ def _windows_path_from_wsl(path: Path) -> str | None:
     if os.name == "nt":
         return str(path.resolve())
     return None
-
 
 def spawn_serial_console_window(
     script_path: str | Path,
@@ -1102,9 +500,8 @@ def spawn_serial_console_window(
     )
     return False
 
-
 def probe_tcp_serial(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool, str]:
-    """Connect to a VirtualBox TCP serial endpoint without sending bytes."""
+    """Connect to a TCP serial endpoint without sending bytes."""
     last_error: OSError | None = None
     for candidate in serial_tcp_host_candidates(host):
         try:
@@ -1114,30 +511,3 @@ def probe_tcp_serial(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool
             last_error = exc
     return False, str(last_error) if last_error else "no host candidates"
 
-
-def get_active_bridged_interface(vboxmanage: str) -> str | None:
-    """Return the first active bridged adapter name, or the first available adapter."""
-    try:
-        result = subprocess.run(
-            [vboxmanage, "list", "-l", "bridgedifs"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        blocks = [block for block in result.stdout.split("\n\n") if block.strip()]
-        first_name: str | None = None
-        for block in blocks:
-            attrs: dict[str, str] = {}
-            for line in block.splitlines():
-                if ":" not in line:
-                    continue
-                key, value = line.split(":", 1)
-                attrs[key.strip()] = value.strip()
-            name = attrs.get("Name")
-            if name and first_name is None:
-                first_name = name
-            if attrs.get("Status") == "Up" and name:
-                return name
-        return first_name
-    except subprocess.CalledProcessError:
-        return None

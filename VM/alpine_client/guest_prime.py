@@ -49,7 +49,7 @@ from VM.alpine_client.guest_scripts import (
     LAUNCH_IDENTITY_SCRIPT,
     REMOVE_CLIENT_INSTALL_PY_COMMAND,
 )
-from VM.alpine_client.image_tools import libguestfs_env, require_vdi_prime_tools
+from VM.alpine_client.image_tools import libguestfs_env, require_disk_prime_tools
 from VM.alpine_client.package_assets import client_package_install_script
 from VM.vm_config import alpine_client_root_password
 
@@ -61,7 +61,7 @@ __all__ = [
     "install_client_detection_libraries",
     "prepare_client_prime_assets",
     "prime_client_identity_and_base_packages",
-    "prime_client_vdi_for_intnet_lab",
+    "prime_client_disk_for_lab",
     "run_client_virt_customize",
 ]
 
@@ -186,15 +186,15 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
 
 
 def run_client_virt_customize(
-    vdi_linux: str,
+    disk_path: str,
     args: list[str],
     *,
     skip_prime: bool,
     network: bool = False,
 ) -> None:
-    vc = require_vdi_prime_tools(skip_prime=skip_prime)
+    vc = require_disk_prime_tools(skip_prime=skip_prime)
     virt_env = libguestfs_env()
-    command = [vc, "-a", vdi_linux]
+    command = [vc, "-a", disk_path]
     if network:
         command.append("--network")
     command.extend(args)
@@ -202,14 +202,14 @@ def run_client_virt_customize(
 
 
 def prime_client_identity_and_base_packages(
-    vdi_linux: str,
+    disk_path: str,
     assets: ClientPrimeAssets,
     *,
     skip_prime: bool,
 ) -> None:
     """Set guest identity/password; OS packages are installed by install.py."""
     run_client_virt_customize(
-        vdi_linux,
+        disk_path,
         [
             "--hostname",
             CLIENT_GUEST_HOSTNAME,
@@ -224,7 +224,7 @@ def prime_client_identity_and_base_packages(
 
 
 def copy_client_payloads_and_service_assets(
-    vdi_linux: str,
+    disk_path: str,
     assets: ClientPrimeAssets,
     *,
     skip_prime: bool,
@@ -263,14 +263,14 @@ def copy_client_payloads_and_service_assets(
     customize_args.extend(virt_customize_browser_webgl_args(assets.browser_webgl))
     customize_args.extend(virt_customize_browser_cookie_args(assets.browser_cookies))
     run_client_virt_customize(
-        vdi_linux,
+        disk_path,
         customize_args,
         skip_prime=skip_prime,
     )
 
 
 def install_client_detection_libraries(
-    vdi_linux: str,
+    disk_path: str,
     assets: ClientPrimeAssets,
     *,
     skip_prime: bool,
@@ -288,7 +288,7 @@ def install_client_detection_libraries(
     customize_args.extend(virt_customize_browser_cookie_args(assets.browser_cookies))
     customize_args.extend(virt_customize_browser_audio_args(assets.browser_audio))
     run_client_virt_customize(
-        vdi_linux,
+        disk_path,
         customize_args,
         skip_prime=skip_prime,
         network=True,
@@ -296,13 +296,13 @@ def install_client_detection_libraries(
 
 
 def configure_client_guest_services_and_boot(
-    vdi_linux: str,
+    disk_path: str,
     *,
     skip_prime: bool,
 ) -> None:
     """Wire copied scripts into OpenRC and make the bootloader serial/unattended."""
     run_client_virt_customize(
-        vdi_linux,
+        disk_path,
         [
             "--run-command",
             CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND,
@@ -312,14 +312,14 @@ def configure_client_guest_services_and_boot(
 
 
 def harden_and_clean_client_guest_image(
-    vdi_linux: str,
+    disk_path: str,
     assets: ClientPrimeAssets,
     *,
     skip_prime: bool,
 ) -> None:
     """Apply privacy hardening and prove unwanted remote-login hooks are absent."""
     run_client_virt_customize(
-        vdi_linux,
+        disk_path,
         [
             "--run",
             str(assets.hardening_script_host),
@@ -332,8 +332,8 @@ def harden_and_clean_client_guest_image(
     )
 
 
-def prime_client_vdi_for_intnet_lab(
-    vdi_linux: str,
+def prime_client_disk_for_lab(
+    disk_path: str,
     work_root: Path,
     *,
     skip_prime: bool,
@@ -341,9 +341,9 @@ def prime_client_vdi_for_intnet_lab(
     """Compatibility wrapper for older callers; setup_client_vm uses discrete steps."""
     print("Injecting custom configuration and packages into Alpine image...")
     assets = prepare_client_prime_assets(work_root)
-    prime_client_identity_and_base_packages(vdi_linux, assets, skip_prime=skip_prime)
-    copy_client_payloads_and_service_assets(vdi_linux, assets, skip_prime=skip_prime)
-    install_client_detection_libraries(vdi_linux, assets, skip_prime=skip_prime)
-    configure_client_guest_services_and_boot(vdi_linux, skip_prime=skip_prime)
-    harden_and_clean_client_guest_image(vdi_linux, assets, skip_prime=skip_prime)
+    prime_client_identity_and_base_packages(disk_path, assets, skip_prime=skip_prime)
+    copy_client_payloads_and_service_assets(disk_path, assets, skip_prime=skip_prime)
+    install_client_detection_libraries(disk_path, assets, skip_prime=skip_prime)
+    configure_client_guest_services_and_boot(disk_path, skip_prime=skip_prime)
+    harden_and_clean_client_guest_image(disk_path, assets, skip_prime=skip_prime)
     return True

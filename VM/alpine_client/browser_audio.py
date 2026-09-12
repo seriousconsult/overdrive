@@ -46,7 +46,7 @@ export ALSA_PCM_CARD=default
 
 @dataclass(frozen=True)
 class ClientBrowserAudioAssets:
-    """Host paths virt-customize copies into the Alpine VDI."""
+    """Host paths virt-customize copies into the Alpine disk image."""
 
     asound_conf: Path
     alsa_profile: Path

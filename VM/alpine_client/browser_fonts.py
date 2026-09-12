@@ -120,7 +120,7 @@ _FONTCONFIG_CONF = f"""\
 
 @dataclass(frozen=True)
 class ClientBrowserFontAssets:
-    """Host paths virt-customize copies into the Alpine VDI."""
+    """Host paths virt-customize copies into the Alpine disk image."""
 
     fonts_dir: Path
     fontconfig_conf: Path

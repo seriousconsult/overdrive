@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Verify VirtualBox wiring for the lab **from WSL or Linux on the host**.
+Verify QEMU/KVM lab wiring from WSL or Linux on the host.
 
-This checks what the hypervisor is configured to do. It does **not** prove DHCP or routing inside
-guests — run ``ip addr`` / ``ping`` **inside** the client VM for that (see LAB_TOPOLOGY.md).
+Checks hypervisor process state, the ``test-lan`` bridge, and serial TCP
+endpoints. It does **not** prove DHCP or routing inside guests — run
+``ip addr`` / ``ping`` **inside** the client VM for that.
 
-Why: the LAN segment (``192.168.50.0/24`` on intnet ``test-lan``) is **not** visible to the host
-OS; only VirtualBox guests on that intnet can talk to each other there.
-
-Exit codes: 0 = all checks passed, 1 = failed check(s), 2 = VBoxManage not found.
+Exit codes: 0 = all checks passed, 1 = failed check(s), 2 = QEMU tools missing.
 """
 
 from __future__ import annotations
@@ -16,42 +14,41 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
-import re
-import subprocess
 import sys
 from pathlib import Path
 
-# Ensure the repo package path is importable when running this script from VM/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from detections.common.common_qemu import (
+    LAB_BRIDGE_NAME,
+    TAP_CLIENTA,
+    TAP_CLIENTK,
+    TAP_ROUTER_LAN,
+    find_qemu_system,
+    is_qemu_vm_running,
+    lab_vms_root,
+    require_qemu_tools,
+)
 from detections.common.common_vm import (
-    LEGACY_CLIENT_VM_NAME,
+    CLIENTK_SERIAL_TCP_PORT,
+    ROUTER_SERIAL_TCP_PORT,
     SERIAL_TCP_HOST,
-    SERIAL_TCP_PORT,
     TEST_CLIENTA_VM_NAME,
     TEST_CLIENTK_VM_NAME,
     TEST_LAN_INTNET_NAME,
     TEST_ROUTER_VM_NAME,
-    find_vboxmanage_with_windows_fallback,
-    vboxmanage_targets_windows,
-    vm_is_registered as vm_registered,
-    get_vm_state as vm_state,
-    get_system_paths,
-    parse_machinereadable,
     probe_tcp_serial,
-    serial_uart_mode_and_endpoint,
 )
 
 ROUTER_VM = TEST_ROUTER_VM_NAME
-CLIENT_VM = LEGACY_CLIENT_VM_NAME
-LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
+LAN_BRIDGE = TEST_LAN_INTNET_NAME
+CLIENTA_SERIAL_PORT = 2325
 
 
 def serial_attach_is_locked(port: int) -> bool:
-    """True when an Overdrive serial console already owns this TCP endpoint."""
     if os.name == "nt":
         return False
     try:
@@ -73,313 +70,139 @@ def serial_attach_is_locked(port: int) -> bool:
         os.close(fd)
 
 
-def check_client_serial_pipe(
-    vbox: str,
-    info: dict[str, str],
-    verbose: bool,
-    vm_name: str,
-    port: int,
-    *,
-    vm_running: bool,
-) -> list[str]:
-    """Verify the client VM serial console endpoint is configured and accepts a host connection."""
+def _iface_exists(name: str) -> bool:
+    return Path(f"/sys/class/net/{name}").exists()
+
+
+def resolve_lab_client_vm() -> tuple[str, int, str]:
+    """Prefer Kali clientk; fall back to Alpine. Returns (name, serial_port, tap)."""
+    root = Path(lab_vms_root())
+    if is_qemu_vm_running(TEST_CLIENTK_VM_NAME):
+        return TEST_CLIENTK_VM_NAME, CLIENTK_SERIAL_TCP_PORT, TAP_CLIENTK
+    if is_qemu_vm_running(TEST_CLIENTA_VM_NAME):
+        return TEST_CLIENTA_VM_NAME, CLIENTA_SERIAL_PORT, TAP_CLIENTA
+    if (root / TEST_CLIENTK_VM_NAME).is_dir():
+        return TEST_CLIENTK_VM_NAME, CLIENTK_SERIAL_TCP_PORT, TAP_CLIENTK
+    if (root / TEST_CLIENTA_VM_NAME).is_dir():
+        return TEST_CLIENTA_VM_NAME, CLIENTA_SERIAL_PORT, TAP_CLIENTA
+    return TEST_CLIENTK_VM_NAME, CLIENTK_SERIAL_TCP_PORT, TAP_CLIENTK
+
+
+def check_bridge_and_taps(verbose: bool, client_tap: str) -> list[str]:
     errs: list[str] = []
-    expected_mode, expected_endpoint = serial_uart_mode_and_endpoint(vbox, tcp_port=port)
-    uart1 = info.get("uart1", "")
-    uartmode1 = info.get("uartmode1", "")
+    if not _iface_exists(LAN_BRIDGE):
+        errs.append(f"lab bridge {LAN_BRIDGE!r} does not exist")
+    else:
+        print(f"[+] bridge {LAN_BRIDGE!r} exists")
+        if verbose:
+            print(f"  [i] expected taps: {TAP_ROUTER_LAN}, {client_tap}")
 
-    if uart1 in ("", "off"):
-        errs.append(f"client serial: expected COM1 enabled, got uart1={uart1!r}")
-    if uartmode1 != f"{expected_mode},{expected_endpoint}":
-        errs.append(
-            f"client serial: expected uartmode1='{expected_mode},{expected_endpoint}', got {uartmode1!r}"
-        )
-        return errs
+    for tap, label in ((TAP_ROUTER_LAN, "router LAN"), (client_tap, "client LAN")):
+        if _iface_exists(tap):
+            print(f"[+] tap {tap!r} ({label}) exists")
+        else:
+            # Tap may be absent if VM is not running yet.
+            print(f"[·] tap {tap!r} ({label}) not present (ok if that VM is stopped)")
+    return errs
 
-    if not vm_running:
+
+def check_serial(vm_name: str, port: int, *, running: bool) -> list[str]:
+    errs: list[str] = []
+    if not running:
         print(
-            f"  [i] {vm_name} is not running — serial TCP :{port} cannot accept connections yet "
-            f"(uartmode1={uartmode1!r} looks configured)."
+            f"  [i] {vm_name} is not running — serial TCP :{port} cannot accept connections yet."
         )
         return errs
-
     if serial_attach_is_locked(port):
         print(
             f"  [i] {vm_name} serial TCP :{port} is already attached; "
             "skipping socket probe to avoid disrupting the console."
         )
         return errs
-
-    if vboxmanage_targets_windows(vbox):
-        ok, detail = probe_tcp_serial(SERIAL_TCP_HOST, port)
-        if ok:
-            print(f"  [+] {vm_name} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{port}")
-            print(
-                "      Socket-level check only; this does not prove guest ttyS0 output. "
-                f"Run: python VM/{'kali_client/create_VM_client_kali.py' if vm_name == TEST_CLIENTK_VM_NAME else 'alpine_client/create_VM_client_browser_pipe_alpine.py' if vm_name == TEST_CLIENTA_VM_NAME else 'create_VM_client_browser_pipe.py'} --serial-only"
-            )
-        else:
-            errs.append(
-                "client serial TCP endpoint did not accept a client. "
-                f"Probe output: {detail}"
-            )
-            print(f"  [!] {vm_name} serial TCP probe failed: {detail}")
+    ok, detail = probe_tcp_serial(SERIAL_TCP_HOST, port)
+    if ok:
+        print(f"  [+] {vm_name} serial TCP socket accepts a client: {SERIAL_TCP_HOST}:{port}")
+        print(
+            "      Socket-level check only; this does not prove guest ttyS0 output."
+        )
     else:
-        if os.path.exists(expected_endpoint):
-            print(f"  [+] {vm_name} serial socket exists: {expected_endpoint}")
-        else:
-            errs.append(f"client serial socket does not exist: {expected_endpoint}")
-
-    if verbose:
-        print(f"  [{vm_name}] uart1={uart1!r} uartmode1={uartmode1!r}")
+        errs.append(f"{vm_name} serial TCP :{port} did not accept a client ({detail})")
+        print(f"  [!] {vm_name} serial TCP probe failed: {detail}")
     return errs
 
 
-def resolve_lab_client_vm(vbox: str) -> tuple[str, int]:
-    """Prefer the Kali test clientk; fall back to Alpine or legacy Ubuntu client names."""
-    if vm_registered(vbox, TEST_CLIENTK_VM_NAME):
-        return TEST_CLIENTK_VM_NAME, 2326
-    if vm_registered(vbox, TEST_CLIENTA_VM_NAME):
-        return TEST_CLIENTA_VM_NAME, 2325
-    if vm_registered(vbox, CLIENT_VM):
-        return CLIENT_VM, SERIAL_TCP_PORT
-    return TEST_CLIENTK_VM_NAME, 2326
-
-
-def nic_promisc_policy(vbox: str, vm_name: str, info: dict[str, str], nic_index: int) -> str | None:
-    """Return a NIC promiscuous-mode policy, falling back to human-readable output."""
-    direct = info.get(f"promisc{nic_index}")
-    if direct:
-        return direct
-
-    try:
-        result = subprocess.run(
-            [vbox, "showvminfo", vm_name],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=20,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-    pattern = re.compile(rf"^NIC {nic_index}:.*Promisc Policy:\s*([^,]+)", re.MULTILINE)
-    match = pattern.search(result.stdout)
-    if match:
-        return match.group(1).strip()
-    return None
-
-
-def check_advanced_nic(info: dict[str, str], vm_name: str) -> list[str]:
-    """Checks for Promiscuous mode and Adapter Type."""
-    errs = []
-    # Check NIC 1 (usually the LAN in your setup)
-    promisc = info.get("promisc1", "deny")
-    adapter_type = info.get("nictype1", "")
-
-    if promisc == "deny":
-        # Warning only, as it might work without it, but allow-vms is safer for bridges
-        print(f"  [!] {vm_name} NIC1 Promiscuous mode is 'deny'. If bridge fails, set to 'allow-vms'.")
-
-    if "virtio" not in adapter_type.lower():
-        print(f"  [i] {vm_name} NIC1 uses {adapter_type}. VirtIO is recommended for OpenWrt performance.")
-
-    return errs
-
-
-def check_mac_collisions(vbox: str, vms: list[str]) -> list[str]:
-    """Ensures router and client don't have the same virtual hardware ID."""
-    macs = {}
-    errs = []
-    for vm in vms:
-        info = parse_machinereadable(vbox, vm)
-        # Check NIC 1 and 2
-        for i in ["1", "2"]:
-            mac = info.get(f"macaddress{i}")
-            if mac:
-                if mac in macs:
-                    errs.append(f"MAC Collision: {vm} and {macs[mac]} both use MAC {mac}")
-                macs[mac] = vm
-    return errs
-
-
-def check_router(info: dict[str, str], verbose: bool) -> list[str]:
-    errs: list[str] = []
-    nic1 = info.get("nic1", "")
-    int1 = info.get("intnet1", "")
-    nic2 = info.get("nic2", "")
-
-    if nic1 != "intnet":
-        errs.append(f"router NIC1: expected intnet, got {nic1!r}")
-    if int1 != LAN_INTNET_NAME:
-        errs.append(
-            f"router intnet1: expected {LAN_INTNET_NAME!r}, got {int1!r}"
-        )
-    if nic2 != "bridged":
-        errs.append(
-            f"router NIC2: expected bridged (WAN), got {nic2!r}"
-        )
-    uart = info.get("uart1", "")
-    if uart in ("", "off"):
-        print(
-            f"  [!] {ROUTER_VM}: COM1/uart1 not enabled. "
-            f"Run: python VM/openwrt_router/create_VM_OpenWrt_router.py --enable-serial"
-        )
-    if verbose:
-        print(
-            f"  [{ROUTER_VM}] nic1={nic1!r} intnet1={int1!r} | nic2={nic2!r} "
-            f"(bridgeadapter2={info.get('bridgeadapter2', '')!r})"
-        )
-    return errs
-
-
-def check_client(info: dict[str, str], verbose: bool, vm_name: str) -> list[str]:
-    errs: list[str] = []
-    nic1 = info.get("nic1", "")
-    int1 = info.get("intnet1", "")
-
-    if nic1 != "intnet":
-        errs.append(f"client NIC1: expected intnet, got {nic1!r}")
-    if int1 != LAN_INTNET_NAME:
-        errs.append(
-            f"client intnet1: expected {LAN_INTNET_NAME!r}, got {int1!r}"
-        )
-
-    if verbose:
-        print(
-            f"  [{vm_name}] nic1={nic1!r} intnet1={int1!r}"
-        )
-    return errs
-
-
-def verify_all_vms(vbox: str, verbose: bool) -> list[str]:
-    """
-    Performs a deep-dive verification of the Router and Client networking.
-    This is the 'stronger' loop that checks for physical-link issues.
-    """
-    all_errs = []
-
-    client_vm, client_port = resolve_lab_client_vm(vbox)
+def verify_all_vms(verbose: bool) -> list[str]:
+    all_errs: list[str] = []
+    client_vm, client_port, client_tap = resolve_lab_client_vm()
     print(f"Lab client VM:         {client_vm} (serial TCP {client_port})")
-    if client_vm == TEST_CLIENTK_VM_NAME and vm_registered(vbox, TEST_CLIENTA_VM_NAME):
+    if client_vm == TEST_CLIENTK_VM_NAME and is_qemu_vm_running(TEST_CLIENTA_VM_NAME):
         print(
-            f"  [i] Ignoring Alpine {TEST_CLIENTA_VM_NAME!r} (still registered but not the active test client)."
-        )
-    if client_vm == TEST_CLIENTA_VM_NAME and vm_registered(vbox, CLIENT_VM):
-        print(
-            f"  [i] Ignoring legacy {CLIENT_VM!r} (still registered but not the test client)."
+            f"  [i] Alpine {TEST_CLIENTA_VM_NAME!r} is also running; "
+            "verification focuses on Kali as the active test client."
         )
     print()
 
-    target_vms = [
-        (ROUTER_VM, "router"),
-        (client_vm, "client"),
-    ]
+    all_errs.extend(check_bridge_and_taps(verbose, client_tap))
+    print()
 
-    # Track MACs to find hidden collisions
-    seen_macs: dict[str, str] = {}
-
-    for vm, label in target_vms:
-        if not vm_registered(vbox, vm):
-            all_errs.append(f"VM {vm!r} is not registered.")
-            print(f"[ ] {vm}: NOT FOUND")
+    for vm, port, role in (
+        (ROUTER_VM, ROUTER_SERIAL_TCP_PORT, "router"),
+        (client_vm, client_port, "client"),
+    ):
+        running = is_qemu_vm_running(vm)
+        mark = "+" if running else "·"
+        print(f"[{mark}] {vm}: {'running' if running else 'not running'} ({role})")
+        if not running:
+            # Missing router or preferred client is a failure; both should be up after run_VMs.
+            all_errs.append(f"VM {vm!r} is not running.")
             continue
-
-        st = vm_state(vbox, vm)
-        print(f"[{'+' if st == 'running' else '·'}] {vm}: state={st!r}")
-
-        info = parse_machinereadable(vbox, vm)
-        if not info:
-            all_errs.append(f"Could not read metadata for {vm}.")
-            continue
-
-        # 1. Physical Link Check (The 'Cable Connected' toggle)
-        # VirtualBox uses 'cableconnected1', 'cableconnected2', etc.
-        for i in range(1, 3):
-            nic_mode = info.get(f"nic{i}")
-            if nic_mode and nic_mode != "none":
-                if info.get(f"cableconnected{i}") == "off":
-                    all_errs.append(f"{vm}: NIC{i} ({nic_mode}) cable is UNPLUGGED in VirtualBox settings.")
-
-        # 2. MAC Address Collision Check
-        for i in range(1, 3):
-            mac = info.get(f"macaddress{i}")
-            if mac:
-                if mac in seen_macs:
-                    all_errs.append(f"CRITICAL: MAC Collision! {vm} and {seen_macs[mac]} both use {mac}.")
-                seen_macs[mac] = vm
-
-        # 3. OpenWrt Bridge Compatibility (Promiscuous Mode)
-        # OpenWrt needs to 'see' traffic for other MACs (like clients) on its LAN port
-        if vm == ROUTER_VM:
-            # Assuming NIC1 is your LAN/Internal Network based on earlier logs
-            promisc = nic_promisc_policy(vbox, vm, info, 1)
-            if promisc == "deny":
-                print(f"  [!] Warning: {vm} LAN is 'deny' promisc. OpenWrt bridges often need 'allow-vms'.")
-
-        # 4. Standard Topology Check (Calls your existing logic)
-        if vm == ROUTER_VM:
-            all_errs.extend(check_router(info, verbose))
-        else:
-            all_errs.extend(check_client(info, verbose, vm))
-            all_errs.extend(
-                check_client_serial_pipe(
-                    vbox,
-                    info,
-                    verbose,
-                    vm,
-                    client_port,
-                    vm_running=(st == "running"),
-                )
-            )
+        all_errs.extend(check_serial(vm, port, running=True))
 
     return all_errs
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Verify lab VM networking and client serial pipe from the host.",
+        description="Verify lab QEMU/KVM networking and client serial from the host.",
     )
     ap.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="Print detailed NIC metadata, MAC addresses, and promiscuous modes.",
+        help="Print extra bridge/tap detail.",
     )
     ns = ap.parse_args()
 
-    # 1. Locate the VBoxManage executable
-    paths = get_system_paths(ROUTER_VM)
-    vbox = find_vboxmanage_with_windows_fallback(paths)
-    if not vbox:
+    qemu = find_qemu_system()
+    if not qemu:
         print(
-            "[!] VBoxManage not found. Ensure VirtualBox is installed.\n"
-            "    If using WSL, ensure it is at: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe",
+            "[!] qemu-system-x86_64 not found. Install: sudo apt install -y qemu-system-x86 qemu-utils",
             file=sys.stderr,
         )
         return 2
+    try:
+        require_qemu_tools()
+    except RuntimeError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 2
 
-    print(f"--- Laboratory Verification ---")
-    print(f"Using Hypervisor Tool: {vbox}")
-    print(f"Target LAN Segment:    {LAN_INTNET_NAME}\n")
+    print("--- Laboratory Verification ---")
+    print(f"Using Hypervisor Tool: {qemu}")
+    print(f"Target LAN Segment:    {LAN_BRIDGE} (Linux bridge)")
+    print(f"Lab VMs directory:     {lab_vms_root()}\n")
 
-    # 2. Run the 'Stronger' Verification Loop
-    # This checks registration, power state, cables, MACs, and Promisc mode.
-    all_errs = verify_all_vms(vbox, ns.verbose)
+    all_errs = verify_all_vms(ns.verbose)
 
-    # 3. Handle Results
     if all_errs:
         print("\n[!] VERIFICATION FAILED:")
         for e in all_errs:
             print(f"    - {e}")
         return 1
 
-    print("\n[+] SUCCESS: VirtualBox 'Layer 1' wiring is correct.")
+    print("\n[+] SUCCESS: QEMU/KVM 'Layer 1' wiring looks correct.")
     print("    You can now proceed to test Layer 3 (DHCP/Ping) inside the guests.")
     return 0
 
 
 if __name__ == "__main__":
-    # SystemExit ensures the script returns the correct shell exit code (0 or 1)
-    # This is useful if you later want to chain this in a bash script (e.g., verify && run)
     raise SystemExit(main())

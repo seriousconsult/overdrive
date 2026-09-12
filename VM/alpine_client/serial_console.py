@@ -1,4 +1,4 @@
-"""VirtualBox serial console attach for the test client."""
+"""QEMU serial console attach for the test client."""
 
 from __future__ import annotations
 
@@ -14,11 +14,8 @@ from pathlib import Path
 
 from detections.common.common_vm import (
     SERIAL_BAUD,
-    SERIAL_PTY_LINK_PATH,
     SERIAL_TCP_HOST,
-    run_vboxmanage,
     serial_tcp_host_candidates,
-    vboxmanage_targets_windows,
 )
 from VM.alpine_client.client_config import (
     ALPINE_SERIAL_TCP_PORT,
@@ -35,34 +32,19 @@ __all__ = [
 ]
 
 
-def serial_console_instructions(vboxmanage: str, endpoint: str) -> str:
-    if vboxmanage_targets_windows(vboxmanage):
-        hosts = ", ".join(serial_tcp_host_candidates(SERIAL_TCP_HOST))
-        return (
-            "--- Serial console TCP endpoint ---\n"
-            f"VirtualBox exposes COM1 as TCP port {endpoint} on the Windows host.\n"
-            f"From WSL, connect to one of: {hosts}\n"
-            "To attach to an already-running VM from WSL:\n"
-            f"  ./{CREATE_SCRIPT_NAME} --serial-only\n"
-        )
+def serial_console_instructions(endpoint: str) -> str:
+    hosts = ", ".join(serial_tcp_host_candidates(SERIAL_TCP_HOST))
     return (
-        "--- Serial console host socket ---\n"
-        f"VirtualBox exposes COM1 as: {endpoint}\n"
-        "Attach with socat plus screen:\n"
-        f"  rm -f {SERIAL_PTY_LINK_PATH}\n"
-        f"  socat -d -d UNIX-CONNECT:{endpoint} PTY,link={SERIAL_PTY_LINK_PATH},raw,echo=0\n"
-        f"  screen {SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}\n"
+        "--- Serial console TCP endpoint ---\n"
+        f"QEMU exposes COM1 as TCP port {endpoint} on the host.\n"
+        f"From WSL, connect to one of: {hosts}\n"
+        "To attach to an already-running VM from WSL:\n"
+        f"  ./{CREATE_SCRIPT_NAME} --serial-only\n"
     )
 
 
-def configure_serial_endpoint(vboxmanage: str, endpoint: str) -> None:
-    if vboxmanage_targets_windows(vboxmanage):
-        uart_mode = "tcpserver"
-        print(f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} ({SERIAL_BAUD} baud).")
-    else:
-        uart_mode = "server"
-        print(f"Serial console: COM1 -> host socket {endpoint} ({SERIAL_BAUD} baud).")
-    run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--uart1", "0x3F8", "4", "--uartmode1", uart_mode, endpoint])
+def configure_serial_endpoint(endpoint: str) -> None:
+    print(f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} ({SERIAL_BAUD} baud).")
 
 
 @contextlib.contextmanager
@@ -233,7 +215,7 @@ def _open_tcp_serial_socket(host: str, port: int, *, timeout_s: float) -> socket
 
 @contextlib.contextmanager
 def _serial_attach_lock(port: int):
-    """Prevent Overdrive helpers from competing for one VirtualBox TCP serial endpoint."""
+    """Prevent Overdrive helpers from competing for one TCP serial endpoint."""
     if os.name == "nt":
         yield
         return
@@ -248,7 +230,7 @@ def _serial_attach_lock(port: int):
         except BlockingIOError as exc:
             raise RuntimeError(
                 f"Serial TCP :{port} is already attached by another Overdrive process. "
-                "Close that serial pane/window first; not resetting VirtualBox COM1."
+                "Close that serial pane/window first."
             ) from exc
         os.ftruncate(fd, 0)
         os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
@@ -273,11 +255,8 @@ def connect_tcp_serial_console(host: str, port: int, *, timeout_s: float = 20.0,
     return True
 
 
-def connect_serial_console(vboxmanage: str, endpoint: str, *, force_interactive: bool = False) -> bool:
-    if vboxmanage_targets_windows(vboxmanage):
-        return connect_tcp_serial_console(SERIAL_TCP_HOST, int(endpoint), force_interactive=force_interactive)
-    print("Native Linux socket serial connection mode is ready. Connect using host-side socket helper.")
-    return True
+def connect_serial_console(endpoint: str, *, force_interactive: bool = False) -> bool:
+    return connect_tcp_serial_console(SERIAL_TCP_HOST, int(endpoint), force_interactive=force_interactive)
 
 
 def nudge_alpine_boot_menu(*, rounds: int = 8, interval_s: float = 1.0) -> None:

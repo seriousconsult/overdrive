@@ -1,9 +1,9 @@
-"""Keep Chromium on a software GL path without VirtualBox 3D acceleration.
+"""Keep Chromium on a software GL path without 3D passthrough.
 
-VirtualBox 3D / SVGA would leak hypervisor renderer strings. Chromium still
+Hardware/3D acceleration would leak hypervisor renderer strings. Chromium still
 draws WebGL via SwiftShader on the Xvfb display; detections spoof Intel ANGLE
 names in-page.
-``LIBGL_ALWAYS_SOFTWARE=1`` stops Mesa from talking to VBox SVGA if a probe
+``LIBGL_ALWAYS_SOFTWARE=1`` forces Mesa softpipe/llvmpipe even if a probe
 ever drops ``--use-gl=swiftshader``.
 """
 
@@ -22,14 +22,14 @@ __all__ = [
 GUEST_WEBGL_PROFILE_D = "/etc/profile.d/97-overdrive-webgl.sh"
 
 _WEBGL_PROFILE = """\
-# Overdrive: software GL only. Do not enable VirtualBox 3D acceleration.
+# Overdrive: software GL only. Do not enable guest 3D acceleration.
 export LIBGL_ALWAYS_SOFTWARE=1
 """
 
 
 @dataclass(frozen=True)
 class ClientBrowserWebGLAssets:
-    """Host path virt-customize copies into the Alpine VDI."""
+    """Host path virt-customize copies into the Alpine disk image."""
 
     profile_d: Path
 
@@ -38,7 +38,7 @@ def stage_client_browser_webgl(work_root: Path) -> ClientBrowserWebGLAssets:
     """Write the software-GL profile snippet for virt-customize."""
     path = work_root / "97-overdrive-webgl.sh"
     path.write_text(_WEBGL_PROFILE, encoding="utf-8", newline="\n")
-    print("[overdrive] Staged LIBGL_ALWAYS_SOFTWARE profile (no guest GUI / VBox 3D).")
+    print("[overdrive] Staged LIBGL_ALWAYS_SOFTWARE profile (no guest GUI / 3D).")
     return ClientBrowserWebGLAssets(profile_d=path)
 
 

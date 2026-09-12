@@ -1,5 +1,5 @@
 """
-Configuration constants for the VirtualBox lab VMs.
+Configuration constants for the QEMU/KVM lab VMs.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ VM_ENV_PATH = Path(__file__).resolve().with_name(".env")
 # https://wikidevi.wi-cat.ru/Verizon_G3100
 G3100_MAC_OUI = "3cbdc5"
 
-# Dell Inc. PC NIC OUI for the test client - not VirtualBox 080027,
+# Dell Inc. PC NIC OUI for the test client - not the common hypervisor OUI 080027,
 # and not the router G3100 OUI, so router vs client stay distinct on the wire.
 CLIENT_NIC_OUI = "001422"
 
@@ -95,27 +95,27 @@ def osboxes_login_password() -> str:
     return vm_secret(OSBOXES_LOGIN_PASSWORD_ENV)
 
 
-def random_g3100_mac_vbox(*, oui: str = G3100_MAC_OUI) -> str:
-    """Return a random G3100-style MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
-    return _random_mac_vbox(oui)
+def random_g3100_mac(*, oui: str = G3100_MAC_OUI) -> str:
+    """Return a random G3100-style MAC as 12 hex digits (no separators)."""
+    return _random_mac_hex(oui)
 
 
-def random_client_mac_vbox(*, oui: str = CLIENT_NIC_OUI) -> str:
-    """Return a random Dell-style client MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
-    return _random_mac_vbox(oui)
+def random_client_mac(*, oui: str = CLIENT_NIC_OUI) -> str:
+    """Return a random Dell-style client MAC as 12 hex digits (no separators)."""
+    return _random_mac_hex(oui)
 
 
-def random_clientk_mac_vbox(*, oui: str = CLIENTK_NIC_OUI) -> str:
-    """Return a random clientk MAC as 12 hex digits for ``VBoxManage --macaddressN``."""
-    return _random_mac_vbox(oui)
+def random_clientk_mac(*, oui: str = CLIENTK_NIC_OUI) -> str:
+    """Return a random clientk MAC as 12 hex digits (no separators)."""
+    return _random_mac_hex(oui)
 
 
-def random_vbox_hardware_uuid() -> str:
-    """Return a fresh SMBIOS/hardware UUID for ``VBoxManage modifyvm --hardwareuuid``."""
+def random_lab_hardware_uuid() -> str:
+    """Return a fresh SMBIOS/hardware UUID for QEMU ``-smbios type=1,uuid=…``."""
     return str(uuid.uuid4())
 
 
-def _random_mac_vbox(oui: str) -> str:
+def _random_mac_hex(oui: str) -> str:
     prefix = oui.lower().replace(":", "").replace("-", "")
     if len(prefix) != 6 or any(c not in "0123456789abcdef" for c in prefix):
         raise ValueError(f"Invalid OUI {oui!r}; expected 3 hex octets")

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
-"""Create a test router VM in VirtualBox (WSL or Linux).
+"""Create a test router VM with QEMU/KVM (WSL or Linux).
 
 **NIC order vs stock OpenWrt:** The x86 image defaults to **LAN** on ``eth0`` (``br-lan``) and **WAN**
-on ``eth1``. VirtualBox presents adapters in order as ``eth0``, ``eth1``. So **NIC1** is the **LAN**
-leg (internal network ``test-lan``) and **NIC2** is **WAN** (bridged). Client VMs use
-``--nic1 intnet`` on the same intnet name.
+on ``eth1``. QEMU presents virtio NICs in order as ``eth0``, ``eth1``. So **NIC1** is the **LAN**
+leg (Linux bridge ``test-lan``) and **NIC2** is **WAN** (QEMU user/SLIRP networking). Client VMs
+attach a tap to the same bridge.
 
 **DNS:** Before convert, the script downloads stubby ``.apk`` deps (OpenWrt 25.12 uses
 **apk**, not opkg) and injects them with ``apply_mullvad_dot.sh`` into the image. After
@@ -13,12 +13,14 @@ start, serial runs that script once (no upload/retry loop) and **requires**
 ``whoami.akamai.net`` proves Mullvad (anycast ``194.242.2.x`` or PoP ``*.mullvad.net``).
 
 **Serial console:** COM1 / ``ttyS0`` at 115200 baud (stock OpenWrt already uses
-``console=ttyS0``). On Windows VirtualBox this is exposed as TCP port **2324** (client uses
-**2325**). Attach with ``./create_VM_OpenWrt_router.py --serial-only``.
+``console=ttyS0``). QEMU exposes this as TCP port **2324** (clients use **2325** / **2326**).
+Attach with ``./create_VM_OpenWrt_router.py --serial-only``.
 
-At startup, any **existing VirtualBox VM with the same name** and the matching folder under
-``VM/VirtualBox VMs/<VM_NAME>/`` are **removed** (power off, ``unregistervm --delete``, then delete
-leftover directory) so the script always builds the same thing from a clean slate.
+At startup, any **existing QEMU VM with the same name** and the matching folder under
+``VM/lab_vms/<VM_NAME>/`` are **removed** so the script always builds from a clean slate.
+
+**Host needs:** ``qemu-system-x86_64``, ``qemu-img``, ``/dev/kvm``, and permission to create
+bridge/tap devices (``ip`` / sudo).
 """
 
 import argparse
@@ -40,34 +42,33 @@ REPO_ROOT = str(Path(SCRIPT_DIR).resolve().parents[1])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from detections.common.common_qemu import (
+    OPENWRT_QCOW_NAME,
+    TAP_ROUTER_LAN,
+    build_router_qemu_argv,
+    convert_disk_to_qcow2,
+    fresh_lab_identity,
+    is_qemu_vm_running,
+    qemu_log_path,
+    qemu_pid_path,
+    remove_existing_lab_vm,
+    require_qemu_tools,
+    start_qemu_daemon,
+    stop_qemu_vm,
+)
 from detections.common.common_vm import (
-    ROUTER_SERIAL_PTY_LINK_PATH,
     ROUTER_SERIAL_TCP_PORT,
-    ROUTER_SERIAL_UNIX_SOCKET_PATH,
     SERIAL_BAUD,
     SERIAL_TCP_HOST,
-    assign_fresh_lab_macs,
     ensure_kvm_accessible,
-    find_vboxmanage,
-    get_active_bridged_interface,
-    get_linux_distro_id,
     get_system_paths,
-    get_vboxmanage_install_hint,
-    get_vm_state,
     OPENWRT_IMAGE_NAME,
     TEST_LAN_INTNET_NAME,
     TEST_ROUTER_VM_NAME,
     OPENWRT_URL,
-    OPENWRT_VDI_NAME,
-    remove_existing_vm,
-    resolve_vbox_settings_path,
-    run_vboxmanage,
-    serial_endpoint_for_vbox,
+    OPENWRT_QCOW_NAME,
     serial_tcp_host_candidates,
     spawn_serial_console_window,
-    vboxmanage_targets_windows,
-    vm_is_registered,
-    wsl_to_windows_path,
 )
 from VM.openwrt_router.openwrt_assets import (
     APPLY_MULLVAD_DOT_SH,
@@ -99,10 +100,10 @@ except ImportError:
     setup_clientk_vm = None
 
 VM_NAME = TEST_ROUTER_VM_NAME
-# Downstream VMs: ``VBoxManage modifyvm <name> --nic1 intnet --intnet1 test-lan``
+# Downstream VMs: tap + virtio-net on Linux bridge ``test-lan``
 LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
 IMAGE_NAME = OPENWRT_IMAGE_NAME
-VDI_NAME = OPENWRT_VDI_NAME
+QCOW_NAME = OPENWRT_QCOW_NAME
 
 def download_openwrt_image(url: str, dest_path: str) -> None:
     dest = Path(dest_path)
@@ -615,7 +616,7 @@ def _serial_exchange(sock, payload: str, *, wait_s: float = 2.0) -> str:
 
 
 def _close_serial_socket(sock) -> None:
-    """Best-effort close for a VirtualBox TCP serial socket."""
+    """Best-effort close for a TCP serial socket."""
     import socket
 
     try:
@@ -625,7 +626,7 @@ def _close_serial_socket(sock) -> None:
     sock.close()
 
 
-# OpenWrt ash + VBox serial wraps ~80 cols and corrupts long typed lines.
+# OpenWrt ash + serial wraps ~80 cols and corrupts long typed lines.
 _SERIAL_MAX_CMD = 76
 
 
@@ -709,9 +710,9 @@ def _serial_output_is_mullvad_whoami(sock, who_out: str, *, status_digit_func=No
             continue
         if re.match(r"172\.(1[6-9]|2\d|3[0-1])\.", ip):
             continue
-        # Common ISP / VBox host-resolver leftovers (not Mullvad).
+        # Common ISP / upstream host-resolver leftovers (not Mullvad).
         if ip.startswith(("71.", "96.")):
-            print(f"[overdrive] whoami {ip} looks like ISP/VBox DNS — not Mullvad")
+            print(f"[overdrive] whoami {ip} looks like ISP/upstream DNS — not Mullvad")
             return False
         if ip not in candidates:
             candidates.append(ip)
@@ -934,7 +935,6 @@ def _serial_upload_b64_file(
 def ensure_mullvad_dot_over_serial(
     *,
     timeout_s: float = 240.0,
-    vboxmanage: str | None = None,
     allow_serial_upload: bool = False,
 ) -> None:
     """
@@ -1215,121 +1215,55 @@ def mullvad_dot_console_instructions(apply_path: Path | None = None) -> str:
     )
 
 
-def router_serial_endpoint(vboxmanage: str) -> str:
-    """Host endpoint for OpenWrt COM1 (distinct from the LAN client port)."""
-    return serial_endpoint_for_vbox(
-        vboxmanage,
-        tcp_port=ROUTER_SERIAL_TCP_PORT,
-        unix_path=ROUTER_SERIAL_UNIX_SOCKET_PATH,
-    )
+def router_serial_endpoint() -> str:
+    """Host TCP port for OpenWrt COM1 (distinct from the LAN client ports)."""
+    return str(ROUTER_SERIAL_TCP_PORT)
 
 
-def configure_router_serial(vboxmanage: str, endpoint: str) -> None:
-    """Expose OpenWrt COM1 as TCP (Windows VBox) or Unix socket (native Linux VBox)."""
-    if vboxmanage_targets_windows(vboxmanage):
-        uart_mode = "tcpserver"
-        print(
-            f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{endpoint} "
-            f"({SERIAL_BAUD} baud; OpenWrt ttyS0)."
-        )
-    else:
-        uart_mode = "server"
-        print(f"Serial console: COM1 -> host socket {endpoint} ({SERIAL_BAUD} baud).")
-
-    run_vboxmanage(
-        vboxmanage,
-        [
-            "modifyvm",
-            VM_NAME,
-            "--uart1",
-            "0x3F8",
-            "4",
-            "--uartmode1",
-            uart_mode,
-            endpoint,
-        ],
-    )
-
-
-def assign_g3100_macs(vboxmanage: str) -> tuple[str, str]:
-    """
-    Assign fresh Verizon FiOS G3100-style MACs to LAN (NIC1) and WAN (NIC2).
-
-    Must be called while the VM is powered off. Also invoked before every
-    ``startvm`` so each launch gets a unique pair.
-    """
-    macs = assign_fresh_lab_macs(vboxmanage, VM_NAME)
-    return macs["nic1"], macs["nic2"]
-
-
-def wait_for_router_running(vboxmanage: str, *, timeout_s: float = 60.0) -> None:
-    """Wait until VBoxManage reports the router VM as running."""
+def wait_for_router_running(*, timeout_s: float = 60.0) -> None:
+    """Wait until the QEMU pidfile reports the router VM as running."""
+    paths = get_system_paths(VM_NAME)
+    vm_base = str(paths["vm_base"])
     deadline = time.monotonic() + timeout_s
-    last_state = None
     while time.monotonic() < deadline:
-        try:
-            last_state = get_vm_state(vboxmanage, VM_NAME)
-        except Exception as exc:
-            last_state = f"error: {exc}"
-        if last_state == "running":
+        if is_qemu_vm_running(VM_NAME, vm_base=vm_base):
             return
-        time.sleep(1.0)
-    raise RuntimeError(f"{VM_NAME} did not reach running state; last state={last_state!r}")
+        time.sleep(0.5)
+    raise RuntimeError(f"{VM_NAME} did not reach running state within {timeout_s:.0f}s")
 
 
-def router_serial_instructions(vboxmanage: str, endpoint: str) -> str:
-    """Host-specific attach instructions for the OpenWrt serial console."""
-    if vboxmanage_targets_windows(vboxmanage):
-        hosts = ", ".join(serial_tcp_host_candidates(SERIAL_TCP_HOST))
-        return (
-            "\n--- Serial console (OpenWrt ttyS0) ---\n"
-            f"VirtualBox exposes COM1 as TCP port {endpoint} on the Windows host.\n"
-            f"From WSL, connect to one of: {hosts}\n"
-            f"  ./{Path(__file__).name} --serial-only\n"
-            "Stock OpenWrt already uses console=ttyS0; press Enter for the ash login.\n"
-            "test client serial uses TCP 2325; router uses 2324 so both can run together.\n"
-        )
+def router_serial_instructions(endpoint: str | None = None) -> str:
+    """Attach instructions for the OpenWrt serial console."""
+    port = endpoint or router_serial_endpoint()
+    hosts = ", ".join(serial_tcp_host_candidates(SERIAL_TCP_HOST))
     return (
         "\n--- Serial console (OpenWrt ttyS0) ---\n"
-        f"VirtualBox exposes COM1 as: {endpoint}\n"
-        f"  rm -f {ROUTER_SERIAL_PTY_LINK_PATH}\n"
-        f"  socat -d -d UNIX-CONNECT:{endpoint} "
-        f"PTY,link={ROUTER_SERIAL_PTY_LINK_PATH},raw,echo=0\n"
-        f"  screen {ROUTER_SERIAL_PTY_LINK_PATH} {SERIAL_BAUD}\n"
-        "Press Enter once if the console is blank (OpenWrt ash askfirst).\n"
+        f"QEMU exposes COM1 as TCP port {port} on the host.\n"
+        f"Connect to one of: {hosts}\n"
+        f"  ./{Path(__file__).name} --serial-only\n"
+        "Stock OpenWrt already uses console=ttyS0; press Enter for the ash login.\n"
+        "test client serial uses TCP 2325 / 2326; router uses 2324 so all can run together.\n"
     )
 
 
 def connect_router_serial_console(
-    vboxmanage: str,
-    endpoint: str,
+    endpoint: str | None = None,
     *,
     force_interactive: bool = True,
 ) -> bool:
-    """Attach this terminal to the OpenWrt serial console (reuse client TCP bridge)."""
-    # Import lazily so --help / create paths stay light if client module is heavy.
+    """Attach this terminal to the OpenWrt serial console (TCP)."""
     from VM.alpine_client import create_VM_client_browser_pipe_alpine as client_serial
 
-    if vboxmanage_targets_windows(vboxmanage):
-        return client_serial.connect_tcp_serial_console(
-            SERIAL_TCP_HOST,
-            int(endpoint),
-            force_interactive=force_interactive,
-        )
-
-    socat = shutil.which("socat")
-    screen = shutil.which("screen")
-    if not socat or not screen:
-        raise RuntimeError(
-            "Native Linux serial attach requires socat and screen:\n"
-            "  sudo apt install -y socat screen"
-        )
-    print(router_serial_instructions(vboxmanage, endpoint))
-    return True
+    port = int(endpoint or router_serial_endpoint())
+    return client_serial.connect_tcp_serial_console(
+        SERIAL_TCP_HOST,
+        port,
+        force_interactive=force_interactive,
+    )
 
 
 def serial_only_attach(*, here: bool = False, force_interactive: bool = True) -> None:
-    """Attach to an already-configured OpenWrt serial endpoint.
+    """Attach to an already-running OpenWrt serial endpoint.
 
     By default opens a **new window** so the caller shell stays free.
     Pass ``here=True`` (``--serial-here``) to attach in this terminal.
@@ -1346,120 +1280,14 @@ def serial_only_attach(*, here: bool = False, force_interactive: bool = True) ->
         print("[!] Falling back to in-terminal serial attach.")
 
     paths = get_system_paths(VM_NAME)
-    vboxmanage = find_vboxmanage(paths)
-    if not vboxmanage:
-        raise RuntimeError(get_vboxmanage_install_hint())
-    endpoint = router_serial_endpoint(vboxmanage)
-    state = get_vm_state(vboxmanage, VM_NAME)
-    if state != "running":
+    vm_base = str(paths["vm_base"])
+    if not is_qemu_vm_running(VM_NAME, vm_base=vm_base):
         raise RuntimeError(
-            f"{VM_NAME} is not running (state={state!r}). Start it first, then --serial-only."
+            f"{VM_NAME} is not running. Start it first, then --serial-only."
         )
-    print(router_serial_instructions(vboxmanage, endpoint))
-    connect_router_serial_console(
-        vboxmanage, endpoint, force_interactive=force_interactive
-    )
-
-
-def try_remove_vbox_storage_controller(vboxmanage: str, vm_name: str, ctl_name: str) -> None:
-    """Remove a storage controller if it exists (fresh VMs may not have IDE — avoid noisy errors)."""
-    r = subprocess.run(
-        [vboxmanage, "storagectl", vm_name, "--name", ctl_name, "--remove"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode == 0:
-        return
-    combined = ((r.stderr or "") + (r.stdout or "")).lower()
-    if "could not find" in combined and "controller" in combined:
-        return
-    if "vbox_e_object_not_found" in combined:
-        return
-    msg = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
-    raise RuntimeError(
-        f"VBoxManage storagectl --remove {ctl_name!r} failed unexpectedly: {msg}"
-    )
-
-
-def try_remove_vbox_storage_controller_with_retry(
-    vboxmanage: str,
-    vm_name: str,
-    ctl_name: str,
-    *,
-    retries: int = 12,
-    delay_s: float = 1.0,
-) -> None:
-    """Remove a storage controller, retrying transient VirtualBox machine locks."""
-    for attempt in range(retries + 1):
-        try:
-            try_remove_vbox_storage_controller(vboxmanage, vm_name, ctl_name)
-            return
-        except RuntimeError as exc:
-            msg = str(exc).lower()
-            locked = (
-                "already locked for a session" in msg
-                or "being unlocked" in msg
-                or "vbox_e_invalid_object_state" in msg
-                or "0x80bb0007" in msg
-            )
-            if not locked or attempt >= retries:
-                raise
-            if attempt == 0:
-                print("VirtualBox still has a machine lock; waiting before storage cleanup...")
-            time.sleep(delay_s)
-
-
-def remove_existing_router_vm(
-    vboxmanage: str,
-    vm_base: str,
-    *,
-    medium_path_for_vbox: str,
-) -> None:
-    """Compatibility wrapper; use ``common_vm.remove_existing_vm`` for new code."""
-    remove_existing_vm(
-        vboxmanage,
-        VM_NAME,
-        vm_base,
-        medium_path_for_vbox=medium_path_for_vbox,
-    )
-    return
-    if vm_is_registered(vboxmanage, VM_NAME):
-        state = get_vm_state(vboxmanage, VM_NAME)
-        if state == "saved":
-            print(f"Discarding saved state for {VM_NAME!r}…")
-            subprocess.run(
-                [vboxmanage, "discardstate", VM_NAME], capture_output=True, text=True
-            )
-            state = get_vm_state(vboxmanage, VM_NAME)
-        if state in ("running", "paused", "stopping", "starting"):
-            print(f"Powering off existing VM {VM_NAME!r} ({state})…")
-            subprocess.run([vboxmanage, "controlvm", VM_NAME, "poweroff"], check=False)
-            for _ in range(45):
-                time.sleep(1)
-                st = get_vm_state(vboxmanage, VM_NAME)
-                if st in (None, "poweroff", "aborted"):
-                    break
-            else:
-                print(
-                    f"[!] VM {VM_NAME!r} did not reach poweroff in time; "
-                    "unregister may fail — close the VM window or run ``VBoxManage controlvm … poweroff``."
-                )
-        # Extra beat so Manager / GUI releases the machine session after poweroff.
-        time.sleep(3)
-
-        print(f"Unregistering and deleting VirtualBox VM {VM_NAME!r} (all media)…")
-        if not try_unregistervm_delete(vboxmanage, VM_NAME):
-            raise RuntimeError(
-                f"Could not unregister {VM_NAME!r} (VirtualBox still has it locked). "
-                "Close any window showing that VM, exit stray VBoxManage sessions, then re-run."
-            )
-
-    # Stale registry entry (e.g. old run deleted files without unregister): clear before new VDI.
-    vbox_closemedium_disk_delete_best_effort(vboxmanage, medium_path_for_vbox)
-
-    if os.path.isdir(vm_base):
-        print(f"Removing leftover VM directory {vm_base!r}…")
-        shutil.rmtree(vm_base, ignore_errors=True)
+    endpoint = router_serial_endpoint()
+    print(router_serial_instructions(endpoint))
+    connect_router_serial_console(endpoint, force_interactive=force_interactive)
 
 
 def setup_openwrt_vm(
@@ -1471,30 +1299,20 @@ def setup_openwrt_vm(
         start_type=start_type,
         connect_serial=connect_serial,
     )
+    ensure_kvm_accessible()
+    qemu, _qemu_img = require_qemu_tools()
     paths = get_system_paths(VM_NAME, IMAGE_NAME)
-    vboxmanage = find_vboxmanage(paths)
-    if not vboxmanage:
-        raise RuntimeError(get_vboxmanage_install_hint())
 
-    distro_id = get_linux_distro_id()
-    if distro_id == "fedora":
-        print(
-            "Detected Fedora host. Using native Linux VirtualBox paths; if startvm fails, "
-            "check that the VirtualBox kernel modules are built for the running kernel."
-        )
-
-    img_path = paths["img_path"]  # raw OpenWrt image (tar/gzip handled by downloader elsewhere)
-    vm_base = paths["vm_base"]
-    vms_root = paths["vms_root"]
-    vdi_path = os.path.join(vm_base, VDI_NAME)
-    dst_path = wsl_to_windows_path(vdi_path) if paths["is_wsl"] else vdi_path
-    src_path = wsl_to_windows_path(img_path) if paths["is_wsl"] else img_path
-    vms_root_for_vbox = wsl_to_windows_path(vms_root) if paths["is_wsl"] else vms_root
-    serial_endpoint = router_serial_endpoint(vboxmanage)
+    img_path = paths["img_path"]  # raw OpenWrt image
+    vm_base = str(paths["vm_base"])
+    vms_root = str(paths["vms_root"])
+    qcow_path = os.path.join(vm_base, QCOW_NAME)
+    serial_endpoint = router_serial_endpoint()
     apply_helper: Path | None = None
     apk_dir: Path | None = None
     router_started = False
     dot_verified = False
+    launch_identity: dict[str, str] | None = None
 
     def require_apply_helper() -> Path:
         if apply_helper is None:
@@ -1507,24 +1325,14 @@ def setup_openwrt_vm(
         return apk_dir
 
     def remove_previous_vm() -> None:
-        print(f"Fresh rebuild: removing existing {VM_NAME!r} registration and disk first.")
-        remove_existing_vm(
-            vboxmanage,
-            VM_NAME,
-            vm_base,
-            medium_path_for_vbox=dst_path,
-        )
-        # Drop pre-rename lab VM if it is still registered.
+        print(f"Fresh rebuild: removing existing {VM_NAME!r} disk and QEMU process first.")
+        remove_existing_lab_vm(VM_NAME, vm_base, tap=TAP_ROUTER_LAN)
         legacy_name = "OpenWrt_2026_Router"
-        if legacy_name != VM_NAME and vm_is_registered(vboxmanage, legacy_name):
+        if legacy_name != VM_NAME:
             legacy_base = os.path.join(vms_root, legacy_name)
-            print(f"Also removing legacy router VM {legacy_name!r}...")
-            remove_existing_vm(
-                vboxmanage,
-                legacy_name,
-                legacy_base,
-                medium_path_for_vbox=os.path.join(legacy_base, VDI_NAME),
-            )
+            if os.path.isdir(legacy_base) or is_qemu_vm_running(legacy_name, vm_base=legacy_base):
+                print(f"Also removing legacy router VM {legacy_name!r}...")
+                remove_existing_lab_vm(legacy_name, legacy_base, tap=TAP_ROUTER_LAN)
 
     def ensure_workspace() -> None:
         os.makedirs(vms_root, exist_ok=True)
@@ -1537,7 +1345,6 @@ def setup_openwrt_vm(
     def prepare_mullvad_dot_helpers() -> None:
         nonlocal apply_helper
         apply_helper = write_mullvad_dot_helpers(Path(vm_base))
-        # Keep a copy beside the script for manual use.
         write_mullvad_dot_helpers(Path(SCRIPT_DIR))
 
     def fetch_mullvad_dot_packages() -> None:
@@ -1558,140 +1365,47 @@ def setup_openwrt_vm(
                 f"APK cache: {require_apk_dir()}"
             )
 
-    def convert_image_to_vdi() -> None:
-        # Always rebuild VDI from the (possibly just-injected) raw image.
-        if os.path.exists(vdi_path):
-            print(f"Removing stale VDI so convertfromraw uses the current image: {vdi_path}")
-            try:
-                os.remove(vdi_path)
-            except OSError as exc:
-                print(f"[!] Could not remove VDI ({exc}); attempting VBox closemedium...")
-                subprocess.run(
-                    [vboxmanage, "closemedium", "disk", dst_path, "--delete"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-        print("Converting raw image to VDI...")
-        run_vboxmanage(vboxmanage, ["convertfromraw", src_path, dst_path, "--format", "VDI"])
+    def convert_image_to_qcow2() -> None:
+        if os.path.exists(qcow_path):
+            print(f"Removing stale qcow2 so convert uses the current image: {qcow_path}")
+            os.remove(qcow_path)
+        convert_disk_to_qcow2(img_path, qcow_path)
 
-    def create_vm_registration() -> None:
-        # ``createvm --basefolder`` must be the parent ``VirtualBox VMs`` dir.
-        if not vm_is_registered(vboxmanage, VM_NAME):
-            existing_vbox = resolve_vbox_settings_path(vm_base, VM_NAME)
-            if existing_vbox:
-                reg_path = (
-                    wsl_to_windows_path(existing_vbox)
-                    if paths["is_wsl"]
-                    else existing_vbox
-                )
-                print(f"Registering existing settings file: {existing_vbox}")
-                run_vboxmanage(vboxmanage, ["registervm", reg_path])
-            else:
-                run_vboxmanage(
-                    vboxmanage,
-                    [
-                        "createvm",
-                        "--name",
-                        VM_NAME,
-                        "--ostype",
-                        "Other_64",
-                        "--basefolder",
-                        vms_root_for_vbox,
-                        "--register",
-                    ],
-                )
-
-    def configure_vm_firmware() -> None:
-        # Force BIOS firmware (command line uses modifyvm, not createvm).
-        run_vboxmanage(vboxmanage, ["modifyvm", VM_NAME, "--firmware", "bios"])
-
-    def configure_vm_network_and_hardware() -> None:
-        # NIC1 = LAN: matches OpenWrt default br-lan on eth0. NIC2 = WAN on eth1.
-        lan_nic_args = [
-            "--nic1",
-            "intnet",
-            "--intnet1",
-            LAN_INTNET_NAME,
-            "--nicpromisc1",
-            "allow-vms",
-        ]
-
-        bridge_interface = get_active_bridged_interface(vboxmanage)
-        if not bridge_interface:
-            raise RuntimeError(
-                "Router WAN requires a bridged VirtualBox adapter, but VirtualBox reported none. "
-                "Connect or enable a host network adapter, then rebuild."
-            )
-        wan_nic_args = ["--nic2", "bridged", "--bridgeadapter2", bridge_interface]
-        wan_note = f"bridged -> {bridge_interface!r} (WAN / uplink)"
-
-        # Ensure VirtualBox can create VM log files.
-        logs_dir = Path(vm_base) / "Logs"
-        os.makedirs(logs_dir, exist_ok=True)
-
-        print(f"Configuring VM {VM_NAME}...")
-        print(f"  LAN (NIC1): internal network {LAN_INTNET_NAME!r} - stock OpenWrt ``br-lan`` on ``eth0``.")
-        print(f"  WAN (NIC2): {wan_note} - stock OpenWrt ``wan`` on ``eth1``.")
-        print("  Client VMs: ``--nic1 intnet`` on the same intnet name (see create_VM_client_browser.py).")
-
-        run_vboxmanage(
-            vboxmanage,
-            [
-                "modifyvm",
-                VM_NAME,
-                "--memory",
-                "512",
-                "--cpus",
-                "1",
-                "--graphicscontroller",
-                "vmsvga",
-                *lan_nic_args,
-                *wan_nic_args,
-            ],
-        )
-
-    def configure_vm_serial() -> None:
-        configure_router_serial(vboxmanage, serial_endpoint)
-
-    def attach_storage() -> None:
-        try_remove_vbox_storage_controller_with_retry(vboxmanage, VM_NAME, "IDE")
-
-        run_vboxmanage(vboxmanage, ["storagectl", VM_NAME, "--name", "IDE", "--add", "ide", "--controller", "PIIX4"])
-        run_vboxmanage(
-            vboxmanage,
-            [
-                "storageattach",
-                VM_NAME,
-                "--storagectl",
-                "IDE",
-                "--port",
-                "0",
-                "--device",
-                "0",
-                "--type",
-                "hdd",
-                "--medium",
-                dst_path,
-            ],
-        )
-
-    def assign_fresh_router_macs() -> None:
-        # Initial MACs when create skips start (--start-type none). Launch paths
-        # re-assign again immediately before startvm.
-        assign_g3100_macs(vboxmanage)
+    def prepare_qemu_runtime() -> None:
+        print(f"Configuring QEMU VM {VM_NAME}...")
+        print(f"  LAN (NIC1): bridge {LAN_INTNET_NAME!r} via tap {TAP_ROUTER_LAN!r} - stock OpenWrt br-lan on eth0.")
+        print("  WAN (NIC2): QEMU user networking (SLIRP) - stock OpenWrt wan on eth1.")
+        print("  Client VMs: tap devices on the same bridge name.")
+        print(f"Serial console: COM1 -> TCP {SERIAL_TCP_HOST}:{serial_endpoint} ({SERIAL_BAUD} baud; OpenWrt ttyS0).")
 
     def start_router_vm() -> None:
-        nonlocal router_started
+        nonlocal router_started, launch_identity
         if options.start_type == "none":
-            print("VM configured. Skipping start because --start-type none was selected.")
+            print("VM disk ready. Skipping start because --start-type none was selected.")
             return
 
         print(f"Starting VM ({options.start_type})...")
-        # Fresh MAC on every launch (VirtualBox only allows this while powered off).
-        assign_fresh_lab_macs(vboxmanage, VM_NAME)
-        run_vboxmanage(vboxmanage, ["startvm", VM_NAME, "--type", options.start_type])
-        wait_for_router_running(vboxmanage, timeout_s=90.0)
+        if is_qemu_vm_running(VM_NAME, vm_base=vm_base):
+            stop_qemu_vm(VM_NAME, vm_base=vm_base)
+        launch_identity = fresh_lab_identity(VM_NAME)
+        pid_path = qemu_pid_path(vm_base)
+        log_path = qemu_log_path(vm_base)
+        argv = build_router_qemu_argv(
+            qemu=qemu,
+            vm_name=VM_NAME,
+            qcow_path=qcow_path,
+            memory_mib=512,
+            cpus=1,
+            lan_tap=TAP_ROUTER_LAN,
+            lan_mac_colon=launch_identity["nic1_colon"],
+            wan_mac_colon=launch_identity["nic2_colon"],
+            hardware_uuid=launch_identity["hardware_uuid"],
+            serial_port=ROUTER_SERIAL_TCP_PORT,
+            start_type=options.start_type,
+            pid_path=pid_path,
+        )
+        start_qemu_daemon(argv, log_path=log_path)
+        wait_for_router_running(timeout_s=90.0)
         print(f"[+] VM is running with --type {options.start_type!r}.")
         router_started = True
 
@@ -1699,13 +1413,9 @@ def setup_openwrt_vm(
         nonlocal dot_verified
         if not router_started:
             return
-        # First boot has an injected init.d job that applies Mullvad DoT. Serial verification
-        # is useful when available, but VirtualBox's TCP serial backend can be flaky on GUI
-        # starts; do not fail the whole VM build solely because COM1 is unavailable.
         try:
             ensure_mullvad_dot_over_serial(
                 timeout_s=30.0,
-                vboxmanage=vboxmanage,
                 allow_serial_upload=False,
             )
             dot_verified = True
@@ -1719,7 +1429,7 @@ def setup_openwrt_vm(
     def print_router_access_instructions() -> None:
         helper = require_apply_helper()
         print(mullvad_dot_console_instructions(helper))
-        print(router_serial_instructions(vboxmanage, serial_endpoint))
+        print(router_serial_instructions(serial_endpoint))
         if not dot_verified:
             print("[!] Mullvad DoT was not serial-verified during create.")
 
@@ -1728,7 +1438,6 @@ def setup_openwrt_vm(
             return
         if options.connect_serial:
             time.sleep(1)
-            # New window by default - keep the create/start shell free.
             spawned = spawn_serial_console_window(
                 Path(__file__).resolve(),
                 title="Test router serial (2324)",
@@ -1738,7 +1447,6 @@ def setup_openwrt_vm(
             if not spawned:
                 try:
                     connect_router_serial_console(
-                        vboxmanage,
                         serial_endpoint,
                         force_interactive=True,
                     )
@@ -1758,14 +1466,9 @@ def setup_openwrt_vm(
             description="Future optional boundary for Stubby and DNS-over-TLS package injection.",
         ),
         BuildStep("dot.inject-assets", "inject Mullvad DoT scripts and packages", inject_mullvad_dot_assets),
-        BuildStep("disk.convert-vdi", "convert image to VDI", convert_image_to_vdi),
-        BuildStep("vbox.register", "create VirtualBox VM registration", create_vm_registration),
-        BuildStep("vbox.firmware", "configure VM firmware", configure_vm_firmware),
-        BuildStep("vbox.network", "configure router network adapters", configure_vm_network_and_hardware),
-        BuildStep("vbox.serial", "configure router serial endpoint", configure_vm_serial),
-        BuildStep("vbox.storage", "attach VDI storage", attach_storage),
-        BuildStep("vbox.macs", "assign fresh Verizon router MACs", assign_fresh_router_macs),
-        BuildStep("vbox.start", "start router VM", start_router_vm, enabled=options.start_type != "none"),
+        BuildStep("disk.convert-qcow2", "convert image to qcow2", convert_image_to_qcow2),
+        BuildStep("qemu.prepare", "configure QEMU network and serial", prepare_qemu_runtime),
+        BuildStep("qemu.start", "start router VM", start_router_vm, enabled=options.start_type != "none"),
         BuildStep("dot.bootstrap", "bootstrap and verify Mullvad DoT", bootstrap_mullvad_dot, enabled=lambda: router_started),
         BuildStep("instructions.print", "print router access instructions", print_router_access_instructions),
         BuildStep("serial.attach", "open router serial console", attach_router_serial, enabled=lambda: router_started and options.connect_serial),
@@ -1776,36 +1479,18 @@ def setup_openwrt_vm(
 
 
 def enable_serial_on_existing_router() -> None:
-    """Enable COM1 serial on an already-registered router VM (no full recreate)."""
+    """Serial is always configured at QEMU start; remind how to attach."""
     paths = get_system_paths(VM_NAME)
-    vboxmanage = find_vboxmanage(paths)
-    if not vboxmanage:
-        raise RuntimeError(get_vboxmanage_install_hint())
-    if not vm_is_registered(vboxmanage, VM_NAME):
-        raise RuntimeError(f"{VM_NAME} is not registered. Create it first.")
-
-    endpoint = router_serial_endpoint(vboxmanage)
-    state = get_vm_state(vboxmanage, VM_NAME)
-    if state == "running":
-        print(f"{VM_NAME} is running — enabling UART requires power off for --uart1 IRQ setup.")
-        print("Powering off…")
-        subprocess.run([vboxmanage, "controlvm", VM_NAME, "poweroff"], check=False)
-        for _ in range(45):
-            time.sleep(1)
-            st = get_vm_state(vboxmanage, VM_NAME)
-            if st in (None, "poweroff", "aborted"):
-                break
-        else:
-            raise RuntimeError(f"{VM_NAME} did not power off in time.")
-
-    configure_router_serial(vboxmanage, endpoint)
-    print(router_serial_instructions(vboxmanage, endpoint))
-    print(f"Start the VM (GUI), then: ./{Path(__file__).name} --serial-only")
+    vm_base = str(paths["vm_base"])
+    if not is_qemu_vm_running(VM_NAME, vm_base=vm_base):
+        raise RuntimeError(f"{VM_NAME} is not running. Create/start it first.")
+    print(router_serial_instructions())
+    print(f"Attach with: ./{Path(__file__).name} --serial-only")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Create / refresh a test router VM in VirtualBox.",
+        description="Create / refresh a test router VM with QEMU/KVM.",
     )
     parser.add_argument(
         "--start-type",
@@ -1871,15 +1556,12 @@ def main() -> None:
         return
     if args.apply_mullvad_only:
         paths = get_system_paths(VM_NAME)
-        vboxmanage = find_vboxmanage(paths)
-        if not vboxmanage:
-            raise RuntimeError(get_vboxmanage_install_hint())
-        if get_vm_state(vboxmanage, VM_NAME) != "running":
+        vm_base = str(paths["vm_base"])
+        if not is_qemu_vm_running(VM_NAME, vm_base=vm_base):
             raise RuntimeError(f"{VM_NAME} is not running. Start it first.")
         print("Close any OpenWrt serial window on TCP 2324 (this needs exclusive access).")
         ensure_mullvad_dot_over_serial(
             timeout_s=240.0,
-            vboxmanage=vboxmanage,
             allow_serial_upload=False,
         )
         print("[+] Mullvad DoT OK. On Alpine: dig +short whoami.akamai.net  # Mullvad anycast or PoP")

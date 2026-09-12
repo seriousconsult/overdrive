@@ -19,7 +19,7 @@ __all__ = [
 class AlpineClientBuildOptions:
     start_vm: bool = True
     connect_serial: bool = True
-    skip_vdi_prime: bool = False
+    skip_disk_prime: bool = False
     start_type: str = "gui"
 
 

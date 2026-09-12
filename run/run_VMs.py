@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run the VirtualBox lab setup scripts, then verify the lab wiring.
+"""Run the QEMU/KVM lab setup scripts, then verify the lab wiring.
 
 This is intentionally separate from ``detections/run_detections.py`` because VM
-creation scripts mutate VirtualBox state and can start GUI guests.
+creation scripts mutate QEMU/KVM state and can start GUI guests.
 
 Verbose child output goes to a timestamped log under ``run/logs/``; the console
 shows a short, orderly progress summary.
@@ -96,7 +96,7 @@ def _shorten_status(text: str, width: int = LIVE_STATUS_WIDTH) -> str:
 
 
 def _is_progress_percentage_line(text: str) -> bool:
-    """Skip qemu-img/VBox progress spam from the single-line status display."""
+    """Skip qemu-img progress spam from the single-line status display."""
     stripped = text.strip()
     if re.search(r"\(\s*\d+(?:\.\d+)?/\d+%\)", stripped):
         return True
@@ -585,7 +585,7 @@ def launch_tmux_layout(argv: list[str]) -> int | None:
 
 
 def _resolve_start_type(args: argparse.Namespace) -> str:
-    """Resolve the VirtualBox start mode for create/rebuild runs."""
+    """Resolve the QEMU display/start mode for create/rebuild runs."""
     if getattr(args, "headless", False):
         return "headless"
     return str(getattr(args, "start_type", "gui") or "gui")
@@ -794,13 +794,13 @@ def main() -> int:
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Start lab VMs headless instead of opening VirtualBox GUI windows.",
+        help="Start lab VMs headless instead of opening QEMU GTK windows.",
     )
     parser.add_argument(
         "--start-type",
         choices=("gui", "headless", "separate", "none"),
         default="gui",
-        help="VirtualBox start mode passed to VM creation scripts. Default: gui.",
+        help="QEMU display mode passed to VM creation scripts (gui=GTK, else headless). Default: gui.",
     )
     parser.add_argument(
         "--skip-verify",

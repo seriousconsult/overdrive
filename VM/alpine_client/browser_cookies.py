@@ -30,7 +30,7 @@ _COOKIE_POLICY = {
 
 @dataclass(frozen=True)
 class ClientBrowserCookieAssets:
-    """Host path virt-customize copies into the Alpine VDI."""
+    """Host path virt-customize copies into the Alpine disk image."""
 
     policy_json: Path
 

@@ -740,6 +740,61 @@ def distro_success_label():
     }
     return labels.get(info["mgr"], info["mgr"])
 
+
+def is_lab_guest_install() -> bool:
+    """True when this script is the primed copy under ``/root`` inside a lab guest."""
+    return Path(__file__).resolve().parent == Path("/root")
+
+
+# Host-only packages to build/run the QEMU/KVM lab (not installed inside guests).
+LAB_HYPERVISOR_PACKAGES_BY_MGR: dict[str, tuple[str, ...]] = {
+    "apt": (
+        "qemu-system-x86",
+        "qemu-utils",
+    ),
+    "dnf": (
+        "qemu-system-x86",
+        "qemu-img",
+    ),
+}
+
+
+def should_install_lab_hypervisor(mgr: str) -> bool:
+    """Install QEMU on WSL/Linux lab hosts; skip Alpine guests and primed client images."""
+    if mgr not in LAB_HYPERVISOR_PACKAGES_BY_MGR:
+        return False
+    if is_lab_guest_install():
+        return False
+    return True
+
+
+def install_lab_hypervisor_packages(info: dict, *, non_interactive: bool = False) -> None:
+    """Ensure qemu-system-x86_64 + qemu-img are present for the lab."""
+    pkgs = list(LAB_HYPERVISOR_PACKAGES_BY_MGR.get(info["mgr"], ()))
+    if not pkgs:
+        return
+    needed = [p for p in pkgs if not package_installed(info, p)]
+    # Also require the CLIs even if package-name checks differ.
+    if not have_cmd("qemu-system-x86_64"):
+        for p in pkgs:
+            if "qemu-system" in p and p not in needed:
+                needed.append(p)
+    if not have_cmd("qemu-img"):
+        for p in pkgs:
+            if p in {"qemu-utils", "qemu-img"} and p not in needed:
+                needed.append(p)
+    if needed:
+        print(f"[*] Installing QEMU/KVM lab hypervisor packages: {' '.join(needed)}...")
+        install_packages(info, needed, non_interactive=non_interactive)
+    else:
+        print(f"[*] QEMU/KVM lab hypervisor packages already present: {' '.join(pkgs)}.")
+    if not have_cmd("qemu-system-x86_64") or not have_cmd("qemu-img"):
+        print(
+            "[-] QEMU CLIs still missing after install. Need qemu-system-x86_64 and qemu-img "
+            "on the host before run/run_VMs.py."
+        )
+
+
 def install_system_deps(*, non_interactive: bool = False):
     info = get_linux_info()
     if not info:
@@ -941,6 +996,12 @@ def install_system_deps(*, non_interactive: bool = False):
             )
         else:
             print("[*] virt-customize already available.")
+
+    # 7b) QEMU/KVM lab hypervisor — host builders only (never inside primed guests)
+    if should_install_lab_hypervisor(mgr):
+        install_lab_hypervisor_packages(info, non_interactive=non_interactive)
+    else:
+        print("[*] Skipping QEMU/KVM hypervisor packages (lab guest or unsupported host).")
 
     # 8) capability tool provider (setcap)
     if not have_cmd("setcap"):

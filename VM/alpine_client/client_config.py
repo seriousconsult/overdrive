@@ -14,8 +14,8 @@ __all__ = [
     "CLIENT_GUEST_HOSTNAME",
     "CLIENT_MEMORY_MIB",
     "CLIENT_ROOT_DEVICE",
-    "CLIENT_VDI_NAME",
-    "CLIENT_VDI_SIZE_MIB",
+    "CLIENT_QCOW_NAME",
+    "CLIENT_DISK_SIZE_MIB",
     "CLIENT_VM_CPUS",
     "CREATE_SCRIPT_NAME",
     "LAN_INTNET_NAME",
@@ -29,11 +29,11 @@ CREATE_SCRIPT_NAME = "create_VM_client_browser_pipe_alpine.py"
 
 LAN_INTNET_NAME = TEST_LAN_INTNET_NAME
 VM_NAME = TEST_CLIENTA_VM_NAME
-CLIENT_VDI_NAME = "client_browser_alpine.vdi"
+CLIENT_QCOW_NAME = "client_browser_alpine.qcow2"
 CLIENT_VM_CPUS = 1
 CLIENT_GUEST_HOSTNAME = "clienta"
 # Chromium + detection Python libs need more than the tiny cloud image default.
-CLIENT_VDI_SIZE_MIB = 8192
+CLIENT_DISK_SIZE_MIB = 8192
 CLIENT_MEMORY_MIB = 2048
 CLIENT_ROOT_DEVICE = "/dev/sda"
 

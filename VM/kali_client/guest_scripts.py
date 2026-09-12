@@ -37,10 +37,15 @@ for path in /sys/class/net/*; do
     continue
   fi
   # Neutral DHCP identity: generic hostname, no vendor class (no kali/overdrive).
-  if dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-      -H {CLIENT_GUEST_HOSTNAME} "$IFACE"; then
-    ok=1
-  fi
+  # Retry: OpenWrt dnsmasq may still be starting when this oneshot first runs.
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
+        -H {CLIENT_GUEST_HOSTNAME} "$IFACE"; then
+      ok=1
+      break
+    fi
+    sleep 2
+  done
 done
 ip -4 route show default 2>/dev/null | grep -q . && exit 0
 [ "$ok" -eq 1 ]
