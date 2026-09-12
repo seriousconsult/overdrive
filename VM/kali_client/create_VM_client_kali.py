@@ -290,9 +290,14 @@ def setup_client_vm(
         ),
         BuildStep(
             "guest.detection-libs",
-            "run build-time install.py for detection/browser libraries",
+            "install Kali tools + detection libraries",
             install_guest_detection_libraries,
-            description="Image customization: runs /root/install.py, installs Chromium/tools/Python deps, then removes install.py before first boot.",
+            description=(
+                "Runs install.py inside the guest image: kali-linux-default "
+                "(wireshark, metasploit, top10, …), Chromium, and Python deps. "
+                "Usually 20-60 minutes; timeout 2 hours. The progress line may look idle "
+                "while virt-customize runs."
+            ),
         ),
         BuildStep(
             "guest.services-boot",

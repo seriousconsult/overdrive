@@ -276,7 +276,6 @@ def _libguestfs_env() -> dict[str, str]:
         fixed_dir = _find_existing_fixed_appliance_dir()
         if fixed_dir:
             virt_env["LIBGUESTFS_PATH"] = fixed_dir
-            print(f"[libguestfs] Using existing fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
         else:
             cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
             fixed_dir = _download_latest_fixed_appliance(cache_dir)
@@ -465,9 +464,12 @@ def setup_client_vm(
         ),
         BuildStep(
             "guest.detection-libs",
-            "run build-time install.py for detection/browser libraries",
+            "install Alpine detection/browser packages",
             install_guest_detection_libraries,
-            description="Image customization: runs /root/install.py, installs Chromium/tools/Python deps, then removes install.py before first boot.",
+            description=(
+                "Runs install.py inside the guest image (Chromium, network tools, Python deps). "
+                "Usually 5-15 minutes. The progress line may look idle while virt-customize runs."
+            ),
         ),
         BuildStep(
             "guest.services-boot",

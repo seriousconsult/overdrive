@@ -244,7 +244,8 @@ CLIENT_IDENTITY_COMMAND = (
 )
 
 INSTALL_DETECTION_LIBRARIES_COMMAND = (
-    "timeout 900 bash -lc "
+    # kali-linux-default + browser/python deps can take well over 15 minutes.
+    "timeout 7200 bash -lc "
     "'cd /root && env PYTHONUNBUFFERED=1 PIP_DEFAULT_TIMEOUT=20 PIP_RETRIES=2 "
     "python3 /root/install.py --non-interactive'"
 )

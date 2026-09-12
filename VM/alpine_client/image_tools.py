@@ -154,7 +154,6 @@ def libguestfs_env() -> dict[str, str]:
         fixed_dir = _find_existing_fixed_appliance_dir()
         if fixed_dir:
             virt_env["LIBGUESTFS_PATH"] = fixed_dir
-            print(f"[libguestfs] Using existing fixed appliance: LIBGUESTFS_PATH={fixed_dir}")
         else:
             cache_dir = Path.home() / ".cache" / "libguestfs" / "appliance"
             fixed_dir = _download_latest_fixed_appliance(cache_dir)

@@ -797,7 +797,8 @@ def install_kali_tools_metapackage(info: dict, *, non_interactive: bool = False)
         return
     print(
         f"[*] Installing Kali tools metapackage {KALI_TOOLS_METAPACKAGE} "
-        "(wireshark, metasploit, top10, … — this can take a long time)..."
+        "(wireshark, metasploit, top10, …). "
+        "Usually 20-60 minutes on first install…"
     )
     preseed_kali_tools_debconf(non_interactive=non_interactive)
     install_packages(info, [KALI_TOOLS_METAPACKAGE], non_interactive=non_interactive)

@@ -276,6 +276,12 @@ def install_client_detection_libraries(
     skip_prime: bool,
 ) -> None:
     """Run repo install.py inside the guest; installs network/detection libraries."""
+    if not skip_prime:
+        print(
+            "[overdrive] Installing Alpine packages via virt-customize "
+            "(Chromium + detection libs). Usually 5-15 minutes — please wait…",
+            flush=True,
+        )
     customize_args = [
         "--run-command",
         INSTALL_DETECTION_LIBRARIES_COMMAND,
@@ -293,6 +299,8 @@ def install_client_detection_libraries(
         skip_prime=skip_prime,
         network=True,
     )
+    if not skip_prime:
+        print("[overdrive] Alpine detection/browser package install finished.", flush=True)
 
 
 def configure_client_guest_services_and_boot(

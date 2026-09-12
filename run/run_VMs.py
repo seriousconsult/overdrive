@@ -58,7 +58,7 @@ TMUX_SESSION_BASE = "overdrive-vms"
 TMUX_ENV_FLAG = "OVERDRIVE_RUN_VMS_TMUX"
 TMUX_SESSION_ENV = "OVERDRIVE_RUN_VMS_TMUX_SESSION"
 TMUX_SERIAL_READY_ENV = "OVERDRIVE_RUN_VMS_SERIAL_READY_FILE"
-LIVE_STATUS_WIDTH = 82
+LIVE_STATUS_WIDTH = 96
 
 
 def script_has_todo(script_path: Path) -> bool:
@@ -113,8 +113,9 @@ def _child_status_from_line(line: str) -> str | None:
         return None
     if text.startswith("[overdrive]"):
         return _shorten_status(text.removeprefix("[overdrive]").strip())
+    # libguestfs appliance chatter is not useful as the sticky live status.
     if text.startswith("[libguestfs]"):
-        return _shorten_status(text)
+        return None
     if text.startswith(
         (
             "Building ",

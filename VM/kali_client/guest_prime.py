@@ -315,7 +315,14 @@ def install_client_detection_libraries(
     *,
     skip_prime: bool,
 ) -> None:
-    """Run repo install.py inside the guest; installs network/detection libraries."""
+    """Run repo install.py inside the guest; installs Kali tools + detection libraries."""
+    if not skip_prime:
+        print(
+            "[overdrive] Installing Kali tools via virt-customize "
+            "(kali-linux-default + Chromium/Python). "
+            "Usually 20-60 minutes; timeout 2 hours — please wait…",
+            flush=True,
+        )
     customize_args = [
         "--run-command",
         INSTALL_DETECTION_LIBRARIES_COMMAND,
@@ -332,6 +339,8 @@ def install_client_detection_libraries(
         skip_prime=skip_prime,
         network=True,
     )
+    if not skip_prime:
+        print("[overdrive] Kali tools / detection-library install finished.", flush=True)
 
 
 def configure_client_guest_services_and_boot(

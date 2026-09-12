@@ -365,7 +365,6 @@ def _libguestfs_env() -> dict[str, str]:
 
     if appliance:
         env["LIBGUESTFS_PATH"] = appliance
-        print(f"[libguestfs] Using fixed appliance: LIBGUESTFS_PATH={appliance}")
     else:
         # Last resort: point supermin at a real host kernel (WSL).
         boot_kernels = sorted(glob.glob("/boot/vmlinuz*"))
