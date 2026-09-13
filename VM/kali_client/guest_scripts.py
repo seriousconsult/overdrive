@@ -26,6 +26,18 @@ __all__ = [
 LAB_NET_UP_SCRIPT = f"""#!/bin/bash
 # Bring up Ethernet NICs and request DHCP from OpenWrt when still unaddressed.
 set -u
+OPENWRT_DNS="{OPENWRT_LAN_DNS}"
+pin_dns() {{
+  # systemd-resolved is masked; its stub symlink must not remain.
+  if [ -L /etc/resolv.conf ] || [ ! -e /etc/resolv.conf ]; then
+    rm -f /etc/resolv.conf
+  fi
+  printf 'nameserver %s\\n' "$OPENWRT_DNS" > /etc/resolv.conf
+}}
+# Drop a dangling resolved stub before dhclient-script tries to write through it.
+if [ -L /etc/resolv.conf ]; then
+  rm -f /etc/resolv.conf
+fi
 ok=0
 for path in /sys/class/net/*; do
   IFACE=$(basename "$path")
@@ -34,14 +46,16 @@ for path in /sys/class/net/*; do
   ip link set "$IFACE" up || true
   if ip -4 -o addr show dev "$IFACE" 2>/dev/null | grep -q ' inet '; then
     ok=1
+    pin_dns
     continue
   fi
-  # Neutral DHCP identity: generic hostname, no vendor class (no kali/overdrive).
-  # Retry: OpenWrt dnsmasq may still be starting when this oneshot first runs.
+  # ISC dhclient (isc-dhcp-client) has no -H hostname flag; hostname comes from
+  # /etc/hostname / dhclient.conf. Retry while OpenWrt dnsmasq is still starting.
   for attempt in 1 2 3 4 5 6 7 8; do
     if dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-        -H {CLIENT_GUEST_HOSTNAME} "$IFACE"; then
+        "$IFACE"; then
       ok=1
+      pin_dns
       break
     fi
     sleep 2
@@ -104,13 +118,17 @@ for IFACE in /sys/class/net/*; do
   if [ "$(id -u)" -eq 0 ]; then
     ip link set "$IFACE" up 2>&1 || true
     dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-      -H {CLIENT_GUEST_HOSTNAME} "$IFACE" 2>&1 || true
+      "$IFACE" 2>&1 || true
   else
     sudo ip link set "$IFACE" up 2>&1 || true
     sudo dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-      -H {CLIENT_GUEST_HOSTNAME} "$IFACE" 2>&1 || true
+      "$IFACE" 2>&1 || true
   fi
 done
+if [ -L /etc/resolv.conf ] || [ ! -e /etc/resolv.conf ]; then
+  rm -f /etc/resolv.conf
+fi
+printf 'nameserver {OPENWRT_LAN_DNS}\\n' > /etc/resolv.conf
 echo ""
 echo "=== After DHCP ==="
 ip -br -4 addr 2>/dev/null || true
@@ -265,7 +283,7 @@ CLEAN_CLIENT_PRIME_HELPERS_COMMAND = (
 REMOTE_BOOT_SERVICE_CLEANUP_COMMAND = (
     "for svc in ssh sshd ssh.service sshd.service dropbear "
     "cloud-init cloud-init-local cloud-config cloud-final "
-    "NetworkManager NetworkManager-wait-online; do "
+    "NetworkManager NetworkManager-wait-online systemd-resolved; do "
     "systemctl stop \"$svc\" >/dev/null 2>&1 || true; "
     "systemctl disable \"$svc\" >/dev/null 2>&1 || true; "
     "systemctl mask \"$svc\" >/dev/null 2>&1 || true; "
@@ -274,7 +292,10 @@ REMOTE_BOOT_SERVICE_CLEANUP_COMMAND = (
     "rm -rf /etc/systemd/system/multi-user.target.wants/ssh.service "
     "/etc/systemd/system/multi-user.target.wants/sshd.service "
     "/etc/systemd/system/multi-user.target.wants/NetworkManager.service "
-    "/etc/systemd/system/multi-user.target.wants/cloud-init*.service 2>/dev/null || true"
+    "/etc/systemd/system/multi-user.target.wants/cloud-init*.service 2>/dev/null || true; "
+    # Prefer a real resolv.conf pointing at OpenWrt; drop systemd stub symlink.
+    "if [ -L /etc/resolv.conf ]; then rm -f /etc/resolv.conf; fi; "
+    f"printf 'nameserver {OPENWRT_LAN_DNS}\\n' > /etc/resolv.conf"
 )
 
 CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND = (
