@@ -73,6 +73,7 @@ __all__ = [
 LAB_VMS_DIRNAME = "lab_vms"
 LAB_BRIDGE_NAME = TEST_LAN_INTNET_NAME
 # (intentionally no hard-coded prior hypervisor path names)
+QCOW2_CONVERT_HEADROOM_BYTES = 512 * 1024 * 1024
 
 
 OPENWRT_QCOW_NAME = "openwrt.qcow2"
@@ -310,19 +311,35 @@ class contextlib_suppress:
         return True
 
 
-def remove_existing_lab_vm(vm_name: str, vm_base: str, *, tap: str | None = None) -> None:
-    """Stop QEMU, drop tap, and remove the VM directory."""
+def remove_existing_lab_vm(
+    vm_name: str,
+    vm_base: str,
+    *,
+    tap: str | None = None,
+    preserve_names: set[str] | None = None,
+) -> None:
+    """Stop QEMU, drop tap, and remove the VM directory or its non-preserved contents."""
     if is_qemu_vm_running(vm_name, vm_base=vm_base) or qemu_pid_path(vm_base).is_file():
         stop_qemu_vm(vm_name, vm_base=vm_base)
     tap_to_drop = tap if tap is not None else tap_name_for_vm(vm_name)
     if tap_to_drop:
         delete_tap(tap_to_drop)
     if os.path.isdir(vm_base):
-        print(f"Removing leftover VM directory {vm_base!r}...")
-        shutil.rmtree(vm_base, ignore_errors=True)
+        if not preserve_names:
+            print(f"Removing leftover VM directory {vm_base!r}...")
+            shutil.rmtree(vm_base, ignore_errors=True)
+            return
+        print(f"Removing leftover VM files in {vm_base!r}...")
+        for child in Path(vm_base).iterdir():
+            if child.name in preserve_names:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
-def remove_lab_vms_qemu(*, dry_run: bool = False) -> None:
+def remove_lab_vms_qemu(*, dry_run: bool = False, preserve_target_disk: bool = False) -> None:
     """Stop and delete all known Overdrive lab QEMU VMs (and prior on-disk layouts)."""
     vms_root = lab_vms_root()
     storage_root = Path(os.environ.get("OVERDRIVE_VM_STORAGE_DIR", str(DEFAULT_VM_STORAGE_ROOT))).expanduser()
@@ -350,7 +367,14 @@ def remove_lab_vms_qemu(*, dry_run: bool = False) -> None:
             print(f"  [dry-run] Would remove {vm_name!r} (lab_vms)")
             continue
         print(f"Removing lab VM {vm_name!r}...")
-        remove_existing_lab_vm(vm_name, vm_base, tap=tap)
+        preserve_names = None
+        if preserve_target_disk and vm_name == TEST_TARGET_VM_NAME:
+            preserve_names = {
+                TARGET_QCOW_NAME,
+                f"{TARGET_QCOW_NAME}.verified",
+                str(Path(TARGET_QCOW_NAME).with_suffix(".serial-enabled")),
+            }
+        remove_existing_lab_vm(vm_name, vm_base, tap=tap, preserve_names=preserve_names)
 
     # Drop any leftover prior hypervisor layout dirs (legacy disk/settings trees).
     keep_names = {
@@ -460,12 +484,50 @@ def fresh_lab_identity(vm_name: str) -> dict[str, str]:
 
 def convert_disk_to_qcow2(src: str, dst: str) -> None:
     _, qemu_img = require_qemu_tools()
-    if os.path.exists(dst):
-        os.remove(dst)
+    src_path = Path(src)
+    dst_path = Path(dst)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dst_path.with_name(f"{dst_path.name}.partial")
+    try:
+        tmp_path.unlink()
+    except FileNotFoundError:
+        pass
+
+    required = src_path.stat().st_size + QCOW2_CONVERT_HEADROOM_BYTES
+    available = shutil.disk_usage(dst_path.parent).free
+    if available < required:
+        raise RuntimeError(
+            f"Not enough free space to convert {src} to qcow2 under {dst_path.parent}: "
+            f"need about {_format_bytes(required)}, have {_format_bytes(available)}."
+        )
+
     print(f"Converting {src} -> qcow2 {dst}...")
-    subprocess.run([qemu_img, "convert", "-p", "-O", "qcow2", src, dst], check=True)
-    if not os.path.exists(dst):
-        raise RuntimeError(f"qcow2 conversion finished but target missing: {dst}")
+    try:
+        subprocess.run([qemu_img, "convert", "-p", "-O", "qcow2", src, str(tmp_path)], check=True)
+    except subprocess.CalledProcessError as exc:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        free_now = shutil.disk_usage(dst_path.parent).free
+        raise RuntimeError(
+            f"qemu-img convert failed while writing {dst}. The destination filesystem may be "
+            f"out of space or returning I/O errors; free space is now {_format_bytes(free_now)}."
+        ) from exc
+    if not tmp_path.exists():
+        raise RuntimeError(f"qcow2 conversion finished but temporary target missing: {tmp_path}")
+    os.replace(tmp_path, dst_path)
+
+
+def _format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
 
 
 def expand_qcow2_size(qcow_path: str, target_mib: int) -> None:

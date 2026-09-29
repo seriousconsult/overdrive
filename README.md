@@ -26,8 +26,9 @@ python3 install.py
 packages and `setcap`. If passwordless sudo is missing, it installs
 `/etc/sudoers.d/overdrive` (one password prompt when a TTY is available), then
 continues without further prompts. On the host it also installs QEMU
-(`qemu-system-x86`, `qemu-utils`). Inside a primed Kali guest it installs
-`kali-linux-default` (wireshark, metasploit, top10, …).
+(`qemu-system-x86`, `qemu-utils`) and 7-Zip for Kali QEMU archive extraction.
+The Kali client starts from Kali's official prebuilt QEMU image instead of
+installing `kali-linux-default` during guest prime.
 
 Open an activated shell after setup:
 
@@ -122,7 +123,7 @@ The lab runs four QEMU guests on Linux bridge `test-lan`:
 |---|---|---|---|
 | `Test_Router` | OpenWrt (LAN DHCP/DNS + Mullvad DoT; WAN = QEMU user/SLIRP) | `127.0.0.1:2324` | `tap-router-lan` |
 | `Test_Clienta` | Alpine browser client | `127.0.0.1:2325` | `tap-clienta` |
-| `Test_Clientk` | Kali client (`kali-linux-default` tools) | `127.0.0.1:2326` | `tap-clientk` |
+| `Test_Clientk` | Kali client (official prebuilt QEMU image) | `127.0.0.1:2326` | `tap-clientk` |
 | `target` | Metasploitable 2 (intentionally vulnerable, **not** hardened) | `127.0.0.1:2327` | `tap-target` |
 
 Disks live under `VM/lab_vms/<VM_NAME>/`. Secrets (root passwords) are in `VM/.env` (gitignored).
@@ -141,7 +142,7 @@ bottom: host (wider) | Alpine :2325 | target :2327 | router :2324
 - DNS path: client → OpenWrt dnsmasq (`192.168.50.1`) → stubby → Mullvad DoT (`dns.mullvad.net`).
 - The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
 - `Test_Clienta` uses hostname `clienta`, a fresh Dell NIC MAC, tame DHCP client identity, cleared `machine-id`, and a generic timezone User-Agent at build time. Rebuild after changing those settings.
-- Client checker/network deps are installed by guest `install.py` during disk prime (Python libs into `/root/virtual_env`; Chromium/tools via distro packages). Rebuild clients after changing `install.py`.
+- `Test_Clientk` starts from Kali's official prebuilt QEMU `.7z` image, then disk prime only adds Overdrive identity, payloads, services, serial boot, and hardening. Rebuild it after changing those VM assets.
 - `target` login is stock Metasploitable 2: `msfadmin` / `msfadmin`. Keep it on the lab LAN only.
 
 Manage running QEMU processes:

@@ -87,6 +87,7 @@ VM/apply_mullvad_dot.sh
 *.vhd
 *.vhdx
 *.qcow2
+*.qcow2.verified
 *.img
 *.img.gz
 *.iso

@@ -133,6 +133,7 @@ def setup_target_vm(
     start_vm: bool = True,
     connect_serial: bool = True,
     start_type: str = "gui",
+    rebuild_disk: bool = False,
 ) -> None:
     ensure_kvm_accessible()
     qemu, _ = require_qemu_tools()
@@ -140,9 +141,15 @@ def setup_target_vm(
     vm_base = str(paths["vm_base"])
     download_dir = str(paths["downloads"])
     qcow_path = os.path.join(vm_base, TARGET_QCOW_NAME)
+    preserved_disk_names = {
+        TARGET_QCOW_NAME,
+        f"{TARGET_QCOW_NAME}.verified",
+        str(Path(TARGET_QCOW_NAME).with_suffix(".serial-enabled")),
+    }
 
     def remove_previous_vm() -> None:
-        remove_existing_lab_vm(VM_NAME, vm_base, tap=TAP_TARGET)
+        preserve_names = None if rebuild_disk else preserved_disk_names
+        remove_existing_lab_vm(VM_NAME, vm_base, tap=TAP_TARGET, preserve_names=preserve_names)
 
     def ensure_workspace() -> None:
         os.makedirs(vm_base, exist_ok=True)
@@ -202,7 +209,11 @@ def setup_target_vm(
                 )
 
     steps = [
-        BuildStep("cleanup.existing-vm", "remove previous target VM and disk", remove_previous_vm),
+        BuildStep(
+            "cleanup.existing-vm",
+            "remove previous target runtime",
+            remove_previous_vm,
+        ),
         BuildStep("workspace.prepare", "prepare workspace", ensure_workspace),
         BuildStep(
             "image.ensure-qcow2",
@@ -250,6 +261,11 @@ def main() -> None:
         description="Create / start Metasploitable 2 target VM on the lab LAN (not hardened)."
     )
     ap.add_argument("--no-start", action="store_true", help="Prepare disk only; do not start QEMU.")
+    ap.add_argument(
+        "--rebuild-disk",
+        action="store_true",
+        help="Force rebuilding the target disk instead of reusing a verified qcow2.",
+    )
     ap.add_argument("--serial-only", action="store_true", help="Attach serial for a running target.")
     ap.add_argument("--serial-here", action="store_true", help="Attach serial in this terminal.")
     ap.add_argument("--force-interactive-serial", action="store_true")
@@ -272,6 +288,7 @@ def main() -> None:
         start_vm=not ns.no_start,
         connect_serial=not ns.no_start,
         start_type=ns.start_type,
+        rebuild_disk=ns.rebuild_disk,
     )
 
 

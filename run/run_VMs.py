@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ RUN_DIR = Path(__file__).resolve().parent
 REPO_ROOT = RUN_DIR.parent
 SCRIPT_DIR = REPO_ROOT / "VM"
 LOG_DIR = RUN_DIR / "logs"
+VM_ENV_PATH = SCRIPT_DIR / ".env"
+VM_ENV_EXAMPLE_PATH = SCRIPT_DIR / ".env.example"
 
 PREFERRED_CREATE_ORDER = (
     "openwrt_router/create_VM_OpenWrt_router.py",
@@ -60,6 +63,94 @@ TMUX_ENV_FLAG = "OVERDRIVE_RUN_VMS_TMUX"
 TMUX_SESSION_ENV = "OVERDRIVE_RUN_VMS_TMUX_SESSION"
 TMUX_SERIAL_READY_ENV = "OVERDRIVE_RUN_VMS_SERIAL_READY_FILE"
 LIVE_STATUS_WIDTH = 96
+VM_ENV_PLACEHOLDER_PREFIX = "replace-with-"
+
+
+def _env_assignment(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        return None
+    return key, value.strip()
+
+
+def _env_keys(lines: list[str]) -> set[str]:
+    keys: set[str] = set()
+    for line in lines:
+        assignment = _env_assignment(line)
+        if assignment:
+            keys.add(assignment[0])
+    return keys
+
+
+def _env_value_or_generated(value: str) -> str:
+    normalized = value.strip().strip("'\"")
+    if not normalized or normalized.startswith(VM_ENV_PLACEHOLDER_PREFIX):
+        return secrets.token_urlsafe(32)
+    return normalized
+
+
+def ensure_vm_env_file(
+    *,
+    env_path: Path = VM_ENV_PATH,
+    example_path: Path = VM_ENV_EXAMPLE_PATH,
+    dry_run: bool = False,
+) -> list[str]:
+    """Create/update ignored VM/.env with keys listed in VM/.env.example."""
+    try:
+        example_lines = example_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+
+    example_assignments = [
+        assignment
+        for line in example_lines
+        if (assignment := _env_assignment(line)) is not None
+    ]
+    if not example_assignments:
+        return []
+
+    try:
+        env_lines = env_path.read_text(encoding="utf-8").splitlines()
+        env_exists = True
+    except FileNotFoundError:
+        env_lines = []
+        env_exists = False
+
+    present_keys = _env_keys(env_lines)
+    missing = [(key, value) for key, value in example_assignments if key not in present_keys]
+    if not missing:
+        return []
+
+    missing_keys = [key for key, _ in missing]
+    if dry_run:
+        return missing_keys
+
+    if env_exists:
+        output = list(env_lines)
+        if output and output[-1].strip():
+            output.append("")
+        output.append("# Added by run/run_VMs.py after VM/.env.example changed.")
+        output.extend(f"{key}={_env_value_or_generated(value)}" for key, value in missing)
+    else:
+        output = []
+        for line in example_lines:
+            assignment = _env_assignment(line)
+            if assignment is None:
+                output.append(line)
+                continue
+            key, value = assignment
+            output.append(f"{key}={_env_value_or_generated(value)}")
+
+    env_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8", newline="\n")
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
+    return missing_keys
 
 
 def script_has_todo(script_path: Path) -> bool:
@@ -865,11 +956,20 @@ def main() -> int:
         action="store_true",
         help="Deprecated no-op; the client VM and serial pipe are always required.",
     )
+    parser.add_argument(
+        "--rebuild-target-disk",
+        action="store_true",
+        help="Force rebuilding the Metasploitable target disk instead of reusing a verified qcow2.",
+    )
     args = parser.parse_args()
+    added_env_keys = ensure_vm_env_file(dry_run=args.dry_run)
+    if added_env_keys:
+        action = "Would add" if args.dry_run else "Added"
+        print(f"{action} missing VM/.env secret keys: {', '.join(added_env_keys)}")
     ensure_kvm_accessible()
     try:
         print("Removing previous lab VMs...")
-        remove_lab_vms(dry_run=args.dry_run)
+        remove_lab_vms(dry_run=args.dry_run, preserve_target_disk=not args.rebuild_target_disk)
         print()
     except RuntimeError as exc:
         print(f"[-] {exc}", file=sys.stderr)
@@ -917,6 +1017,8 @@ def main() -> int:
                         "--start-target",
                     ]
                 )
+                if args.rebuild_target_disk:
+                    command.append("--rebuild-target-disk")
                 if not connect_serial:
                     command.append("--no-connect-serial")
             steps.append((step_label(script), command, script))

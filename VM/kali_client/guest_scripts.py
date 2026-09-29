@@ -13,7 +13,6 @@ __all__ = [
     "CLIENT_IP_TIMEZONE_SCRIPT",
     "CLIENT_IP_TIMEZONE_SERVICE",
     "CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND",
-    "INSTALL_DETECTION_LIBRARIES_COMMAND",
     "LAUNCH_IDENTITY_SCRIPT",
     "LAUNCH_IDENTITY_SERVICE",
     "LAB_NET_TROUBLESHOOT_SCRIPT",
@@ -259,13 +258,6 @@ CLIENT_IDENTITY_COMMAND = (
     "mkdir -p /usr/local/sbin /root && "
     f"echo '{CLIENT_GUEST_HOSTNAME}' > /etc/hostname && "
     f"hostnamectl set-hostname {CLIENT_GUEST_HOSTNAME} 2>/dev/null || true"
-)
-
-INSTALL_DETECTION_LIBRARIES_COMMAND = (
-    # kali-linux-default + browser/python deps can take well over 15 minutes.
-    "timeout 7200 bash -lc "
-    "'cd /root && env PYTHONUNBUFFERED=1 PIP_DEFAULT_TIMEOUT=20 PIP_RETRIES=2 "
-    "python3 /root/install.py --non-interactive'"
 )
 
 REMOVE_CLIENT_INSTALL_PY_COMMAND = (

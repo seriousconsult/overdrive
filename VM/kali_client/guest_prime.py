@@ -37,13 +37,11 @@ from VM.kali_client.guest_scripts import (
     CLIENT_IP_TIMEZONE_SCRIPT,
     CLIENT_IP_TIMEZONE_SERVICE,
     CONFIGURE_CLIENT_SERVICES_AND_BOOT_COMMAND,
-    INSTALL_DETECTION_LIBRARIES_COMMAND,
     LAB_NET_TROUBLESHOOT_SCRIPT,
     LAB_NET_UP_SCRIPT,
     LAB_NET_UP_SERVICE,
     LAUNCH_IDENTITY_SCRIPT,
     LAUNCH_IDENTITY_SERVICE,
-    REMOVE_CLIENT_INSTALL_PY_COMMAND,
 )
 from VM.kali_client.image_tools import libguestfs_env, require_disk_prime_tools
 from VM.kali_client.kali_client_hardening import (
@@ -51,7 +49,6 @@ from VM.kali_client.kali_client_hardening import (
     CLIENT_FIREWALL_SERVICE,
     CLIENT_HARDENING_SCRIPT,
 )
-from VM.kali_client.package_assets import client_package_install_script
 from VM.vm_config import kali_client_root_password
 
 _DEBUG_LOG_PATH = Path(__file__).resolve().parents[2] / "debug-52b023.log"
@@ -80,7 +77,6 @@ __all__ = [
     "configure_client_guest_services_and_boot",
     "copy_client_payloads_and_service_assets",
     "harden_and_clean_client_guest_image",
-    "install_client_detection_libraries",
     "prepare_client_prime_assets",
     "prime_client_identity_and_base_packages",
     "prime_client_disk_for_lab",
@@ -96,7 +92,6 @@ class ClientPrimeAssets:
     client_firewall_host: Path
     client_firewall_service_host: Path
     hardening_script_host: Path
-    package_script_host: Path
     timezone_script_host: Path
     timezone_service_host: Path
     launch_identity_host: Path
@@ -104,7 +99,6 @@ class ClientPrimeAssets:
     root_password_file: Path
     local_host_payload_host: Path
     detections_payload_host: Path
-    setup_venv_host: Path
     browser_fonts: ClientBrowserFontAssets
     browser_audio: ClientBrowserAudioAssets
     browser_webgl: ClientBrowserWebGLAssets
@@ -131,14 +125,6 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
     hardening_script_host = work_root / "harden-client.sh"
     hardening_script_host.write_text(CLIENT_HARDENING_SCRIPT, encoding="utf-8", newline="\n")
     hardening_script_host.chmod(0o700)
-
-    package_script_host = work_root / "install-client-packages.sh"
-    package_script_host.write_text(
-        client_package_install_script(),
-        encoding="utf-8",
-        newline="\n",
-    )
-    package_script_host.chmod(0o700)
 
     timezone_script_host = work_root / "overdrive-ip-timezone"
     timezone_script_host.write_text(CLIENT_IP_TIMEZONE_SCRIPT, encoding="utf-8", newline="\n")
@@ -172,8 +158,6 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
         detections_payload_host,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
-    setup_venv_host = work_root / "install.py"
-    shutil.copy2(Path(REPO_ROOT) / "install.py", setup_venv_host)
     browser_fonts = stage_client_browser_fonts(work_root)
     browser_audio = stage_client_browser_audio(work_root)
     browser_webgl = stage_client_browser_webgl(work_root)
@@ -186,7 +170,6 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
         client_firewall_host=client_firewall_host,
         client_firewall_service_host=client_firewall_service_host,
         hardening_script_host=hardening_script_host,
-        package_script_host=package_script_host,
         timezone_script_host=timezone_script_host,
         timezone_service_host=timezone_service_host,
         launch_identity_host=launch_identity_host,
@@ -194,7 +177,6 @@ def prepare_client_prime_assets(work_root: Path) -> ClientPrimeAssets:
         root_password_file=root_password_file,
         local_host_payload_host=local_host_payload_host,
         detections_payload_host=detections_payload_host,
-        setup_venv_host=setup_venv_host,
         browser_fonts=browser_fonts,
         browser_audio=browser_audio,
         browser_webgl=browser_webgl,
@@ -249,7 +231,7 @@ def prime_client_identity_and_base_packages(
     *,
     skip_prime: bool,
 ) -> None:
-    """Set guest identity/password; OS packages are installed by install.py."""
+    """Set guest identity/password on the prebuilt Kali QEMU image."""
     run_client_virt_customize(
         disk_path,
         [
@@ -295,8 +277,6 @@ def copy_client_payloads_and_service_assets(
         f"{assets.local_host_payload_host}:/root",
         "--copy-in",
         f"{assets.detections_payload_host}:/root",
-        "--copy-in",
-        f"{assets.setup_venv_host}:/root",
     ]
     customize_args.extend(virt_customize_browser_font_args(assets.browser_fonts))
     customize_args.extend(virt_customize_browser_audio_args(assets.browser_audio))
@@ -307,40 +287,6 @@ def copy_client_payloads_and_service_assets(
         customize_args,
         skip_prime=skip_prime,
     )
-
-
-def install_client_detection_libraries(
-    disk_path: str,
-    assets: ClientPrimeAssets,
-    *,
-    skip_prime: bool,
-) -> None:
-    """Run repo install.py inside the guest; installs Kali tools + detection libraries."""
-    if not skip_prime:
-        print(
-            "[overdrive] Installing Kali tools via virt-customize "
-            "(kali-linux-default + Chromium/Python). "
-            "Usually 20-60 minutes; timeout 2 hours — please wait…",
-            flush=True,
-        )
-    customize_args = [
-        "--run-command",
-        INSTALL_DETECTION_LIBRARIES_COMMAND,
-        "--run-command",
-        REMOVE_CLIENT_INSTALL_PY_COMMAND,
-        "--run-command",
-        "fc-cache -f 2>/dev/null || true",
-    ]
-    customize_args.extend(virt_customize_browser_cookie_args(assets.browser_cookies))
-    customize_args.extend(virt_customize_browser_audio_args(assets.browser_audio))
-    run_client_virt_customize(
-        disk_path,
-        customize_args,
-        skip_prime=skip_prime,
-        network=True,
-    )
-    if not skip_prime:
-        print("[overdrive] Kali tools / detection-library install finished.", flush=True)
 
 
 def configure_client_guest_services_and_boot(
@@ -387,11 +333,10 @@ def prime_client_disk_for_lab(
     skip_prime: bool,
 ) -> bool:
     """Compatibility wrapper for older callers; setup_clientk_vm uses discrete steps."""
-    print("Injecting custom configuration and packages into Kali image...")
+    print("Injecting Overdrive lab configuration into Kali image...")
     assets = prepare_client_prime_assets(work_root)
     prime_client_identity_and_base_packages(disk_path, assets, skip_prime=skip_prime)
     copy_client_payloads_and_service_assets(disk_path, assets, skip_prime=skip_prime)
-    install_client_detection_libraries(disk_path, assets, skip_prime=skip_prime)
     configure_client_guest_services_and_boot(disk_path, skip_prime=skip_prime)
     harden_and_clean_client_guest_image(disk_path, assets, skip_prime=skip_prime)
     return True

@@ -1,4 +1,4 @@
-"""Download Kali cloud images and grow the client disk with libguestfs."""
+"""Download Kali QEMU images and grow the client disk with libguestfs."""
 
 from __future__ import annotations
 
@@ -140,7 +140,7 @@ def download_kali_image(url: str, dest_path: str) -> None:
         print(f"Kali base archive already exists at {dest}")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading Kali cloud image archive to {dest}...")
+    print(f"Downloading Kali base image archive to {dest}...")
     with urllib.request.urlopen(url) as response:
         if response.status != 200:
             raise RuntimeError(f"Download failed with HTTP {response.status}")
@@ -149,95 +149,168 @@ def download_kali_image(url: str, dest_path: str) -> None:
     print("Download complete.")
 
 
+_DISK_IMAGE_SUFFIXES = (".qcow2", ".raw", ".img", ".vmdk")
+
+
+def _disk_suffix_priority(name: str) -> int:
+    suffix = Path(name).suffix.lower()
+    try:
+        return _DISK_IMAGE_SUFFIXES.index(suffix)
+    except ValueError:
+        return len(_DISK_IMAGE_SUFFIXES)
+
+
+def _is_disk_image_name(name: str) -> bool:
+    return Path(name).suffix.lower() in _DISK_IMAGE_SUFFIXES
+
+
 def _kali_disk_member_name(members: list[tarfile.TarInfo]) -> str | None:
-    """Return the cloud disk member inside a Kali tar.xz (.qcow2 preferred, else .raw)."""
-    raw_member: str | None = None
-    for member in members:
-        name = member.name
-        if not member.isfile():
-            continue
-        if name.endswith(".qcow2"):
-            return name
-        if name.endswith(".raw") and raw_member is None:
-            raw_member = name
-    return raw_member
+    """Return the disk member inside a Kali tar archive (.qcow2 preferred)."""
+    candidates = [m.name for m in members if m.isfile() and _is_disk_image_name(m.name)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda n: (_disk_suffix_priority(n), Path(n).name.lower()))
+    return candidates[0]
 
 
 def _dest_for_kali_member(dest_qcow2: str, member_name: str) -> Path:
     dest = Path(dest_qcow2)
-    if member_name.endswith(".raw"):
-        return dest.with_suffix(".raw")
+    suffix = Path(member_name).suffix.lower()
+    if suffix and suffix != dest.suffix.lower():
+        return dest.with_suffix(suffix)
     return dest
 
 
-def ensure_kali_disk_image(tar_path: str, dest_qcow2: str) -> str:
-    """Extract the cloud disk from a Kali tar.xz (.qcow2 or .raw) if needed."""
+def _existing_cached_disk(dest_qcow2: str) -> Path | None:
     dest_q = Path(dest_qcow2)
-    dest_raw = dest_q.with_suffix(".raw")
-    if dest_q.exists():
-        _agent_debug_log(
-            hypothesis_id="H1",
-            location="image_tools.py:ensure_kali_disk_image",
-            message="disk already present",
-            data={"path": str(dest_q), "format": "qcow2"},
-        )
-        print(f"Kali base disk image already exists at {dest_q}")
-        return str(dest_q)
-    if dest_raw.exists():
-        _agent_debug_log(
-            hypothesis_id="H1",
-            location="image_tools.py:ensure_kali_disk_image",
-            message="disk already present",
-            data={"path": str(dest_raw), "format": "raw"},
-        )
-        print(f"Kali base disk image already exists at {dest_raw}")
-        return str(dest_raw)
+    for suffix in _DISK_IMAGE_SUFFIXES:
+        candidate = dest_q.with_suffix(suffix)
+        if candidate.exists():
+            return candidate
+    return None
 
-    tar = Path(tar_path)
-    if not tar.is_file():
-        raise RuntimeError(f"Kali archive not found: {tar_path}")
 
-    print(f"Extracting Kali disk image from {tar}...")
-    dest_q.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(tar, mode="r:xz") as tf:
+def _find_extracted_disk(root: Path) -> Path | None:
+    candidates = [p for p in root.rglob("*") if p.is_file() and _is_disk_image_name(p.name)]
+    if not candidates:
+        return None
+
+    def sort_key(path: Path) -> tuple[int, int, int, str]:
+        name = path.name.lower()
+        name_bonus = 0 if ("kali" in name or "qemu" in name) else 1
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        return (_disk_suffix_priority(path.name), name_bonus, -size, name)
+
+    candidates.sort(key=sort_key)
+    return candidates[0]
+
+
+def _cache_extracted_disk(source: Path, dest_qcow2: str) -> Path:
+    dest = _dest_for_kali_member(dest_qcow2, source.name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() == dest.resolve():
+        return dest
+    if dest.exists():
+        dest.unlink()
+    shutil.move(str(source), str(dest))
+    return dest
+
+
+def _extract_kali_tar_disk(archive: Path, dest_qcow2: str) -> Path:
+    with tarfile.open(archive, mode="r:*") as tf:
         members = tf.getmembers()
         member_names = [m.name for m in members if m.isfile()]
         member_name = _kali_disk_member_name(members)
         _agent_debug_log(
             hypothesis_id="H1",
-            location="image_tools.py:ensure_kali_disk_image",
+            location="image_tools.py:_extract_kali_tar_disk",
             message="tar members inspected",
             data={
-                "tar_path": str(tar),
-                "tar_size": tar.stat().st_size,
+                "archive_path": str(archive),
+                "archive_size": archive.stat().st_size,
                 "file_members": member_names,
                 "selected_member": member_name,
             },
         )
         if not member_name:
             raise RuntimeError(
-                f"No .qcow2 or .raw disk member found inside {tar_path}. "
+                f"No disk image member found inside {archive}. "
                 f"Archive file members: {member_names or '(none)'}"
             )
         dest = _dest_for_kali_member(dest_qcow2, member_name)
         extracted = tf.extractfile(member_name)
         if extracted is None:
-            raise RuntimeError(f"Could not read disk member {member_name!r} from {tar_path}")
+            raise RuntimeError(f"Could not read disk member {member_name!r} from {archive}")
         with open(dest, "wb") as out_file:
             shutil.copyfileobj(extracted, out_file)
+        return dest
+
+
+def _extract_kali_7z_disk(archive: Path, dest_qcow2: str) -> Path:
+    seven_zip = shutil.which("7z")
+    if not seven_zip:
+        raise RuntimeError(
+            "7z is required to extract Kali's prebuilt QEMU archive.\n"
+            "Run python3 install.py on the host, or install p7zip-full/7zip."
+        )
+
+    extract_root = archive.with_suffix("")
+    disk = _find_extracted_disk(extract_root) if extract_root.exists() else None
+    if disk is None:
+        if extract_root.exists():
+            shutil.rmtree(extract_root)
+        extract_root.mkdir(parents=True, exist_ok=True)
+        command = [seven_zip, "x", "-y", f"-o{extract_root}", str(archive)]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = ((result.stderr or "") + (result.stdout or "")).strip()
+            raise RuntimeError(f"7z extraction failed for {archive} (exit {result.returncode}).\n{detail[-4000:]}")
+        disk = _find_extracted_disk(extract_root)
+
+    if disk is None:
+        raise RuntimeError(f"No disk image (.qcow2/.raw/.img/.vmdk) found after extracting {archive}.")
+    return _cache_extracted_disk(disk, dest_qcow2)
+
+
+def ensure_kali_disk_image(archive_path: str, dest_qcow2: str) -> str:
+    """Extract/cache the disk from Kali's base archive if needed."""
+    existing = _existing_cached_disk(dest_qcow2)
+    if existing is not None:
+        _agent_debug_log(
+            hypothesis_id="H1",
+            location="image_tools.py:ensure_kali_disk_image",
+            message="disk already present",
+            data={"path": str(existing), "format": existing.suffix.lstrip(".")},
+        )
+        print(f"Kali base disk image already exists at {existing}")
+        return str(existing)
+
+    archive = Path(archive_path)
+    if not archive.is_file():
+        raise RuntimeError(f"Kali archive not found: {archive_path}")
+
+    print(f"Extracting Kali disk image from {archive}...")
+    Path(dest_qcow2).parent.mkdir(parents=True, exist_ok=True)
+    if archive.name.endswith(".7z"):
+        dest = _extract_kali_7z_disk(archive, dest_qcow2)
+    else:
+        dest = _extract_kali_tar_disk(archive, dest_qcow2)
     _agent_debug_log(
         hypothesis_id="H1",
         location="image_tools.py:ensure_kali_disk_image",
         message="disk extracted",
-        data={"member": member_name, "dest": str(dest), "dest_size": dest.stat().st_size},
+        data={"archive": str(archive), "dest": str(dest), "dest_size": dest.stat().st_size},
     )
     print(f"Extracted Kali disk image to {dest}")
     return str(dest)
 
 
-def ensure_kali_qcow2(tar_path: str, dest_qcow2: str) -> str:
-    """Back-compat alias; Kali 2026.2+ cloud images ship ``disk.raw`` inside the tar.xz."""
-    return ensure_kali_disk_image(tar_path, dest_qcow2)
+def ensure_kali_qcow2(archive_path: str, dest_qcow2: str) -> str:
+    """Back-compat alias; Kali source archives may contain qcow2 or raw disks."""
+    return ensure_kali_disk_image(archive_path, dest_qcow2)
 
 
 def require_disk_prime_tools(*, skip_prime: bool) -> str:

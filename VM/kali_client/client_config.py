@@ -19,6 +19,7 @@ __all__ = [
     "CLIENT_VM_CPUS",
     "CREATE_SCRIPT_NAME",
     "KALI_CLIENT_DIR",
+    "KALI_ARCHIVE_NAME",
     "KALI_IMAGE_NAME",
     "KALI_SERIAL_TCP_PORT",
     "KALI_TAR_NAME",
@@ -37,13 +38,16 @@ VM_NAME = TEST_CLIENTK_VM_NAME
 CLIENT_QCOW_NAME = "client_browser_kali.qcow2"
 CLIENT_VM_CPUS = 2
 CLIENT_GUEST_HOSTNAME = "clientk"
-# Room for kali-linux-default (wireshark/metasploit/top10 + deps) on the cloud image.
+# Room to customize and grow Kali's official prebuilt QEMU image.
 CLIENT_DISK_SIZE_MIB = 40960
 CLIENT_MEMORY_MIB = 4096
 CLIENT_ROOT_DEVICE = "/dev/sda1"
 
 KALI_SERIAL_TCP_PORT = CLIENTK_SERIAL_TCP_PORT
 
-KALI_TAR_NAME = "kali-linux-2026.2-cloud-genericcloud-amd64.tar.xz"
-KALI_IMAGE_NAME = "kali-linux-2026.2-cloud-genericcloud-amd64.qcow2"
-KALI_URL = "https://kali.download/cloud-images/current/kali-linux-2026.2-cloud-genericcloud-amd64.tar.xz"
+KALI_ARCHIVE_NAME = "kali-linux-2026.2-qemu-amd64.7z"
+KALI_IMAGE_NAME = "kali-linux-2026.2-qemu-amd64.qcow2"
+KALI_URL = "https://cdimage.kali.org/current/kali-linux-2026.2-qemu-amd64.7z"
+
+# Back-compat alias for older imports; the source is now Kali's prebuilt QEMU archive.
+KALI_TAR_NAME = KALI_ARCHIVE_NAME

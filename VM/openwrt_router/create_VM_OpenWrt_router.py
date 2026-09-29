@@ -1550,6 +1550,11 @@ def main() -> None:
         action="store_true",
         help="Start the Metasploitable 2 target VM on the lab LAN (not hardened).",
     )
+    parser.add_argument(
+        "--rebuild-target-disk",
+        action="store_true",
+        help="Force rebuilding the Metasploitable target disk instead of reusing a verified qcow2.",
+    )
     args = parser.parse_args()
     if args.serial_here:
         serial_only_attach(here=True, force_interactive=True)
@@ -1626,6 +1631,7 @@ def main() -> None:
                     start_vm=args.start_type != "none",
                     connect_serial=args.start_type != "none" and not args.no_connect_serial,
                     start_type=args.start_type,
+                    rebuild_disk=args.rebuild_target_disk,
                 )
                 if args.start_type == "none":
                     print("[+] Target VM configured. Skipped start because --start-type none was selected.")

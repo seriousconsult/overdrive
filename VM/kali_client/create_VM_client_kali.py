@@ -69,9 +69,9 @@ from VM.kali_client.client_config import (
     CLIENT_DISK_SIZE_MIB,
     CLIENT_MEMORY_MIB,
     CLIENT_VM_CPUS,
+    KALI_ARCHIVE_NAME,
     KALI_IMAGE_NAME,
     KALI_SERIAL_TCP_PORT,
-    KALI_TAR_NAME,
     KALI_URL,
     LAN_INTNET_NAME,
     VM_NAME,
@@ -81,7 +81,6 @@ from VM.kali_client.guest_prime import (
     configure_client_guest_services_and_boot,
     copy_client_payloads_and_service_assets,
     harden_and_clean_client_guest_image,
-    install_client_detection_libraries,
     prepare_client_prime_assets,
     prime_client_identity_and_base_packages,
 )
@@ -106,13 +105,12 @@ CLIENT_PIPELINE_ORDER = (
     "cleanup.existing-vm",
     "workspace.prepare",
     "image.download-base",
-    "image.extract-qcow2",
+    "image.extract-disk",
     "disk.convert-qcow2",
     "disk.expand",
     "guest-assets.prepare",
-    "guest.base-packages",
+    "guest.identity",
     "guest.payloads",
-    "guest.detection-libs",
     "guest.services-boot",
     "guest.hardening",
     "qemu.prepare",
@@ -135,12 +133,12 @@ def setup_client_vm(
     )
     ensure_kvm_accessible()
     qemu, _qemu_img = require_qemu_tools()
-    paths = get_system_paths(VM_NAME, KALI_TAR_NAME)
+    paths = get_system_paths(VM_NAME, KALI_ARCHIVE_NAME)
 
     vm_base = str(paths["vm_base"])
     vms_root = str(paths["vms_root"])
     download_dir = str(paths["downloads"])
-    tar_path = str(paths["img_path"])
+    archive_path = str(paths["img_path"])
     qcow2_download = os.path.join(download_dir, KALI_IMAGE_NAME)
     disk_image_path = qcow2_download
     qcow_path = os.path.join(vm_base, CLIENT_QCOW_NAME)
@@ -162,11 +160,11 @@ def setup_client_vm(
         os.makedirs(download_dir, exist_ok=True)
 
     def download_base_image() -> None:
-        download_kali_image(KALI_URL, tar_path)
+        download_kali_image(KALI_URL, archive_path)
 
-    def extract_base_qcow2() -> None:
+    def extract_base_disk() -> None:
         nonlocal disk_image_path
-        disk_image_path = ensure_kali_qcow2(tar_path, qcow2_download)
+        disk_image_path = ensure_kali_qcow2(archive_path, qcow2_download)
 
     def convert_base_image() -> None:
         if os.path.exists(qcow_path):
@@ -189,7 +187,7 @@ def setup_client_vm(
         nonlocal prime_assets
         prime_assets = prepare_client_prime_assets(Path(download_dir))
 
-    def install_guest_identity_and_base_packages() -> None:
+    def apply_guest_identity() -> None:
         prime_client_identity_and_base_packages(
             qcow_path,
             require_prime_assets(),
@@ -198,13 +196,6 @@ def setup_client_vm(
 
     def copy_guest_payloads_and_service_assets() -> None:
         copy_client_payloads_and_service_assets(
-            qcow_path,
-            require_prime_assets(),
-            skip_prime=options.skip_disk_prime,
-        )
-
-    def install_guest_detection_libraries() -> None:
-        install_client_detection_libraries(
             qcow_path,
             require_prime_assets(),
             skip_prime=options.skip_disk_prime,
@@ -267,8 +258,8 @@ def setup_client_vm(
     steps = [
         BuildStep("cleanup.existing-vm", "remove previous VM and disk", remove_previous_vm),
         BuildStep("workspace.prepare", "prepare workspace", ensure_workspace),
-        BuildStep("image.download-base", "download Kali cloud image archive", download_base_image),
-        BuildStep("image.extract-qcow2", "extract Kali disk image from archive", extract_base_qcow2),
+        BuildStep("image.download-base", "download Kali prebuilt QEMU archive", download_base_image),
+        BuildStep("image.extract-disk", "extract Kali disk image from QEMU archive", extract_base_disk),
         BuildStep("disk.convert-qcow2", "convert image to qcow2", convert_base_image),
         BuildStep("disk.expand", "expand clientk disk", expand_disk),
         BuildStep(
@@ -277,39 +268,28 @@ def setup_client_vm(
             prepare_guest_prime_assets,
         ),
         BuildStep(
-            "guest.base-packages",
-            "set guest identity and install base packages",
-            install_guest_identity_and_base_packages,
-            description="Image customization: hostname, root password, and bootstrap apt packages only.",
+            "guest.identity",
+            "set guest identity",
+            apply_guest_identity,
+            description="Image customization: hostname, root password, and launch identity only.",
         ),
         BuildStep(
             "guest.payloads",
             "copy repo payloads and service assets",
             copy_guest_payloads_and_service_assets,
-            description="Image customization: stages /root/detections, /root/local_host, systemd units, browser assets, and temporary /root/install.py.",
-        ),
-        BuildStep(
-            "guest.detection-libs",
-            "install Kali tools + detection libraries",
-            install_guest_detection_libraries,
-            description=(
-                "Runs install.py inside the guest image: kali-linux-default "
-                "(wireshark, metasploit, top10, …), Chromium, and Python deps. "
-                "Usually 20-60 minutes; timeout 2 hours. The progress line may look idle "
-                "while virt-customize runs."
-            ),
+            description="Image customization: stages /root/detections, /root/local_host, systemd units, and browser assets.",
         ),
         BuildStep(
             "guest.services-boot",
             "configure guest services and unattended boot",
             configure_guest_services_and_boot,
-            description="Image customization: enables systemd units, grub serial console, and disables cloud-init/NetworkManager.",
+            description="Image customization: enables systemd units, grub serial console, and disables cloud-init/NetworkManager without apt installs.",
         ),
         BuildStep(
             "guest.hardening",
             "apply final guest hardening and cleanup",
             harden_guest_image,
-            description="Image customization: purges SSH/cloud-init artifacts and build-only files after dependencies are installed.",
+            description="Image customization: purges SSH/cloud-init artifacts and build-only files.",
         ),
         BuildStep(
             "qemu.prepare",

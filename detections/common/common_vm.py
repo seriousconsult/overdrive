@@ -315,11 +315,11 @@ def get_half_cpus() -> int:
     total = os.cpu_count() or 2
     return max(1, total // 2)
 
-def remove_lab_vms(*, dry_run: bool = False) -> None:
+def remove_lab_vms(*, dry_run: bool = False, preserve_target_disk: bool = False) -> None:
     """Stop and delete all known Overdrive lab QEMU VMs before a fresh rebuild."""
     from detections.common.common_qemu import remove_lab_vms_qemu
 
-    remove_lab_vms_qemu(dry_run=dry_run)
+    remove_lab_vms_qemu(dry_run=dry_run, preserve_target_disk=preserve_target_disk)
 
 
 
@@ -518,4 +518,3 @@ def probe_tcp_serial(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool
         except OSError as exc:
             last_error = exc
     return False, str(last_error) if last_error else "no host candidates"
-

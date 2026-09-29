@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -71,13 +72,84 @@ def ensure_metasploitable_qcow2(
 ) -> None:
     """Download + extract + convert Metasploitable 2 into ``qcow_path`` if needed."""
     require_qemu_tools()
-    if os.path.isfile(qcow_path) and os.path.getsize(qcow_path) > 100_000_000:
-        print(f"[overdrive] Target qcow2 already present: {qcow_path}")
-        return
 
     zip_path = os.path.join(download_dir, METASPLOITABLE_ZIP_NAME)
     extract_dir = os.path.join(download_dir, "metasploitable2")
     download_metasploitable_zip(url, zip_path)
     vmdk = extract_metasploitable_vmdk(zip_path, extract_dir)
+    marker = Path(qcow_path).with_name(f"{Path(qcow_path).name}.verified")
+    source_signature = _source_signature(vmdk)
+    if os.path.isfile(qcow_path) and os.path.getsize(qcow_path) > 100_000_000:
+        if _marker_matches_source(marker, source_signature) and _qcow_basic_check(qcow_path):
+            _write_verified_marker(marker, source_signature)
+            print(f"[overdrive] Target qcow2 already present: {qcow_path}")
+            return
+        print("[overdrive] Verifying existing target qcow2 against Metasploitable VMDK...")
+        if _qcow_matches_vmdk(vmdk, qcow_path):
+            _write_verified_marker(marker, source_signature)
+            print(f"[overdrive] Target qcow2 already present: {qcow_path}")
+            return
+        print(f"[overdrive] Existing target qcow2 is incomplete or stale; rebuilding: {qcow_path}")
+        try:
+            os.remove(qcow_path)
+        except FileNotFoundError:
+            pass
+
     Path(qcow_path).parent.mkdir(parents=True, exist_ok=True)
     convert_disk_to_qcow2(vmdk, qcow_path)
+    _write_verified_marker(marker, source_signature)
+
+
+def _source_signature(vmdk_path: str) -> str:
+    path = Path(vmdk_path)
+    stat = path.stat()
+    return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _marker_matches_source(marker: Path, source_signature: str) -> bool:
+    try:
+        marker_text = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    if marker_text == "ok":
+        return True
+    return marker_text == f"source={source_signature}"
+
+
+def _write_verified_marker(marker: Path, source_signature: str) -> None:
+    marker.write_text(f"source={source_signature}\n", encoding="utf-8")
+
+
+def _qcow_basic_check(qcow_path: str) -> bool:
+    _, qemu_img = require_qemu_tools()
+    result = subprocess.run(
+        [qemu_img, "check", qcow_path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    detail = ((result.stderr or "") + (result.stdout or "")).strip()
+    if detail:
+        print(f"[overdrive] qemu-img check: {detail}")
+    return False
+
+
+def _qcow_matches_vmdk(vmdk_path: str, qcow_path: str) -> bool:
+    _, qemu_img = require_qemu_tools()
+    result = subprocess.run(
+        [qemu_img, "compare", "-f", "vmdk", "-F", "qcow2", vmdk_path, qcow_path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        detail = ((result.stderr or "") + (result.stdout or "")).strip()
+        if detail:
+            print(f"[overdrive] qemu-img compare: {detail}")
+        return False
+    detail = ((result.stderr or "") + (result.stdout or "")).strip()
+    raise RuntimeError(f"Could not verify target qcow2 with qemu-img compare: {detail}")
