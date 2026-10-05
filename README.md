@@ -117,14 +117,16 @@ You also need `/dev/kvm` and permission to create the `test-lan` bridge / taps (
 
 ## Lab VMs
 
+See [the live VM network and SP 800-53 review map](docs/vm-network.md) for host/VM boundaries, bridge and taps, serial consoles, DNS/DHCP, ports, and evidence gaps.
+
 The lab runs four QEMU guests on Linux bridge `test-lan`:
 
 | VM | Role | Serial TCP | Tap |
 |---|---|---|---|
-| `Test_Router` | OpenWrt (LAN DHCP/DNS + Mullvad DoT; WAN = QEMU user/SLIRP) | `127.0.0.1:2324` | `tap-router-lan` |
-| `Test_Clienta` | Alpine browser client | `127.0.0.1:2325` | `tap-clienta` |
-| `Test_Clientk` | Kali client (official prebuilt QEMU image) | `127.0.0.1:2326` | `tap-clientk` |
-| `target` | Metasploitable 2 (intentionally vulnerable, **not** hardened) | `127.0.0.1:2327` | `tap-target` |
+| `Test_Router` | OpenWrt (LAN DHCP/DNS + Mullvad DoT; WAN = QEMU user/SLIRP) | `IPv4-1:2324` | `tap-router-lan` |
+| `Test_Clienta` | Alpine browser client | `IPv4-1:2325` | `tap-clienta` |
+| `Test_Clientk` | Kali client (official prebuilt QEMU image) | `IPv4-1:2326` | `tap-clientk` |
+| `target` | Metasploitable 2 (intentionally vulnerable, **not** hardened) | `IPv4-1:2327` | `tap-target` |
 
 Disks live under `VM/lab_vms/<VM_NAME>/`. Secrets (root passwords) are in `VM/.env` (gitignored).
 
@@ -137,9 +139,9 @@ bottom: host (wider) | Alpine :2325 | target :2327 | router :2324
 ```
 
 - **WAN checks:** run from the host or the router WAN segment; target the router WAN IP.
-- **LAN checks:** run from a client VM on `test-lan`; target the router LAN IP, usually `192.168.50.1`.
+- **LAN checks:** run from a client VM on `test-lan`; target the router LAN IP, usually `IPv4-2`.
 - The WSL/Linux host is on the `test-lan` bridge but usually has no IP there; LAN checks run from client VMs.
-- DNS path: client → OpenWrt dnsmasq (`192.168.50.1`) → stubby → Mullvad DoT (`dns.mullvad.net`).
+- DNS path: client → OpenWrt dnsmasq (`IPv4-2`) → stubby → Mullvad DoT (`dns.mullvad.net`).
 - The batch runner may probe your current default gateway, not the OpenWrt VM. Use explicit `--ip` values for lab router modules.
 - `Test_Clienta` uses hostname `clienta`, a fresh Dell NIC MAC, tame DHCP client identity, cleared `machine-id`, and a generic timezone User-Agent at build time. Rebuild after changing those settings.
 - `Test_Clientk` starts from Kali's official prebuilt QEMU `.7z` image, then disk prime only adds Overdrive identity, payloads, services, serial boot, and hardening. Rebuild it after changing those VM assets.

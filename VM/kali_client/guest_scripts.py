@@ -48,11 +48,18 @@ for path in /sys/class/net/*; do
     pin_dns
     continue
   fi
-  # ISC dhclient (isc-dhcp-client) has no -H hostname flag; hostname comes from
-  # /etc/hostname / dhclient.conf. Retry while OpenWrt dnsmasq is still starting.
+  # Use whichever DHCP client the image provides. Kali's prebuilt image can
+  # include dhcpcd without isc-dhcp-client.
   for attempt in 1 2 3 4 5 6 7 8; do
-    if dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-        "$IFACE"; then
+    leased=0
+    if command -v dhclient >/dev/null 2>&1; then
+      dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \
+        "$IFACE" && leased=1
+    fi
+    if [ "$leased" -eq 0 ] && command -v dhcpcd >/dev/null 2>&1; then
+      dhcpcd -4 -w "$IFACE" && leased=1
+    fi
+    if [ "$leased" -eq 1 ] && ip -4 -o addr show dev "$IFACE" | grep -q ' inet '; then
       ok=1
       pin_dns
       break
@@ -113,15 +120,23 @@ for IFACE in /sys/class/net/*; do
   IFACE=$(basename "$IFACE")
   [ "$IFACE" = lo ] && continue
   [ ! -e "/sys/class/net/$IFACE/device" ] && continue
-  echo "--- link up + dhclient $IFACE ---"
+  echo "--- link up + DHCP $IFACE ---"
   if [ "$(id -u)" -eq 0 ]; then
     ip link set "$IFACE" up 2>&1 || true
-    dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-      "$IFACE" 2>&1 || true
+    if command -v dhclient >/dev/null 2>&1; then
+      dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \
+        "$IFACE" 2>&1 || true
+    elif command -v dhcpcd >/dev/null 2>&1; then
+      dhcpcd -4 -w "$IFACE" 2>&1 || true
+    fi
   else
     sudo ip link set "$IFACE" up 2>&1 || true
-    sudo dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \\
-      "$IFACE" 2>&1 || true
+    if command -v dhclient >/dev/null 2>&1; then
+      sudo dhclient -1 -v -pf "/run/dhclient-$IFACE.pid" -lf "/var/lib/dhcp/dhclient-$IFACE.leases" \
+        "$IFACE" 2>&1 || true
+    elif command -v dhcpcd >/dev/null 2>&1; then
+      sudo dhcpcd -4 -w "$IFACE" 2>&1 || true
+    fi
   fi
 done
 if [ -L /etc/resolv.conf ] || [ ! -e /etc/resolv.conf ]; then

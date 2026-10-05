@@ -19,6 +19,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,34 +75,70 @@ _ENABLE_SERIAL_COMMAND = r"""
 set -e
 # GRUB legacy (Metasploitable 2 / Ubuntu 8.04)
 if [ -f /boot/grub/menu.lst ]; then
-  if ! grep -q 'console=ttyS0' /boot/grub/menu.lst; then
-    sed -i 's|\(root=/dev/sda1\)|\1 console=tty0 console=ttyS0,115200n8|' /boot/grub/menu.lst || true
-  fi
+  # The stock image uses root=/dev/mapper/metasploitable-root, not /dev/sda1.
+  # Update the active kernel stanzas and the kopt template used by update-grub.
+  sed -i '/^[[:space:]]*kernel[[:space:]]*\/vmlinuz/ { /console=ttyS0/! s/$/ console=tty0 console=ttyS0,115200n8/; }' /boot/grub/menu.lst
+  sed -i '/^# kopt=/ { /console=ttyS0/! s/$/ console=tty0 console=ttyS0,115200n8/; }' /boot/grub/menu.lst
 fi
 # Upstart getty on ttyS0
 mkdir -p /etc/event.d
-if [ ! -f /etc/event.d/ttyS0 ]; then
-  cat > /etc/event.d/ttyS0 <<'EOF'
-start on runlevel 2
-start on runlevel 3
+cat > /etc/event.d/ttyS0 <<'EOF'
+# Match the stock tty1 Upstart trigger in Ubuntu 8.04.
+start on stopped rc2
+start on stopped rc3
+start on stopped rc4
+start on stopped rc5
 stop on runlevel 0
 stop on runlevel 1
-stop on runlevel 4
-stop on runlevel 5
 stop on runlevel 6
 respawn
 exec /sbin/getty 115200 ttyS0
 EOF
-fi
 """
+
+
+def _enable_serial_with_nbd(qcow_path: str) -> None:
+    """Edit the stopped guest when libguestfs cannot boot on this host."""
+    if not shutil.which("qemu-nbd") or not shutil.which("sudo"):
+        raise RuntimeError("qemu-nbd and passwordless sudo are needed for serial setup")
+
+    def run(*args: str) -> None:
+        result = subprocess.run(
+            ["sudo", "-n", *args], capture_output=True, text=True, check=False
+        )
+        if result.returncode:
+            detail = ((result.stderr or "") + (result.stdout or "")).strip()
+            raise RuntimeError(f"{' '.join(args)} failed: {detail}")
+
+    run("modprobe", "nbd", "max_part=8")
+    nbd = next(
+        (
+            f"/dev/nbd{i}"
+            for i in range(16)
+            if Path(f"/dev/nbd{i}").exists()
+            and not Path(f"/sys/block/nbd{i}/pid").exists()
+        ),
+        None,
+    )
+    if nbd is None:
+        raise RuntimeError("No free NBD device for target serial setup")
+
+    with tempfile.TemporaryDirectory(prefix="overdrive-target-") as mount_dir:
+        with ExitStack() as cleanup:
+            run("qemu-nbd", "--connect", nbd, "--format=qcow2", qcow_path)
+            cleanup.callback(run, "qemu-nbd", "--disconnect", nbd)
+            run("vgchange", "-ay", "metasploitable")
+            cleanup.callback(run, "vgchange", "-an", "metasploitable")
+            run("mount", "/dev/metasploitable/root", mount_dir)
+            cleanup.callback(run, "umount", mount_dir)
+            run("mount", f"{nbd}p1", f"{mount_dir}/boot")
+            cleanup.callback(run, "umount", f"{mount_dir}/boot")
+            run("chroot", mount_dir, "/bin/sh", "-c", _ENABLE_SERIAL_COMMAND)
 
 
 def _enable_serial_console(qcow_path: str) -> None:
     """Best-effort serial getty so tmux can attach. Not hardening."""
     vc = shutil.which("virt-customize")
-    if not vc:
-        print("[overdrive] virt-customize not found; skipping serial enable (GUI login still works).")
-        return
     marker = Path(qcow_path).with_suffix(".serial-enabled")
     if marker.is_file():
         print("[overdrive] Serial console already enabled on target image.")
@@ -109,21 +147,20 @@ def _enable_serial_console(qcow_path: str) -> None:
         "[overdrive] Enabling ttyS0 getty on Metasploitable (serial attach only — "
         "image stays unhardened)..."
     )
-    env = os.environ.copy()
-    env.setdefault("LIBGUESTFS_BACKEND", "direct")
-    result = subprocess.run(
-        [vc, "-a", qcow_path, "--run-command", _ENABLE_SERIAL_COMMAND],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if result.returncode != 0:
-        detail = ((result.stderr or "") + (result.stdout or "")).strip()[-1500:]
-        print(
-            "[!] Could not enable serial console inside Metasploitable image "
-            f"(continuing; use GTK or fix later):\n{detail}"
+    if vc:
+        env = os.environ.copy()
+        env.setdefault("LIBGUESTFS_BACKEND", "direct")
+        result = subprocess.run(
+            [vc, "-a", qcow_path, "--run-command", _ENABLE_SERIAL_COMMAND],
+            capture_output=True,
+            text=True,
+            env=env,
         )
-        return
+        if result.returncode != 0:
+            print("[overdrive] virt-customize unavailable for this image; using NBD.")
+            _enable_serial_with_nbd(qcow_path)
+    else:
+        _enable_serial_with_nbd(qcow_path)
     marker.write_text("ok\n", encoding="utf-8")
     print("[overdrive] Serial console enabled for target.")
 
